@@ -480,6 +480,7 @@ button.ghost:hover {
   font-size: 18px;
   line-height: 1.95;
   user-select: none;
+  cursor: text;
 }
 
 .token {
@@ -489,7 +490,7 @@ button.ghost:hover {
   border: 0;
   border-radius: 5px;
   background: transparent;
-  cursor: pointer;
+  cursor: text;
   font-size: inherit;
   line-height: inherit;
   transition: background 0.1s;

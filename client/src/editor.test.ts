@@ -29,6 +29,46 @@ describe('selection', () => {
   });
 });
 
+describe('move', () => {
+  const move = (state: EditorState, delta: -1 | 1, extend = false, skipCut = false) =>
+    editorReducer(state, { type: 'move', delta, extend, skipCut });
+
+  it('steps a single-word selection left and right, clamped to the words', () => {
+    expect(selectedRange(move(select(loaded, 1), 1).selection)).toEqual([2, 2]);
+    expect(selectedRange(move(select(loaded, 1), -1).selection)).toEqual([0, 0]);
+    const first = select(loaded, 0);
+    const last = select(loaded, 3);
+    expect(move(first, -1)).toBe(first);
+    expect(move(last, 1)).toBe(last);
+  });
+
+  it('collapses a run to the edge it moves from', () => {
+    expect(selectedRange(move(select(loaded, 1, 2), 1).selection)).toEqual([3, 3]);
+    expect(selectedRange(move(select(loaded, 2, 1), -1).selection)).toEqual([0, 0]);
+  });
+
+  it('extends from the focus with shift, keeping the anchor', () => {
+    const extended = move(select(loaded, 1), 1, true);
+    expect(extended.selection).toEqual({ anchor: 1, focus: 2 });
+    expect(selectedRange(move(extended, -1, true).selection)).toEqual([1, 1]);
+    expect(selectedRange(move(move(extended, -1, true), -1, true).selection)).toEqual([0, 1]);
+  });
+
+  it('starts at the first or last word when nothing is selected', () => {
+    expect(selectedRange(move(loaded, 1).selection)).toEqual([0, 0]);
+    expect(selectedRange(move(loaded, -1).selection)).toEqual([3, 3]);
+    expect(move(initialEditor, 1)).toBe(initialEditor);
+  });
+
+  it('skips cut words when asked, as when cuts are hidden', () => {
+    const cutMiddle = editorReducer(select(loaded, 1, 2), { type: 'deleteSelection' });
+    expect(selectedRange(move(select(cutMiddle, 0), 1, false, true).selection)).toEqual([3, 3]);
+    expect(selectedRange(move(select(cutMiddle, 0), 1).selection)).toEqual([1, 1]);
+    const beforeCutTail = select(editorReducer(select(loaded, 3), { type: 'deleteSelection' }), 2);
+    expect(move(beforeCutTail, 1, false, true)).toBe(beforeCutTail);
+  });
+});
+
 describe('deleteSelection', () => {
   it('cuts from the first word to the next word start and clears the selection', () => {
     const state = editorReducer(select(loaded, 1, 2), { type: 'deleteSelection' });

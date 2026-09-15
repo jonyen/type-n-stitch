@@ -1,7 +1,7 @@
 // The editor's state machine: words, the edit list, an undo stack and the
 // current word selection. Pure, so it is easy to test.
 
-import { rangeForWords } from './editlist';
+import { rangeForWords, wordStatus } from './editlist';
 import type { CutEdit, Edit, OverdubEdit, Word } from './types';
 
 export interface Selection {
@@ -23,6 +23,8 @@ export interface EditorState {
 export type EditorAction =
   | { type: 'load'; words: Word[]; duration: number }
   | { type: 'select'; index: number; extend: boolean }
+  /** Arrow keys: step the selection one word; `extend` keeps the anchor (Shift). */
+  | { type: 'move'; delta: -1 | 1; extend: boolean; skipCut?: boolean }
   | { type: 'clearSelection' }
   | { type: 'deleteSelection' }
   | { type: 'overdub'; text: string; audioUrl: string; audioDuration: number }
@@ -61,6 +63,38 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       if (action.index < 0 || action.index >= state.words.length) return state;
       const anchor = action.extend && state.selection ? state.selection.anchor : action.index;
       return { ...state, selection: { anchor, focus: action.index } };
+    }
+
+    case 'move': {
+      const last = state.words.length - 1;
+      if (last < 0) return state;
+      const isCut = (i: number) => {
+        const word = state.words[i];
+        return (
+          action.skipCut === true && word !== undefined && wordStatus(word, state.edits) === 'cut'
+        );
+      };
+      const sel = state.selection;
+      let index: number;
+      if (!sel) {
+        index = action.delta > 0 ? 0 : last;
+        while (index >= 0 && index <= last && isCut(index)) index += action.delta;
+        if (index < 0 || index > last) return state;
+        return { ...state, selection: { anchor: index, focus: index } };
+      }
+      // Collapse to the edge the caret moves from, or extend from the focus.
+      const from = action.extend
+        ? sel.focus
+        : action.delta > 0
+          ? Math.max(sel.anchor, sel.focus)
+          : Math.min(sel.anchor, sel.focus);
+      index = from + action.delta;
+      while (index >= 0 && index <= last && isCut(index)) index += action.delta;
+      if (index < 0 || index > last) return state;
+      return {
+        ...state,
+        selection: { anchor: action.extend ? sel.anchor : index, focus: index },
+      };
     }
 
     case 'clearSelection':

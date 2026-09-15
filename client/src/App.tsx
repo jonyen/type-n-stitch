@@ -78,6 +78,10 @@ export function App() {
     [editor.words, playback],
   );
 
+  const onWordDrag = useCallback((index: number) => {
+    dispatch({ type: 'select', index, extend: true });
+  }, []);
+
   const onExport = useCallback(async () => {
     if (!media) return;
     setExportState({ status: 'rendering' });
@@ -102,7 +106,7 @@ export function App() {
     [media],
   );
 
-  // Keyboard: Delete cuts, ⌘Z undoes, Space plays, Esc clears.
+  // Keyboard: Delete cuts, ⌘Z undoes, Space plays, Esc clears, arrows move.
   useEffect(() => {
     if (!media) return;
     const onKey = (e: KeyboardEvent) => {
@@ -119,6 +123,9 @@ export function App() {
         playback.toggle();
       } else if (e.key === 'Escape') {
         dispatch({ type: 'clearSelection' });
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        dispatch({ type: 'move', delta: e.key === 'ArrowLeft' ? -1 : 1, extend: e.shiftKey });
       }
     };
     window.addEventListener('keydown', onKey);
@@ -186,6 +193,7 @@ export function App() {
               selected={selected}
               activeWord={playback.activeWord}
               onWordClick={onWordClick}
+              onWordDrag={onWordDrag}
               onOverdubClick={(od) => playback.seek(od.start)}
             />
           </section>

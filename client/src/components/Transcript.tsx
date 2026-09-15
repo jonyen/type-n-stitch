@@ -1,3 +1,5 @@
+import { useEffect, useRef, type MouseEvent } from 'react';
+
 import { overdubs, wordStatus } from '../editlist';
 import type { Edit, OverdubEdit, Word } from '../types';
 
@@ -8,6 +10,8 @@ interface Props {
   selected: [number, number] | null;
   activeWord: number;
   onWordClick: (index: number, extend: boolean) => void;
+  /** The pointer, held down since a word, has reached another word. */
+  onWordDrag: (index: number) => void;
   onOverdubClick: (overdub: OverdubEdit) => void;
 }
 
@@ -46,9 +50,40 @@ export function Transcript({
   selected,
   activeWord,
   onWordClick,
+  onWordDrag,
   onOverdubClick,
 }: Props) {
   const inSelection = (i: number) => selected !== null && i >= selected[0] && i <= selected[1];
+
+  // Mouse-down on a word starts a drag; every word the pointer enters while
+  // the button is held extends the selection, like selecting text.
+  const dragging = useRef(false);
+  useEffect(() => {
+    const stop = () => {
+      dragging.current = false;
+    };
+    window.addEventListener('mouseup', stop);
+    window.addEventListener('blur', stop);
+    return () => {
+      window.removeEventListener('mouseup', stop);
+      window.removeEventListener('blur', stop);
+    };
+  }, []);
+
+  const press = (index: number, e: MouseEvent, after?: () => void) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dragging.current = true;
+    onWordClick(index, e.shiftKey);
+    if (!e.shiftKey) after?.();
+  };
+  const enter = (index: number) => {
+    if (dragging.current) onWordDrag(index);
+  };
+  // Buttons also "click" from the keyboard (Enter/Space); detail is 0 then.
+  const keyActivate = (index: number, e: MouseEvent) => {
+    if (e.detail === 0) onWordClick(index, e.shiftKey);
+  };
 
   return (
     <p className="transcript" aria-label="Transcript">
@@ -66,10 +101,9 @@ export function Transcript({
                 type="button"
                 className={`token overdub${active ? ' active' : ''}${inSelection(first) ? ' selected' : ''}`}
                 title={`Overdub replacing “${original}”`}
-                onClick={(e) => {
-                  onWordClick(first, e.shiftKey);
-                  if (!e.shiftKey) onOverdubClick(overdub);
-                }}
+                onMouseDown={(e) => press(first, e, () => onOverdubClick(overdub))}
+                onMouseEnter={() => enter(first)}
+                onClick={(e) => keyActivate(first, e)}
               >
                 {overdub.text}
               </button>{' '}
@@ -87,7 +121,9 @@ export function Transcript({
               type="button"
               className={classes.join(' ')}
               data-index={index}
-              onClick={(e) => onWordClick(index, e.shiftKey)}
+              onMouseDown={(e) => press(index, e)}
+              onMouseEnter={() => enter(index)}
+              onClick={(e) => keyActivate(index, e)}
             >
               {word.text}
             </button>{' '}
