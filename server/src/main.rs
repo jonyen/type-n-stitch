@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/health", get(routes::health))
         .route("/api/media", post(routes::upload))
         .route("/api/media/{id}/transcribe", post(routes::transcribe))
+        .route("/api/media/{id}/suggest", post(routes::suggest))
         .route("/api/media/{id}/overdub", post(routes::overdub))
         .route("/api/media/{id}/export", post(routes::export))
         .nest_service("/data", ServeDir::new(&state.config.data_dir))

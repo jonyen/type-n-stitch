@@ -10,8 +10,8 @@ use anyhow::Context;
 use axum::extract::{Multipart, Path as UrlPath, State};
 use axum::Json;
 use engine::{
-    build_ffmpeg_args, output_duration, timeline, Edit, ExportOptions, MediaKind, OutputFormat,
-    Word,
+    build_ffmpeg_args, filler_cuts, output_duration, pause_cuts, timeline, Edit, ExportOptions,
+    MediaKind, OutputFormat, SuggestOptions, Word,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -177,6 +177,47 @@ pub async fn transcribe(
         .context("caching words")?;
     tracing::info!(id, words = words.len(), "transcribed");
     Ok(Json(Transcript { words }))
+}
+
+/// Cached transcript, or a 404 if the item has not been transcribed yet.
+async fn read_words(dir: &Path) -> AppResult<Vec<Word>> {
+    let json = tokio::fs::read_to_string(dir.join("words.json"))
+        .await
+        .map_err(|_| AppError::not_found("transcribe this media first"))?;
+    Ok(serde_json::from_str(&json).context("parsing cached words")?)
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestRequest {
+    #[serde(default)]
+    two_word_fillers: bool,
+}
+
+#[derive(Serialize)]
+pub struct Suggestions {
+    fillers: Vec<Edit>,
+    pauses: Vec<Edit>,
+}
+
+/// `POST /api/media/:id/suggest` — filler-word and long-pause cuts the
+/// client can apply as one batch. The body is optional.
+pub async fn suggest(
+    State(state): State<Arc<AppState>>,
+    UrlPath(id): UrlPath<String>,
+    body: Option<Json<SuggestRequest>>,
+) -> AppResult<Json<Suggestions>> {
+    let dir = item_dir(&state, &id)?;
+    let meta = read_meta(&dir).await?;
+    let words = read_words(&dir).await?;
+    let opts = SuggestOptions {
+        two_word_fillers: body.is_some_and(|Json(b)| b.two_word_fillers),
+        ..SuggestOptions::default()
+    };
+    Ok(Json(Suggestions {
+        fillers: filler_cuts(&words, meta.duration, &opts),
+        pauses: pause_cuts(&words, &opts),
+    }))
 }
 
 #[derive(Deserialize)]
