@@ -26,6 +26,7 @@ export function App() {
   const [overdubOpen, setOverdubOpen] = useState(false);
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle' });
   const [twoWordFillers, setTwoWordFillers] = useState(false);
+  const [showCuts, setShowCuts] = useState(true);
   const [suggestions, setSuggestions] = useState<Suggestions>({ fillers: [], pauses: [] });
 
   const mediaRef = useRef<HTMLVideoElement>(null);
@@ -125,12 +126,17 @@ export function App() {
         dispatch({ type: 'clearSelection' });
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
-        dispatch({ type: 'move', delta: e.key === 'ArrowLeft' ? -1 : 1, extend: e.shiftKey });
+        dispatch({
+          type: 'move',
+          delta: e.key === 'ArrowLeft' ? -1 : 1,
+          extend: e.shiftKey,
+          skipCut: !showCuts,
+        });
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [media, overdubOpen, playback]);
+  }, [media, overdubOpen, playback, showCuts]);
 
   const selectedText = selected
     ? editor.words
@@ -176,11 +182,13 @@ export function App() {
               fillerCount={fillers.length}
               pauseCount={pauses.length}
               twoWordFillers={twoWordFillers}
+              showCuts={showCuts}
               exportState={exportState}
               onDelete={() => dispatch({ type: 'deleteSelection' })}
               onRemoveFillers={() => dispatch({ type: 'applyCuts', cuts: fillers })}
               onTightenPauses={() => dispatch({ type: 'applyCuts', cuts: pauses })}
               onTwoWordFillers={setTwoWordFillers}
+              onShowCuts={setShowCuts}
               onOverdub={() => setOverdubOpen(true)}
               onUndo={() => dispatch({ type: 'undo' })}
               onExport={onExport}
@@ -192,6 +200,7 @@ export function App() {
               edits={editor.edits}
               selected={selected}
               activeWord={playback.activeWord}
+              showCuts={showCuts}
               onWordClick={onWordClick}
               onWordDrag={onWordDrag}
               onOverdubClick={(od) => playback.seek(od.start)}

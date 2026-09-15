@@ -13,6 +13,7 @@ interface Props {
   fillerCount: number;
   pauseCount: number;
   twoWordFillers: boolean;
+  showCuts: boolean;
   exportState: ExportState;
   onDelete: () => void;
   onOverdub: () => void;
@@ -20,6 +21,7 @@ interface Props {
   onRemoveFillers: () => void;
   onTightenPauses: () => void;
   onTwoWordFillers: (on: boolean) => void;
+  onShowCuts: (on: boolean) => void;
   onExport: () => void;
 }
 
@@ -33,6 +35,7 @@ export function Toolbar({
   fillerCount,
   pauseCount,
   twoWordFillers,
+  showCuts,
   exportState,
   onDelete,
   onOverdub,
@@ -40,6 +43,7 @@ export function Toolbar({
   onRemoveFillers,
   onTightenPauses,
   onTwoWordFillers,
+  onShowCuts,
   onExport,
 }: Props) {
   const rendering = exportState.status === 'rendering';
@@ -102,6 +106,15 @@ export function Toolbar({
             onChange={(e) => onTwoWordFillers(e.target.checked)}
           />
           “you know” / “I mean”
+        </label>
+        <span className="spacer" />
+        <label className="toggle" title="Off: read the transcript as the output will sound">
+          <input
+            type="checkbox"
+            checked={showCuts}
+            onChange={(e) => onShowCuts(e.target.checked)}
+          />
+          Show cuts
         </label>
       </div>
 

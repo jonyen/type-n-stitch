@@ -532,6 +532,13 @@ button.ghost:hover {
   outline-offset: 1px;
 }
 
+.gap {
+  color: var(--muted);
+  opacity: 0.6;
+  letter-spacing: 0.1em;
+  cursor: default;
+}
+
 /* Overdub dialog */
 
 .modal-backdrop {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, type MouseEvent } from 'react';
 
-import { overdubs, wordStatus } from '../editlist';
+import { wordStatus } from '../editlist';
+import { tokenize } from '../tokens';
 import type { Edit, OverdubEdit, Word } from '../types';
 
 interface Props {
@@ -9,39 +10,12 @@ interface Props {
   /** Inclusive index range of the selection. */
   selected: [number, number] | null;
   activeWord: number;
+  /** When false, cut words collapse into a "…" marker so the text reads as the output. */
+  showCuts: boolean;
   onWordClick: (index: number, extend: boolean) => void;
   /** The pointer, held down since a word, has reached another word. */
   onWordDrag: (index: number) => void;
   onOverdubClick: (overdub: OverdubEdit) => void;
-}
-
-type Token =
-  | { kind: 'word'; index: number; word: Word }
-  | { kind: 'overdub'; overdub: OverdubEdit; first: number; last: number };
-
-/** Words, with each overdubbed run collapsed into one token showing its new text. */
-function tokenize(words: Word[], edits: Edit[]): Token[] {
-  const tokens: Token[] = [];
-  const dubs = overdubs(edits);
-  const covered = (word: Word | undefined, od: OverdubEdit) =>
-    word !== undefined && wordStatus(word, [od]) === 'overdub';
-
-  let i = 0;
-  while (i < words.length) {
-    const word = words[i];
-    if (!word) break;
-    const od = dubs.find((d) => covered(word, d));
-    if (!od) {
-      tokens.push({ kind: 'word', index: i, word });
-      i++;
-      continue;
-    }
-    let last = i;
-    while (covered(words[last + 1], od)) last++;
-    tokens.push({ kind: 'overdub', overdub: od, first: i, last });
-    i = last + 1;
-  }
-  return tokens;
 }
 
 export function Transcript({
@@ -49,6 +23,7 @@ export function Transcript({
   edits,
   selected,
   activeWord,
+  showCuts,
   onWordClick,
   onWordDrag,
   onOverdubClick,
@@ -70,9 +45,12 @@ export function Transcript({
     };
   }, []);
 
-  const press = (index: number, e: MouseEvent, after?: () => void) => {
+  const press = (index: number, e: MouseEvent<HTMLButtonElement>, after?: () => void) => {
     if (e.button !== 0) return;
+    // No native text selection, but keep keyboard focus moving to the word so
+    // the shortcuts work after clicking a checkbox or link.
     e.preventDefault();
+    e.currentTarget.focus();
     dragging.current = true;
     onWordClick(index, e.shiftKey);
     if (!e.shiftKey) after?.();
@@ -87,7 +65,17 @@ export function Transcript({
 
   return (
     <p className="transcript" aria-label="Transcript">
-      {tokenize(words, edits).map((token) => {
+      {tokenize(words, edits, showCuts).map((token) => {
+        if (token.kind === 'gap') {
+          const n = token.last - token.first + 1;
+          return (
+            <span key={`gap-${token.first}`}>
+              <span className="gap" title={`${n} word${n === 1 ? '' : 's'} cut`} aria-label="cut">
+                …
+              </span>{' '}
+            </span>
+          );
+        }
         if (token.kind === 'overdub') {
           const { overdub, first, last } = token;
           const active = activeWord >= first && activeWord <= last;
