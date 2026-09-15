@@ -1,6 +1,6 @@
 // Thin fetch wrappers over the Rust server. Errors carry the server's message.
 
-import type { Edit, Media, Word } from './types';
+import type { CutEdit, Edit, Media, Word } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -49,6 +49,15 @@ export async function transcribeMedia(id: string): Promise<Word[]> {
     method: 'POST',
   });
   return words;
+}
+
+export interface Suggestions {
+  fillers: CutEdit[];
+  pauses: CutEdit[];
+}
+
+export function suggestEdits(id: string, twoWordFillers: boolean): Promise<Suggestions> {
+  return postJson(`/api/media/${id}/suggest`, { twoWordFillers });
 }
 
 export function synthesizeOverdub(

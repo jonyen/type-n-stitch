@@ -410,6 +410,21 @@ button.ghost:hover {
   background: color-mix(in srgb, var(--accent) 88%, #000);
 }
 
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .export-result {
   margin: 0;
   font-size: 14px;

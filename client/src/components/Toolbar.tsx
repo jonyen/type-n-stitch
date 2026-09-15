@@ -9,20 +9,37 @@ export type ExportState =
 interface Props {
   hasSelection: boolean;
   canUndo: boolean;
+  /** Filler words and long pauses not yet cut. */
+  fillerCount: number;
+  pauseCount: number;
+  twoWordFillers: boolean;
   exportState: ExportState;
   onDelete: () => void;
   onOverdub: () => void;
   onUndo: () => void;
+  onRemoveFillers: () => void;
+  onTightenPauses: () => void;
+  onTwoWordFillers: (on: boolean) => void;
   onExport: () => void;
+}
+
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
 }
 
 export function Toolbar({
   hasSelection,
   canUndo,
+  fillerCount,
+  pauseCount,
+  twoWordFillers,
   exportState,
   onDelete,
   onOverdub,
   onUndo,
+  onRemoveFillers,
+  onTightenPauses,
+  onTwoWordFillers,
   onExport,
 }: Props) {
   const rendering = exportState.status === 'rendering';
@@ -59,6 +76,33 @@ export function Toolbar({
             'Export'
           )}
         </button>
+      </div>
+
+      <div className="actions">
+        <button
+          type="button"
+          onClick={onRemoveFillers}
+          disabled={fillerCount === 0}
+          title="Cut every um, uh, hmm… in one step"
+        >
+          Remove {plural(fillerCount, 'filler')}
+        </button>
+        <button
+          type="button"
+          onClick={onTightenPauses}
+          disabled={pauseCount === 0}
+          title="Shorten every pause over 0.6 s to 0.25 s"
+        >
+          Tighten {plural(pauseCount, 'pause')}
+        </button>
+        <label className="toggle" title="Also treat “you know” and “I mean” as fillers">
+          <input
+            type="checkbox"
+            checked={twoWordFillers}
+            onChange={(e) => onTwoWordFillers(e.target.checked)}
+          />
+          “you know” / “I mean”
+        </label>
       </div>
 
       {exportState.status === 'done' && (

@@ -1,12 +1,20 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 
-import { exportMedia, synthesizeOverdub, transcribeMedia, uploadMedia } from './api';
+import {
+  exportMedia,
+  suggestEdits,
+  synthesizeOverdub,
+  transcribeMedia,
+  uploadMedia,
+  type Suggestions,
+} from './api';
 import { Dropzone } from './components/Dropzone';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
 import { Toolbar, type ExportState } from './components/Toolbar';
 import { Transcript } from './components/Transcript';
 import { editorReducer, initialEditor, selectedRange } from './editor';
+import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
 import type { Media } from './types';
 import { usePlayback } from './usePlayback';
 
@@ -17,11 +25,32 @@ export function App() {
   const [editor, dispatch] = useReducer(editorReducer, initialEditor);
   const [overdubOpen, setOverdubOpen] = useState(false);
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle' });
+  const [twoWordFillers, setTwoWordFillers] = useState(false);
+  const [suggestions, setSuggestions] = useState<Suggestions>({ fillers: [], pauses: [] });
 
   const mediaRef = useRef<HTMLVideoElement>(null);
   const playback = usePlayback(mediaRef, editor.words, editor.edits, editor.duration);
 
   const selected = selectedRange(editor.selection);
+  const fillers = pending(suggestions.fillers, editor.edits);
+  const pauses = pending(suggestions.pauses, editor.edits);
+
+  // Ask the engine for suggestions; fall back to the local mirror if the
+  // server is unreachable so the buttons still work.
+  const { words, duration } = editor;
+  useEffect(() => {
+    if (!media || words.length === 0) return;
+    const opts = { ...defaultSuggestOptions, twoWordFillers };
+    let cancelled = false;
+    suggestEdits(media.id, twoWordFillers)
+      .catch(() => ({ fillers: fillerCuts(words, duration, opts), pauses: pauseCuts(words, opts) }))
+      .then((s) => {
+        if (!cancelled) setSuggestions(s);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [media, words, duration, twoWordFillers]);
 
   const onFile = useCallback(async (file: File) => {
     setLoadError(null);
@@ -137,8 +166,14 @@ export function App() {
             <Toolbar
               hasSelection={selected !== null}
               canUndo={editor.past.length > 0}
+              fillerCount={fillers.length}
+              pauseCount={pauses.length}
+              twoWordFillers={twoWordFillers}
               exportState={exportState}
               onDelete={() => dispatch({ type: 'deleteSelection' })}
+              onRemoveFillers={() => dispatch({ type: 'applyCuts', cuts: fillers })}
+              onTightenPauses={() => dispatch({ type: 'applyCuts', cuts: pauses })}
+              onTwoWordFillers={setTwoWordFillers}
               onOverdub={() => setOverdubOpen(true)}
               onUndo={() => dispatch({ type: 'undo' })}
               onExport={onExport}

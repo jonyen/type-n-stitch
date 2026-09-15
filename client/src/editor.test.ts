@@ -57,6 +57,24 @@ describe('deleteSelection', () => {
   });
 });
 
+describe('applyCuts', () => {
+  it('appends the batch as a single undo step and clears the selection', () => {
+    const cuts = [
+      { kind: 'cut' as const, start: 0.91, end: 1.25 },
+      { kind: 'cut' as const, start: 2.0, end: 20 },
+    ];
+    const state = editorReducer(select(loaded, 2), { type: 'applyCuts', cuts });
+    expect(state.edits).toEqual(cuts);
+    expect(state.selection).toBeNull();
+    expect(state.past).toHaveLength(1);
+    expect(editorReducer(state, { type: 'undo' }).edits).toEqual([]);
+  });
+
+  it('is a no-op for an empty batch', () => {
+    expect(editorReducer(loaded, { type: 'applyCuts', cuts: [] })).toBe(loaded);
+  });
+});
+
 describe('overdub', () => {
   it('adds an overdub over the selected words and replaces overlapping ones', () => {
     const first = editorReducer(select(loaded, 0, 1), {

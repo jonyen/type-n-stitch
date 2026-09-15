@@ -2,7 +2,7 @@
 // current word selection. Pure, so it is easy to test.
 
 import { rangeForWords } from './editlist';
-import type { Edit, OverdubEdit, Word } from './types';
+import type { CutEdit, Edit, OverdubEdit, Word } from './types';
 
 export interface Selection {
   /** Where the selection started (click). */
@@ -26,6 +26,8 @@ export type EditorAction =
   | { type: 'clearSelection' }
   | { type: 'deleteSelection' }
   | { type: 'overdub'; text: string; audioUrl: string; audioDuration: number }
+  /** Append a batch of cuts (filler removal, pause tightening) as one undo step. */
+  | { type: 'applyCuts'; cuts: CutEdit[] }
   | { type: 'undo' };
 
 export const initialEditor: EditorState = {
@@ -89,6 +91,11 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         audioDuration: action.audioDuration,
       };
       return withEdits(state, [...kept, edit]);
+    }
+
+    case 'applyCuts': {
+      if (action.cuts.length === 0) return state;
+      return withEdits(state, [...state.edits, ...action.cuts]);
     }
 
     case 'undo': {
