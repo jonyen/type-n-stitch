@@ -80,7 +80,9 @@ describe('wordStatus', () => {
   });
 
   it('does not mark a partially covered word', () => {
-    expect(wordStatus(words[0]!, [cut(0.5, 2)])).toBe('kept');
+    const [thankful] = words;
+    if (!thankful) throw new Error('fixture');
+    expect(wordStatus(thankful, [cut(0.5, 2)])).toBe('kept');
   });
 });
 

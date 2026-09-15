@@ -82,9 +82,7 @@ describe('overdub', () => {
       audioUrl: '/data/x/overdub-1.wav',
       audioDuration: 0.9,
     });
-    expect(second.edits.map((e) => (e.kind === 'overdub' ? e.text : e.kind))).toEqual([
-      'with you',
-    ]);
+    expect(second.edits.map((e) => (e.kind === 'overdub' ? e.text : e.kind))).toEqual(['with you']);
   });
 });
 
