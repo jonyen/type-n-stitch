@@ -2,7 +2,11 @@
 //! ffmpeg planning. The server is a thin HTTP shell around this crate.
 
 pub mod editlist;
+pub mod ffmpeg;
 pub mod types;
+pub mod whisper;
 
 pub use editlist::*;
+pub use ffmpeg::*;
 pub use types::*;
+pub use whisper::*;
