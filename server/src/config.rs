@@ -26,7 +26,10 @@ impl Config {
             whisper_bin: env("WHISPER_BIN", "whisper-cli"),
             whisper_model: PathBuf::from(env(
                 "WHISPER_MODEL",
-                "/Users/jyen/Projects/lyric-video/models/ggml-large-v3-turbo.bin",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../models/ggml-large-v3-turbo.bin"
+                ),
             )),
             tts_base_url: env("TTS_BASE_URL", "http://localhost:3900/v1")
                 .trim_end_matches('/')

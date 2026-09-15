@@ -72,7 +72,7 @@ curl -L -o models/ggml-large-v3-turbo.bin \
 # the app
 git clone https://github.com/jonyen/type-n-stitch && cd type-n-stitch
 npm install
-WHISPER_MODEL=$PWD/models/ggml-large-v3-turbo.bin npm run dev
+npm run dev
 ```
 
 Open <http://localhost:5174>. The Rust server listens on 5175 and Vite proxies `/api` and
@@ -84,7 +84,7 @@ do. Without it, the Overdub button explains what's missing and everything else k
 
 | Variable        | Default                                                           | Purpose                          |
 | --------------- | ----------------------------------------------------------------- | -------------------------------- |
-| `WHISPER_MODEL` | `/Users/jyen/Projects/lyric-video/models/ggml-large-v3-turbo.bin` | ggml model file for whisper-cli  |
+| `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin`                                  | ggml model file for whisper-cli  |
 | `WHISPER_BIN`   | `whisper-cli`                                                     | whisper.cpp binary               |
 | `TTS_BASE_URL`  | `http://localhost:3900/v1`                                        | OpenAI-compatible TTS base URL   |
 | `TTS_VOICE`     | `513bb606`                                                        | voice id sent to the TTS server  |
