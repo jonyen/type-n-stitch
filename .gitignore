@@ -1,0 +1,9 @@
+node_modules/
+dist/
+server/data/
+target/
+samples/*
+!samples/README.md
+.DS_Store
+*.log
+.vite/

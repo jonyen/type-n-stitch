@@ -1,0 +1,20 @@
+[package]
+name = "server"
+description = "type-n-stitch HTTP server: upload, transcribe, overdub, export"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+engine = { path = "../engine" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json"], default-features = false }
+uuid = { version = "1", features = ["v4"] }

@@ -1,0 +1,12 @@
+[package]
+name = "engine"
+description = "type-n-stitch media engine: edit-list math, whisper parsing, ffmpeg planning"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

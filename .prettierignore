@@ -1,0 +1,7 @@
+node_modules
+dist
+server/data
+samples
+target
+package-lock.json
+docs/*.png
