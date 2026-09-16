@@ -1,4 +1,4 @@
-// Suggested edits: filler words and long pauses. Mirrors engine/src/suggest.rs
+// Suggested edits: filler words and long pauses. Mirrors engine/src/suggest.rs for instant counts.
 // so the toolbar can show counts instantly; the server's
 // POST /api/media/:id/suggest returns the same lists.
 
@@ -70,7 +70,10 @@ export function fillerCuts(
   return cuts;
 }
 
-/** One cut per pause longer than the threshold, leaving `pauseKeep` after the previous word. */
+/**
+ * Word-gap pauses: a fallback only. whisper.cpp timestamps rarely leave gaps, so the server's
+ * silence-based suggestions are what the editor actually uses.
+ */
 export function pauseCuts(words: Word[], opts: SuggestOptions = defaultSuggestOptions): CutEdit[] {
   const cuts: CutEdit[] = [];
   const first = words[0];

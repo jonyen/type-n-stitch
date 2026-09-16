@@ -1,12 +1,12 @@
-//! Suggested edits: filler words and long pauses, computed from the word
-//! timestamps alone. The client mirrors these rules in `suggest.ts` so it can
+//! Suggested edits: filler words (from the word timestamps) and long pauses
+//! (from ffmpeg silence detection on the audio, with a word-gap fallback). The client mirrors these rules in `suggest.ts` so it can
 //! show counts instantly; the server exposes them at `POST /media/:id/suggest`.
 //!
 //! Every suggestion is a plain `Edit::Cut`, so applying a batch is just
 //! appending them to the edit list (one undo step) and the usual cut
 //! normalization merges neighbours.
 
-use crate::types::{Edit, Word};
+use crate::types::{Edit, Range, Word};
 
 /// Tolerance for comparing gaps against thresholds (timestamps are ms).
 const EPS: f64 = 1e-6;
@@ -106,6 +106,89 @@ pub fn pause_cuts(words: &[Word], opts: &SuggestOptions) -> Vec<Edit> {
             cuts.push(Edit::Cut {
                 start: prev.end + opts.pause_keep,
                 end: next.start,
+            });
+        }
+    }
+    cuts
+}
+
+/// Arguments for an ffmpeg pass that logs every stretch of silence at least
+/// 0.3 s long. Detection is deliberately looser than `pause_threshold` so the
+/// cached result can be re-filtered without re-running ffmpeg.
+pub fn silencedetect_args(wav: &str) -> Vec<String> {
+    [
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        wav,
+        "-af",
+        "silencedetect=noise=-35dB:d=0.3",
+        "-f",
+        "null",
+        "-",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// Parse ffmpeg `silencedetect` log lines into silent ranges. A silence still
+/// open when the log ends runs to `duration`.
+pub fn parse_silencedetect(log: &str, duration: f64) -> Vec<Range> {
+    fn value_after(line: &str, key: &str) -> Option<f64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        rest.split_whitespace().next()?.parse().ok()
+    }
+    let mut out = Vec::new();
+    let mut open: Option<f64> = None;
+    for line in log.lines() {
+        if let Some(start) = value_after(line, "silence_start:") {
+            open = Some(start.max(0.0));
+        } else if let Some(end) = value_after(line, "silence_end:") {
+            if let Some(start) = open.take() {
+                out.push(Range::new(start, end.min(duration)));
+            }
+        }
+    }
+    if let Some(start) = open {
+        if duration > start {
+            out.push(Range::new(start, duration));
+        }
+    }
+    out
+}
+
+/// Pause cuts from measured silence. whisper.cpp word timestamps have no gaps
+/// (silence is folded into the neighbouring word), so real pauses have to
+/// come from the audio.
+///
+/// - leading silence longer than `leading_threshold`: keep `pause_keep` before speech
+/// - trailing silence longer than `pause_threshold`: keep `pause_keep` after speech
+/// - any other silence longer than `pause_threshold`: keep `pause_keep`, split evenly
+pub fn silence_pause_cuts(silences: &[Range], duration: f64, opts: &SuggestOptions) -> Vec<Edit> {
+    const EDGE: f64 = 0.05;
+    let mut cuts = Vec::new();
+    for s in silences {
+        let len = s.len();
+        if s.start <= EDGE {
+            if s.end > opts.leading_threshold + EPS {
+                cuts.push(Edit::Cut {
+                    start: 0.0,
+                    end: s.end - opts.pause_keep,
+                });
+            }
+        } else if s.end >= duration - EDGE {
+            if len > opts.pause_threshold + EPS {
+                cuts.push(Edit::Cut {
+                    start: s.start + opts.pause_keep,
+                    end: duration,
+                });
+            }
+        } else if len > opts.pause_threshold + EPS {
+            let half = opts.pause_keep / 2.0;
+            cuts.push(Edit::Cut {
+                start: s.start + half,
+                end: s.end - half,
             });
         }
     }
@@ -220,5 +303,66 @@ mod tests {
         let prompt = vec![w(0, "hi", 0.5, 0.8)];
         assert!(pause_cuts(&prompt, &SuggestOptions::default()).is_empty());
         assert!(pause_cuts(&[], &SuggestOptions::default()).is_empty());
+    }
+
+    const SILENCEDETECT: &str = "\
+[Parsed_silencedetect_0 @ 0x1] silence_start: 0
+[Parsed_silencedetect_0 @ 0x1] silence_end: 1.2 | silence_duration: 1.2
+size=N/A time=00:00:05.00 bitrate=N/A speed= 900x
+[Parsed_silencedetect_0 @ 0x1] silence_start: 4.360437
+[Parsed_silencedetect_0 @ 0x1] silence_end: 5.984187 | silence_duration: 1.62375
+[Parsed_silencedetect_0 @ 0x1] silence_start: 7.4
+[Parsed_silencedetect_0 @ 0x1] silence_end: 7.8 | silence_duration: 0.4
+[Parsed_silencedetect_0 @ 0x1] silence_start: 13.5
+";
+
+    #[test]
+    fn parses_silencedetect_and_closes_a_trailing_silence_at_the_end() {
+        let s = parse_silencedetect(SILENCEDETECT, 15.0);
+        assert_eq!(
+            s,
+            vec![
+                Range::new(0.0, 1.2),
+                Range::new(4.360437, 5.984187),
+                Range::new(7.4, 7.8),
+                Range::new(13.5, 15.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_silencedetect_ignores_garbage() {
+        assert!(parse_silencedetect("", 5.0).is_empty());
+        assert!(parse_silencedetect("silence_end: 2.0 | silence_duration: 2.0", 5.0).is_empty());
+        assert!(parse_silencedetect("silence_start: nope", 5.0).is_empty());
+    }
+
+    #[test]
+    fn silence_pauses_leave_pause_keep_centred_and_skip_short_ones() {
+        let s = parse_silencedetect(SILENCEDETECT, 15.0);
+        let cuts = silence_pause_cuts(&s, 15.0, &SuggestOptions::default());
+        let r = |e: &Edit| match e {
+            Edit::Cut { start, end } => (
+                (start * 1000.0).round() / 1000.0,
+                (end * 1000.0).round() / 1000.0,
+            ),
+            _ => panic!("not a cut"),
+        };
+        let got: Vec<_> = cuts.iter().map(r).collect();
+        assert_eq!(
+            got,
+            vec![
+                (0.0, 0.95),    // leading: keep 0.25 before speech
+                (4.485, 5.859), // interior: 0.125 kept on each side
+                (13.75, 15.0),  // trailing: keep 0.25 after speech
+            ],
+            "the 0.4 s silence is under the 0.6 s threshold"
+        );
+    }
+
+    #[test]
+    fn short_leading_and_trailing_silence_is_left_alone() {
+        let s = vec![Range::new(0.0, 0.3), Range::new(9.6, 10.0)];
+        assert!(silence_pause_cuts(&s, 10.0, &SuggestOptions::default()).is_empty());
     }
 }

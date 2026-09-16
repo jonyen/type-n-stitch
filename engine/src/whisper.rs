@@ -52,9 +52,28 @@ pub fn parse_whisper_json(json: &str) -> Result<Vec<Word>, serde_json::Error> {
 
 /// Build a `whisper-cli` argv that writes `<out_base>.json` in the format
 /// `parse_whisper_json` expects.
+/// Whisper is trained on cleaned-up transcripts and silently drops "um" and
+/// "uh" unless the decoder is primed with text that contains them. Without
+/// this prompt, filler removal finds nothing on real recordings.
+pub const DISFLUENCY_PROMPT: &str = "Um, so, uh, I mean, like, you know, hmm.";
+
 pub fn whisper_args(model: &str, wav: &str, out_base: &str) -> Vec<String> {
     [
-        "-m", model, "-f", wav, "-l", "en", "-ml", "1", "-sow", "-oj", "-of", out_base, "-np",
+        "-m",
+        model,
+        "-f",
+        wav,
+        "-l",
+        "en",
+        "-ml",
+        "1",
+        "-sow",
+        "--prompt",
+        DISFLUENCY_PROMPT,
+        "-oj",
+        "-of",
+        out_base,
+        "-np",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -76,6 +95,18 @@ mod tests {
         {"timestamps": {"from": "00:01:02,500", "to": "00:01:03,000"}, "offsets": {"from": 62500, "to": 63000}, "text": " gospel."}
       ]
     }"#;
+
+    #[test]
+    fn primes_the_decoder_so_fillers_survive() {
+        let args = whisper_args("m.bin", "in.wav", "out");
+        let at = args.iter().position(|a| a == "--prompt").expect("--prompt");
+        let prompt = &args[at + 1];
+        assert_eq!(prompt, DISFLUENCY_PROMPT);
+        for filler in ["Um", "uh", "hmm"] {
+            assert!(prompt.contains(filler), "prompt should contain {filler}");
+        }
+        assert!(args.windows(2).any(|w| w == ["-ml", "1"]));
+    }
 
     #[test]
     fn parses_words_and_drops_blanks() {

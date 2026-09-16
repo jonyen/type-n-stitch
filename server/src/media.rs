@@ -6,8 +6,8 @@ use std::process::Stdio;
 
 use anyhow::{anyhow, Context};
 use engine::{
-    parse_progress_line, parse_whisper_json, progress_fraction, whisper_args, MediaKind,
-    ProgressEvent, Word, PROGRESS_ARGS,
+    parse_progress_line, parse_silencedetect, parse_whisper_json, progress_fraction,
+    silencedetect_args, whisper_args, MediaKind, ProgressEvent, Range, Word, PROGRESS_ARGS,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -152,6 +152,20 @@ pub async fn transcribe(
         .await
         .with_context(|| format!("whisper wrote no {}", json_path.display()))?;
     Ok(parse_whisper_json(&json)?)
+}
+
+/// Silent stretches in `wav`, from ffmpeg's `silencedetect` (logged on stderr).
+pub async fn silences(wav: &Path, duration: f64) -> anyhow::Result<Vec<Range>> {
+    let output = Command::new("ffmpeg")
+        .args(silencedetect_args(&wav.to_string_lossy()))
+        .output()
+        .await
+        .with_context(|| start_error("ffmpeg"))?;
+    check_status("ffmpeg", &output)?;
+    Ok(parse_silencedetect(
+        &String::from_utf8_lossy(&output.stderr),
+        duration,
+    ))
 }
 
 /// Run ffmpeg with `-progress pipe:1`, calling `on_progress` with the

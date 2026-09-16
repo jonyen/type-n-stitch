@@ -110,8 +110,11 @@ if the clip is missing.
 
 - **Remove fillers.** One click cuts every `um`, `uh`, `hmm`, `er`, `ah` (and, with the toggle on,
   `you know` / `I mean`). The button shows how many are left, and one undo restores them all.
-- **Tighten pauses.** Any gap between words longer than 0.6 s is cut down to 0.25 s; leading
-  silence past 0.5 s goes too.
+  Whisper is trained on cleaned-up transcripts and drops fillers by default, so the engine primes
+  the decoder with a disfluent prompt; without it this button finds nothing on real recordings.
+- **Tighten pauses.** Any silence longer than 0.6 s is cut down to 0.25 s, and leading silence
+  past 0.5 s goes too. Pauses come from ffmpeg `silencedetect` on the audio, not from word gaps:
+  whisper.cpp folds silence into the neighbouring word, so its timestamps never show a gap.
 - **Drag to select.** Press on a word and drag across the run, or shift-click, or use the arrow
   keys (shift extends).
 - **Show cuts.** Off hides struck words so the transcript reads the way the output will sound;

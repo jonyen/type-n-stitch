@@ -1,5 +1,5 @@
 //! HTTP handlers. Each media item lives in `data/<id>/`:
-//! `source.<ext>`, `meta.json`, `whisper.wav`, `words.json`,
+//! `source.<ext>`, `meta.json`, `whisper.wav`, `words-v2.json`,
 //! `overdub-<n>.wav` and `export-<n>.<ext>`.
 
 use std::collections::HashMap;
@@ -10,8 +10,8 @@ use anyhow::Context;
 use axum::extract::{Multipart, Path as UrlPath, State};
 use axum::Json;
 use engine::{
-    build_ffmpeg_args, filler_cuts, output_duration, pause_cuts, timeline, Edit, ExportOptions,
-    MediaKind, OutputFormat, SuggestOptions, Word,
+    build_ffmpeg_args, filler_cuts, output_duration, pause_cuts, silence_pause_cuts, timeline,
+    Edit, ExportOptions, MediaKind, OutputFormat, Range, SuggestOptions, Word,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -145,13 +145,17 @@ pub struct Transcript {
     words: Vec<Word>,
 }
 
+/// Transcript cache file. Bump the version when the whisper invocation changes
+/// in a way that alters the words (v2: disfluency prompt keeps "um"/"uh").
+const WORDS_CACHE: &str = "words-v2.json";
+
 /// `POST /api/media/:id/transcribe` — whisper.cpp word timestamps (cached).
 pub async fn transcribe(
     State(state): State<Arc<AppState>>,
     UrlPath(id): UrlPath<String>,
 ) -> AppResult<Json<Transcript>> {
     let dir = item_dir(&state, &id)?;
-    let cached = dir.join("words.json");
+    let cached = dir.join(WORDS_CACHE);
     if let Ok(json) = tokio::fs::read_to_string(&cached).await {
         let words: Vec<Word> = serde_json::from_str(&json).context("parsing cached words")?;
         return Ok(Json(Transcript { words }));
@@ -181,10 +185,21 @@ pub async fn transcribe(
 
 /// Cached transcript, or a 404 if the item has not been transcribed yet.
 async fn read_words(dir: &Path) -> AppResult<Vec<Word>> {
-    let json = tokio::fs::read_to_string(dir.join("words.json"))
+    let json = tokio::fs::read_to_string(dir.join(WORDS_CACHE))
         .await
         .map_err(|_| AppError::not_found("transcribe this media first"))?;
     Ok(serde_json::from_str(&json).context("parsing cached words")?)
+}
+
+/// Silence map for the item, computed once from `whisper.wav` and cached.
+async fn read_silences(dir: &Path, duration: f64) -> anyhow::Result<Vec<Range>> {
+    let cached = dir.join("silences-v1.json");
+    if let Ok(json) = tokio::fs::read_to_string(&cached).await {
+        return Ok(serde_json::from_str(&json)?);
+    }
+    let silences = media::silences(&dir.join("whisper.wav"), duration).await?;
+    tokio::fs::write(&cached, serde_json::to_vec(&silences)?).await?;
+    Ok(silences)
 }
 
 #[derive(Default, Deserialize)]
@@ -214,9 +229,16 @@ pub async fn suggest(
         two_word_fillers: body.is_some_and(|Json(b)| b.two_word_fillers),
         ..SuggestOptions::default()
     };
+    let pauses = match read_silences(&dir, meta.duration).await {
+        Ok(silences) => silence_pause_cuts(&silences, meta.duration, &opts),
+        Err(e) => {
+            tracing::warn!(id, "silence detection failed, using word gaps: {e:#}");
+            pause_cuts(&words, &opts)
+        }
+    };
     Ok(Json(Suggestions {
         fillers: filler_cuts(&words, meta.duration, &opts),
-        pauses: pause_cuts(&words, &opts),
+        pauses,
     }))
 }
 
