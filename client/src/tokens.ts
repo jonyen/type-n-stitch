@@ -47,6 +47,23 @@ export function tokenStart(token: Token): number {
   return token.kind === 'word' ? token.index : token.first;
 }
 
+/** Index of the last transcript word a token stands for. */
+export function tokenEnd(token: Token): number {
+  return token.kind === 'word' ? token.index : token.last;
+}
+
+/** Whether word `index` falls inside `turn`. */
+export function turnContains(turn: Turn, index: number): boolean {
+  const first = turn.tokens[0];
+  const last = turn.tokens[turn.tokens.length - 1];
+  return (
+    first !== undefined &&
+    last !== undefined &&
+    index >= tokenStart(first) &&
+    index <= tokenEnd(last)
+  );
+}
+
 export interface Turn {
   /** null when speakers are unknown; the whole transcript is then one turn. */
   speaker: number | null;

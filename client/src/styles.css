@@ -718,6 +718,27 @@ button.ghost:hover {
   margin: 0;
 }
 
+.turn {
+  margin: -6px -10px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  transition: background-color 0.2s;
+}
+
+.turn.speaking {
+  background: color-mix(in srgb, var(--speaker, var(--accent)) 8%, transparent);
+}
+
+.turn.speaking .speech {
+  border-left-width: 4px;
+}
+
+.turn.speaking .speaker-tag::after {
+  content: ' · speaking';
+  font-weight: 500;
+  opacity: 0.75;
+}
+
 .turn:has(.speaker-tag) .speech {
   padding-left: 14px;
   border-left: 3px solid var(--speaker, var(--border));

@@ -23,6 +23,8 @@ export function usePlayback(
   words: Word[],
   edits: Edit[],
   duration: number,
+  /** Media URL. The element mounts after the hook, so listeners re-attach when it changes. */
+  src: string | undefined,
 ): Playback {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -124,7 +126,7 @@ export function usePlayback(
 
   useEffect(() => {
     const media = mediaRef.current;
-    if (!media) return;
+    if (!src || !media) return;
     const onPlay = () => {
       wantPlaying.current = true;
       setPlaying(true);
@@ -148,8 +150,10 @@ export function usePlayback(
       media.removeEventListener('ended', onEnded);
       media.removeEventListener('timeupdate', sync);
       media.removeEventListener('seeked', sync);
+      setPlaying(false);
+      wantPlaying.current = false;
     };
-  }, [mediaRef, sync]);
+  }, [mediaRef, src, sync]);
 
   // Stop everything when the source changes or the hook unmounts.
   useEffect(() => {

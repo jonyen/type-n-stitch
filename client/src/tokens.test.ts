@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { splitTurns, tokenize } from './tokens';
+import { splitTurns, tokenize, turnContains } from './tokens';
 import type { Edit, Word } from './types';
 
 const words: Word[] = [
@@ -90,5 +90,19 @@ describe('splitTurns', () => {
 
   it('returns no turns for an empty transcript', () => {
     expect(splitTurns([], [])).toEqual([]);
+  });
+});
+
+describe('turnContains', () => {
+  it('spans from the first token to the last word of the last token', () => {
+    const tokens = tokenize(words, [{ ...overdub, start: 1.25, end: 2.3 }]);
+    const [a, b] = splitTurns(tokens, [0, 0, 1, 1]);
+    expect(a && [0, 1, 2].map((i) => turnContains(a, i))).toEqual([true, true, false]);
+    expect(b && [1, 2, 3].map((i) => turnContains(b, i))).toEqual([false, true, true]);
+  });
+
+  it('is false for -1, the index before any word plays', () => {
+    const [turn] = splitTurns(tokenize(words, []), null);
+    expect(turn && turnContains(turn, -1)).toBe(false);
   });
 });

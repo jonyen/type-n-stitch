@@ -36,7 +36,7 @@ export function App() {
   const [speakerNames, setSpeakerNames] = useState<string[]>([]);
 
   const mediaRef = useRef<HTMLVideoElement>(null);
-  const playback = usePlayback(mediaRef, editor.words, editor.edits, editor.duration);
+  const playback = usePlayback(mediaRef, editor.words, editor.edits, editor.duration, media?.url);
 
   const selected = selectedRange(editor.selection);
   const fillers = pending(suggestions.fillers, editor.edits);
@@ -299,6 +299,7 @@ export function App() {
               edits={editor.edits}
               selected={selected}
               activeWord={playback.activeWord}
+              playing={playback.playing}
               showCuts={showCuts}
               onWordClick={onWordClick}
               onWordDrag={onWordDrag}

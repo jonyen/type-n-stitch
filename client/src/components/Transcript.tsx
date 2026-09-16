@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 
 import { wordStatus } from '../editlist';
-import { speakerLabel, splitTurns, tokenize, tokenStart, type Token } from '../tokens';
+import {
+  speakerLabel,
+  splitTurns,
+  tokenize,
+  tokenStart,
+  turnContains,
+  type Token,
+} from '../tokens';
 import type { Edit, OverdubEdit, Word } from '../types';
 
 interface Props {
@@ -10,6 +17,8 @@ interface Props {
   /** Inclusive index range of the selection. */
   selected: [number, number] | null;
   activeWord: number;
+  /** While playing, the transcript follows the active word. */
+  playing: boolean;
   /** When false, cut words collapse into a "…" marker so the text reads as the output. */
   showCuts: boolean;
   onWordClick: (index: number, extend: boolean) => void;
@@ -27,6 +36,7 @@ export function Transcript({
   edits,
   selected,
   activeWord,
+  playing,
   showCuts,
   onWordClick,
   onWordDrag,
@@ -51,6 +61,33 @@ export function Transcript({
       window.removeEventListener('blur', stop);
     };
   }, []);
+
+  // Follow playback: when the active word leaves the viewport, bring it back
+  // to the middle. A wheel or touch scroll pauses following for a few
+  // seconds so reading ahead isn't yanked back.
+  const root = useRef<HTMLDivElement>(null);
+  const userScrolledAt = useRef(0);
+  useEffect(() => {
+    const note = () => {
+      userScrolledAt.current = Date.now();
+    };
+    window.addEventListener('wheel', note, { passive: true });
+    window.addEventListener('touchmove', note, { passive: true });
+    return () => {
+      window.removeEventListener('wheel', note);
+      window.removeEventListener('touchmove', note);
+    };
+  }, []);
+  useEffect(() => {
+    if (!playing || activeWord < 0 || Date.now() - userScrolledAt.current < 4000) return;
+    const el = root.current?.querySelector<HTMLElement>('.token.active');
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const margin = 80;
+    if (rect.top < margin || rect.bottom > window.innerHeight - margin) {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }, [activeWord, playing]);
 
   const press = (index: number, e: MouseEvent<HTMLButtonElement>, after?: () => void) => {
     if (e.button !== 0) return;
@@ -126,12 +163,21 @@ export function Transcript({
 
   const turns = splitTurns(tokenize(words, edits, showCuts), speakers);
   return (
-    <div className="transcript" aria-label="Transcript">
+    <div ref={root} className="transcript" aria-label="Transcript">
       {turns.map((turn) => {
         const first = turn.tokens[0];
         const key = first ? `turn-${tokenStart(first)}` : 'turn';
         return (
-          <div key={key} className="turn">
+          <div
+            key={key}
+            className={[
+              'turn',
+              turn.speaker !== null ? `speaker-${turn.speaker % 6}` : '',
+              turnContains(turn, activeWord) ? 'speaking' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
             {turn.speaker !== null && (
               <SpeakerTag
                 speaker={turn.speaker}
