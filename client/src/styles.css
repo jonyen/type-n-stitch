@@ -368,7 +368,8 @@ header h1 {
   gap: 8px;
   align-items: center;
 }
-.actions button {
+.actions button,
+.actions .toggle {
   white-space: nowrap;
 }
 

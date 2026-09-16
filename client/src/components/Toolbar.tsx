@@ -111,7 +111,7 @@ export function Toolbar({
             checked={twoWordFillers}
             onChange={(e) => onTwoWordFillers(e.target.checked)}
           />
-          “you know” / “I mean”
+          + “you know”
         </label>
         <span className="spacer" />
         <label className="toggle" title="Off: read the transcript as the output will sound">
