@@ -75,6 +75,32 @@ export function synthesizeOverdub(
   return postJson(`/api/media/${id}/overdub`, { text });
 }
 
+export interface Speakers {
+  /** Number of distinct speakers found. */
+  count: number;
+  /** Speaker index per transcript word, parallel to the word list. */
+  words: (number | null)[];
+}
+
+export function fetchSpeakers(id: string): Promise<Speakers> {
+  return request<Speakers>(`/api/media/${id}/speakers`, { method: 'POST' });
+}
+
+export interface Thumbnails {
+  url: string;
+  count: number;
+  columns: number;
+  rows: number;
+  /** Seconds between frames; cell i shows the frame at i * interval. */
+  interval: number;
+  width: number;
+  height: number;
+}
+
+export function fetchThumbnails(id: string): Promise<Thumbnails> {
+  return request<Thumbnails>(`/api/media/${id}/thumbnails`, { method: 'POST' });
+}
+
 export interface ExportStarted {
   jobId: string;
   planned: number;

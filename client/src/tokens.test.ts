@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { tokenize } from './tokens';
+import { splitTurns, tokenize } from './tokens';
 import type { Edit, Word } from './types';
 
 const words: Word[] = [
@@ -53,5 +53,42 @@ describe('tokenize', () => {
   it('does not swallow an overdub into a neighbouring gap', () => {
     const tokens = tokenize(words, [cut(0.91, 1.25), overdub, cut(2.0, 20)], false);
     expect(tokens.map((t) => t.kind)).toEqual(['word', 'gap', 'overdub', 'gap']);
+  });
+});
+
+describe('splitTurns', () => {
+  it('keeps everything in one unlabeled turn without speakers', () => {
+    const turns = splitTurns(tokenize(words, []), null);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.speaker).toBeNull();
+    expect(turns[0]?.tokens).toHaveLength(4);
+  });
+
+  it('starts a new turn whenever the speaker changes', () => {
+    const turns = splitTurns(tokenize(words, []), [0, 0, 1, 0]);
+    expect(turns.map((t) => [t.speaker, t.tokens.length])).toEqual([
+      [0, 2],
+      [1, 1],
+      [0, 1],
+    ]);
+  });
+
+  it('gives a collapsed token the speaker of its first word', () => {
+    const tokens = tokenize(words, [{ ...overdub, start: 0.91, end: 2.3 }]);
+    const turns = splitTurns(tokens, [0, 1, 0, 0]);
+    expect(turns.map((t) => [t.speaker, t.tokens.map((k) => k.kind)])).toEqual([
+      [0, ['word']],
+      [1, ['overdub']],
+    ]);
+  });
+
+  it('carries the previous speaker over unlabeled words', () => {
+    const turns = splitTurns(tokenize(words, []), [1, null, null, 1]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.speaker).toBe(1);
+  });
+
+  it('returns no turns for an empty transcript', () => {
+    expect(splitTurns([], [])).toEqual([]);
   });
 });

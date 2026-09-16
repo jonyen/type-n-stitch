@@ -74,6 +74,7 @@ curl -L -o models/ggml-large-v3-turbo.bin \
 # the app
 git clone https://github.com/jonyen/type-n-stitch && cd type-n-stitch
 npm install
+scripts/setup-diarization.sh   # optional: speaker labels (~60 MB, local models)
 npm run library   # optional: starter clips (needs yt-dlp: brew install yt-dlp)
 npm run dev
 ```
@@ -86,15 +87,19 @@ see [samples/README.md](samples/README.md) for what's in it and where it comes f
 voice profile; anything that answers `POST /v1/audio/speech` with `response_format: "wav"` will
 do. Without it, the Overdub button explains what's missing and everything else keeps working.
 
-| Variable        | Default                          | Purpose                           |
-| --------------- | -------------------------------- | --------------------------------- |
-| `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | ggml model file for whisper-cli   |
-| `WHISPER_BIN`   | `whisper-cli`                    | whisper.cpp binary                |
-| `TTS_BASE_URL`  | `http://localhost:3900/v1`       | OpenAI-compatible TTS base URL    |
-| `TTS_VOICE`     | `513bb606`                       | voice id sent to the TTS server   |
-| `DATA_DIR`      | `server/data`                    | uploads, transcripts and renders  |
-| `SAMPLES_DIR`   | `samples`                        | sample library manifest and clips |
-| `PORT`          | `5175`                           | server port                       |
+| Variable                     | Default                                                          | Purpose                                                 |
+| ---------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- |
+| `WHISPER_MODEL`              | `models/ggml-large-v3-turbo.bin`                                 | ggml model file for whisper-cli                         |
+| `WHISPER_BIN`                | `whisper-cli`                                                    | whisper.cpp binary                                      |
+| `DIARIZE_BIN`                | `models/diarization/bin/sherpa-onnx-offline-speaker-diarization` | speaker diarization binary                              |
+| `DIARIZE_SEGMENTATION_MODEL` | `models/diarization/segmentation.onnx`                           | pyannote segmentation model                             |
+| `DIARIZE_EMBEDDING_MODEL`    | `models/diarization/embedding.onnx`                              | speaker embedding model                                 |
+| `DIARIZE_THRESHOLD`          | `0.9`                                                            | clustering cut-off; raise it if one voice splits in two |
+| `TTS_BASE_URL`               | `http://localhost:3900/v1`                                       | OpenAI-compatible TTS base URL                          |
+| `TTS_VOICE`                  | `513bb606`                                                       | voice id sent to the TTS server                         |
+| `DATA_DIR`                   | `server/data`                                                    | uploads, transcripts and renders                        |
+| `SAMPLES_DIR`                | `samples`                                                        | sample library manifest and clips                       |
+| `PORT`                       | `5175`                                                           | server port                                             |
 
 ## Scripts
 
@@ -119,6 +124,13 @@ if the clip is missing.
 - **Tighten pauses.** Any silence longer than 0.6 s is cut down to 0.25 s, and leading silence
   past 0.5 s goes too. Pauses come from ffmpeg `silencedetect` on the audio, not from word gaps:
   whisper.cpp folds silence into the neighbouring word, so its timestamps never show a gap.
+- **Speakers.** After transcription, sherpa-onnx (pyannote segmentation + TitaNet speaker
+  embeddings, all local) works out who is talking when, and the transcript splits into turns
+  with a coloured label per speaker. Click a label to rename that speaker everywhere; names are
+  remembered in the browser. Clips with one voice show no labels. Needs
+  `scripts/setup-diarization.sh`; without it the transcript stays unsplit.
+- **Scrubber preview.** Hover or drag the timeline to see the frame at that point, dimmed and
+  marked when it falls inside a cut.
 - **Drag to select.** Press on a word and drag across the run, or shift-click, or use the arrow
   keys (shift extends).
 - **Show cuts.** Off hides struck words so the transcript reads the way the output will sound;
@@ -139,8 +151,10 @@ seek to it · shift-click or drag to select a run.
 
 ## Limitations
 
-- One speaker, English only (`-l en`), and whisper's word boundaries are what they are: a cut
+- English only (`-l en`), and whisper's word boundaries are what they are: a cut
   can clip a consonant. Descript-grade word alignment is a much deeper problem.
+- Speaker turns come from a separate model, so a turn boundary can land a word early or late,
+  and background voices or music can show up as an extra speaker.
 - An overdub always freezes the picture on the range's first frame for the length of the new
   audio, both in the preview and in the export. There is no lip-sync or time-stretching.
 - The preview skips cuts on the browser's clock, so a cut boundary can bleed a frame or two;

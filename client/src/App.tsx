@@ -3,6 +3,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import {
   exportMedia,
   exportProgress,
+  fetchSpeakers,
   openLibraryClip,
   suggestEdits,
   synthesizeOverdub,
@@ -31,6 +32,9 @@ export function App() {
   const [showCuts, setShowCuts] = useState(true);
   const [suggestions, setSuggestions] = useState<Suggestions>({ fillers: [], pauses: [] });
 
+  const [speakers, setSpeakers] = useState<(number | null)[] | null>(null);
+  const [speakerNames, setSpeakerNames] = useState<string[]>([]);
+
   const mediaRef = useRef<HTMLVideoElement>(null);
   const playback = usePlayback(mediaRef, editor.words, editor.edits, editor.duration);
 
@@ -54,6 +58,30 @@ export function App() {
       cancelled = true;
     };
   }, [media, words, duration, twoWordFillers]);
+
+  // Back to the start screen. Edits live only in this state, so they are dropped.
+  const goHome = useCallback(() => {
+    mediaRef.current?.pause();
+    setMedia(null);
+    setLoadError(null);
+    dispatch({ type: 'load', words: [], duration: 0 });
+    setExportState({ status: 'idle' });
+  }, []);
+
+  // Opening media pushes a history entry, so the browser's Back button (and
+  // the header's back link) return to the start screen.
+  useEffect(() => {
+    if (!media) return;
+    if (history.state?.media !== media.id) history.pushState({ media: media.id }, '');
+    const onPop = () => goHome();
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [media, goHome]);
+
+  const onBack = useCallback(() => {
+    if (history.state?.media) history.back();
+    else goHome();
+  }, [goHome]);
 
   const load = useCallback(async (label: string, fetchMedia: () => Promise<Media>) => {
     setLoadError(null);
@@ -80,6 +108,38 @@ export function App() {
   const onLibraryClip = useCallback(
     (item: LibraryItem) => load(`Opening ${item.title}`, () => openLibraryClip(item.slug)),
     [load],
+  );
+
+  // Speaker labels arrive after the transcript; the editor is usable before.
+  // One speaker means nothing to split, so labels stay hidden.
+  useEffect(() => {
+    setSpeakers(null);
+    if (!media) return;
+    setSpeakerNames(readSpeakerNames(media.id));
+    let cancelled = false;
+    fetchSpeakers(media.id)
+      .then((s) => {
+        if (!cancelled && s.count > 1) setSpeakers(s.words);
+      })
+      .catch(() => {
+        // Diarization not set up or failed: keep the plain transcript.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [media]);
+
+  const onRenameSpeaker = useCallback(
+    (speaker: number, name: string) => {
+      if (!media) return;
+      setSpeakerNames((names) => {
+        const next = [...names];
+        next[speaker] = name.trim();
+        writeSpeakerNames(media.id, next);
+        return next;
+      });
+    },
+    [media],
   );
 
   const onWordClick = useCallback(
@@ -179,26 +239,34 @@ export function App() {
   return (
     <div className="app">
       <header>
+        {media && (
+          <button type="button" className="ghost back" onClick={onBack} title="Back to samples">
+            <span aria-hidden>←</span> Home
+          </button>
+        )}
         <h1>
-          <span className="logo" aria-hidden />
-          type-n-stitch
+          {media ? (
+            <a
+              href="/"
+              className="home-link"
+              onClick={(e) => {
+                e.preventDefault();
+                onBack();
+              }}
+            >
+              <span className="logo" aria-hidden />
+              type-n-stitch
+            </a>
+          ) : (
+            <>
+              <span className="logo" aria-hidden />
+              type-n-stitch
+            </>
+          )}
         </h1>
         <span className="tagline muted">edit media by editing its words</span>
         <span className="spacer" />
-        {media && (
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              mediaRef.current?.pause();
-              setMedia(null);
-              dispatch({ type: 'load', words: [], duration: 0 });
-              setExportState({ status: 'idle' });
-            }}
-          >
-            New file
-          </button>
-        )}
+        {media && <span className="header-file muted">{media.filename}</span>}
       </header>
 
       {!media ? (
@@ -235,6 +303,9 @@ export function App() {
               onWordClick={onWordClick}
               onWordDrag={onWordDrag}
               onOverdubClick={(od) => playback.seek(od.start)}
+              speakers={speakers}
+              speakerNames={speakerNames}
+              onRenameSpeaker={onRenameSpeaker}
             />
           </section>
         </main>
@@ -249,4 +320,22 @@ export function App() {
       )}
     </div>
   );
+}
+
+// Speaker names are a per-browser convenience, keyed by media id.
+function readSpeakerNames(id: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(`speakers:${id}`) ?? '[]');
+    return Array.isArray(parsed) ? parsed.map((n) => (typeof n === 'string' ? n : '')) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSpeakerNames(id: string, names: string[]) {
+  try {
+    localStorage.setItem(`speakers:${id}`, JSON.stringify(names));
+  } catch {
+    // Storage unavailable; names last for this session only.
+  }
 }

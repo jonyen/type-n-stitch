@@ -6,8 +6,9 @@ use std::process::Stdio;
 
 use anyhow::{anyhow, Context};
 use engine::{
-    parse_progress_line, parse_silencedetect, parse_whisper_json, progress_fraction,
-    silencedetect_args, whisper_args, MediaKind, ProgressEvent, Range, Word, PROGRESS_ARGS,
+    diarize_args, parse_diarization, parse_progress_line, parse_silencedetect, parse_whisper_json,
+    progress_fraction, silencedetect_args, whisper_args, DiarizeOptions, MediaKind, ProgressEvent,
+    Range, SpeakerTurn, Word, PROGRESS_ARGS,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -117,6 +118,11 @@ pub async fn duration(path: &Path) -> anyhow::Result<f64> {
     Ok(probe(path).await?.duration)
 }
 
+/// Run ffmpeg to completion, with stderr in the error on failure.
+pub async fn ffmpeg(args: &[String]) -> anyhow::Result<()> {
+    run("ffmpeg", args).await.map(drop)
+}
+
 /// Whisper wants 16 kHz mono PCM.
 pub async fn to_whisper_wav(input: &Path, output: &Path) -> anyhow::Result<()> {
     let args = ["-y", "-loglevel", "error", "-i"]
@@ -152,6 +158,36 @@ pub async fn transcribe(
         .await
         .with_context(|| format!("whisper wrote no {}", json_path.display()))?;
     Ok(parse_whisper_json(&json)?)
+}
+
+/// Speaker turns in a 16 kHz mono `wav`, from sherpa-onnx's offline diarizer.
+pub async fn diarize(
+    config: &crate::config::Config,
+    wav: &Path,
+) -> anyhow::Result<Vec<SpeakerTurn>> {
+    for (path, what) in [
+        (&config.diarize_bin, "diarization binary"),
+        (&config.diarize_segmentation, "segmentation model"),
+        (&config.diarize_embedding, "speaker embedding model"),
+    ] {
+        if !path.is_file() {
+            return Err(anyhow!(
+                "speaker detection is not set up: no {what} at {} (run scripts/setup-diarization.sh)",
+                path.display()
+            ));
+        }
+    }
+    let args = diarize_args(
+        &wav.to_string_lossy(),
+        &DiarizeOptions {
+            segmentation_model: &config.diarize_segmentation.to_string_lossy(),
+            embedding_model: &config.diarize_embedding.to_string_lossy(),
+            cluster_threshold: config.diarize_threshold,
+            num_speakers: None,
+        },
+    );
+    let stdout = run(&config.diarize_bin.to_string_lossy(), &args).await?;
+    Ok(parse_diarization(&stdout))
 }
 
 /// Silent stretches in `wav`, from ffmpeg's `silencedetect` (logged on stderr).

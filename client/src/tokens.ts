@@ -41,3 +41,38 @@ export function tokenize(words: Word[], edits: Edit[], showCuts = true): Token[]
   }
   return tokens;
 }
+
+/** Index of the first transcript word a token stands for. */
+export function tokenStart(token: Token): number {
+  return token.kind === 'word' ? token.index : token.first;
+}
+
+export interface Turn {
+  /** null when speakers are unknown; the whole transcript is then one turn. */
+  speaker: number | null;
+  tokens: Token[];
+}
+
+/**
+ * Tokens split into consecutive runs by speaker. A token belongs to the
+ * speaker of its first word. With no speaker labels, returns a single turn.
+ */
+export function splitTurns(tokens: Token[], speakers: (number | null)[] | null): Turn[] {
+  if (!speakers) return tokens.length ? [{ speaker: null, tokens }] : [];
+  const turns: Turn[] = [];
+  let current: Turn | undefined;
+  for (const token of tokens) {
+    const speaker = speakers[tokenStart(token)] ?? current?.speaker ?? null;
+    if (!current || speaker !== current.speaker) {
+      current = { speaker, tokens: [] };
+      turns.push(current);
+    }
+    current.tokens.push(token);
+  }
+  return turns;
+}
+
+/** Display name for a speaker index: the user's name for them, or "Speaker n". */
+export function speakerLabel(speaker: number, names: string[]): string {
+  return names[speaker]?.trim() || `Speaker ${speaker + 1}`;
+}

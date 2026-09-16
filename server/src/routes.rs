@@ -10,8 +10,9 @@ use anyhow::Context;
 use axum::extract::{Multipart, Path as UrlPath, State};
 use axum::Json;
 use engine::{
-    build_ffmpeg_args, filler_cuts, output_duration, pause_cuts, silence_pause_cuts, timeline,
-    Edit, ExportOptions, MediaKind, OutputFormat, Range, SuggestOptions, Word,
+    assign_speakers, build_ffmpeg_args, filler_cuts, output_duration, pause_cuts,
+    silence_pause_cuts, thumbnail_args, thumbnail_sheet, timeline, Edit, ExportOptions, MediaKind,
+    OutputFormat, Range, SpeakerTurn, SuggestOptions, ThumbnailSheet, Word,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -186,6 +187,101 @@ pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>>
         .context("caching words")?;
     tracing::info!(id, words = words.len(), "transcribed");
     Ok(words)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Speakers {
+    /// Number of distinct speakers found.
+    count: u32,
+    /// Speaker index for each transcript word, parallel to the word list.
+    words: Vec<Option<u32>>,
+    turns: Vec<SpeakerTurn>,
+}
+
+/// Speaker cache file. Bump the version when diarization settings change.
+const SPEAKERS_CACHE: &str = "speakers-v1.json";
+
+/// `POST /api/media/:id/speakers` — who says each word (cached).
+pub async fn speakers(
+    State(state): State<Arc<AppState>>,
+    UrlPath(id): UrlPath<String>,
+) -> AppResult<Json<Speakers>> {
+    speakers_item(&state, &id).await.map(Json)
+}
+
+/// Speaker labels for a transcribed item, running the diarizer only if
+/// nothing is cached.
+pub async fn speakers_item(state: &AppState, id: &str) -> AppResult<Speakers> {
+    let dir = item_dir(state, id)?;
+    let cached = dir.join(SPEAKERS_CACHE);
+    if let Ok(json) = tokio::fs::read_to_string(&cached).await {
+        return Ok(serde_json::from_str(&json).context("parsing cached speakers")?);
+    }
+    let words = read_words(&dir).await?;
+    let turns = media::diarize(&state.config, &dir.join("whisper.wav"))
+        .await
+        .map_err(|e| AppError::upstream(format!("{e:#}")))?;
+    let speakers = Speakers {
+        count: turns.iter().map(|t| t.speaker + 1).max().unwrap_or(0),
+        words: assign_speakers(&words, &turns),
+        turns,
+    };
+    tokio::fs::write(&cached, serde_json::to_vec(&speakers)?)
+        .await
+        .context("caching speakers")?;
+    tracing::info!(id, speakers = speakers.count, "diarized");
+    Ok(speakers)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Thumbnails {
+    url: String,
+    #[serde(flatten)]
+    sheet: ThumbnailSheet,
+}
+
+/// Sprite sheet cache file. Bump the version when the sheet layout changes.
+const THUMBS_CACHE: &str = "thumbs-v1.jpg";
+
+/// `POST /api/media/:id/thumbnails` — a sprite sheet of frames for the
+/// scrubber preview, rendered once per video and cached.
+pub async fn thumbnails(
+    State(state): State<Arc<AppState>>,
+    UrlPath(id): UrlPath<String>,
+) -> AppResult<Json<Thumbnails>> {
+    let dir = item_dir(&state, &id)?;
+    let meta = read_meta(&dir).await?;
+    if meta.kind != MediaKind::Video {
+        return Err(AppError::bad_request("audio has no frames to preview"));
+    }
+    let sheet = thumbnail_sheet(meta.duration);
+    let output = dir.join(THUMBS_CACHE);
+    if !output.is_file() {
+        // Render to a temp name so a failed or concurrent run never leaves a
+        // half-written sheet behind under the cache name.
+        let partial = dir.join(format!("thumbs-{}.jpg", Uuid::new_v4()));
+        let source = dir.join(format!("source.{}", meta.ext));
+        let args = thumbnail_args(
+            &source.to_string_lossy(),
+            &partial.to_string_lossy(),
+            &sheet,
+        );
+        let rendered = media::ffmpeg(&args).await;
+        if let Err(e) = rendered {
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(AppError::upstream(format!("{e:#}")));
+        }
+        tokio::fs::rename(&partial, &output)
+            .await
+            .context("caching thumbnails")?;
+        tracing::info!(id, count = sheet.count, "rendered thumbnails");
+    }
+    Ok(Json(Thumbnails {
+        url: format!("/data/{id}/{THUMBS_CACHE}"),
+        sheet,
+    }))
 }
 
 /// Cached transcript, or a 404 if the item has not been transcribed yet.

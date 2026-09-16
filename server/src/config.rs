@@ -10,6 +10,10 @@ pub struct Config {
     pub samples_dir: PathBuf,
     pub whisper_bin: String,
     pub whisper_model: PathBuf,
+    pub diarize_bin: PathBuf,
+    pub diarize_segmentation: PathBuf,
+    pub diarize_embedding: PathBuf,
+    pub diarize_threshold: f64,
     pub tts_base_url: String,
     pub tts_voice: String,
     pub max_upload_bytes: usize,
@@ -36,6 +40,28 @@ impl Config {
                     "/../models/ggml-large-v3-turbo.bin"
                 ),
             )),
+            diarize_bin: PathBuf::from(env(
+                "DIARIZE_BIN",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../models/diarization/bin/sherpa-onnx-offline-speaker-diarization"
+                ),
+            )),
+            diarize_segmentation: PathBuf::from(env(
+                "DIARIZE_SEGMENTATION_MODEL",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../models/diarization/segmentation.onnx"
+                ),
+            )),
+            diarize_embedding: PathBuf::from(env(
+                "DIARIZE_EMBEDDING_MODEL",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../models/diarization/embedding.onnx"
+                ),
+            )),
+            diarize_threshold: env("DIARIZE_THRESHOLD", "0.9").parse().unwrap_or(0.9),
             tts_base_url: env("TTS_BASE_URL", "http://localhost:3900/v1")
                 .trim_end_matches('/')
                 .to_owned(),

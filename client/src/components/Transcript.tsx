@@ -1,7 +1,7 @@
-import { useEffect, useRef, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 
 import { wordStatus } from '../editlist';
-import { tokenize } from '../tokens';
+import { speakerLabel, splitTurns, tokenize, tokenStart, type Token } from '../tokens';
 import type { Edit, OverdubEdit, Word } from '../types';
 
 interface Props {
@@ -16,6 +16,10 @@ interface Props {
   /** The pointer, held down since a word, has reached another word. */
   onWordDrag: (index: number) => void;
   onOverdubClick: (overdub: OverdubEdit) => void;
+  /** Speaker per word, or null when unknown / a single speaker. */
+  speakers: (number | null)[] | null;
+  speakerNames: string[];
+  onRenameSpeaker: (speaker: number, name: string) => void;
 }
 
 export function Transcript({
@@ -27,6 +31,9 @@ export function Transcript({
   onWordClick,
   onWordDrag,
   onOverdubClick,
+  speakers,
+  speakerNames,
+  onRenameSpeaker,
 }: Props) {
   const inSelection = (i: number) => selected !== null && i >= selected[0] && i <= selected[1];
 
@@ -63,61 +70,122 @@ export function Transcript({
     if (e.detail === 0) onWordClick(index, e.shiftKey);
   };
 
+  const renderToken = (token: Token): ReactNode => {
+    if (token.kind === 'gap') {
+      const n = token.last - token.first + 1;
+      return (
+        <span key={`gap-${token.first}`}>
+          <span className="gap" title={`${n} word${n === 1 ? '' : 's'} cut`} aria-label="cut">
+            …
+          </span>{' '}
+        </span>
+      );
+    }
+    if (token.kind === 'overdub') {
+      const { overdub, first, last } = token;
+      const active = activeWord >= first && activeWord <= last;
+      const original = words
+        .slice(first, last + 1)
+        .map((w) => w.text)
+        .join(' ');
+      return (
+        <span key={`od-${first}`}>
+          <button
+            type="button"
+            className={`token overdub${active ? ' active' : ''}${inSelection(first) ? ' selected' : ''}`}
+            title={`Overdub replacing “${original}”`}
+            onMouseDown={(e) => press(first, e, () => onOverdubClick(overdub))}
+            onMouseEnter={() => enter(first)}
+            onClick={(e) => keyActivate(first, e)}
+          >
+            {overdub.text}
+          </button>{' '}
+        </span>
+      );
+    }
+    const { index, word } = token;
+    const status = wordStatus(word, edits);
+    const classes = ['token', status];
+    if (inSelection(index)) classes.push('selected');
+    if (index === activeWord) classes.push('active');
+    return (
+      <span key={word.id}>
+        <button
+          type="button"
+          className={classes.join(' ')}
+          data-index={index}
+          onMouseDown={(e) => press(index, e)}
+          onMouseEnter={() => enter(index)}
+          onClick={(e) => keyActivate(index, e)}
+        >
+          {word.text}
+        </button>{' '}
+      </span>
+    );
+  };
+
+  const turns = splitTurns(tokenize(words, edits, showCuts), speakers);
   return (
-    <p className="transcript" aria-label="Transcript">
-      {tokenize(words, edits, showCuts).map((token) => {
-        if (token.kind === 'gap') {
-          const n = token.last - token.first + 1;
-          return (
-            <span key={`gap-${token.first}`}>
-              <span className="gap" title={`${n} word${n === 1 ? '' : 's'} cut`} aria-label="cut">
-                …
-              </span>{' '}
-            </span>
-          );
-        }
-        if (token.kind === 'overdub') {
-          const { overdub, first, last } = token;
-          const active = activeWord >= first && activeWord <= last;
-          const original = words
-            .slice(first, last + 1)
-            .map((w) => w.text)
-            .join(' ');
-          return (
-            <span key={`od-${first}`}>
-              <button
-                type="button"
-                className={`token overdub${active ? ' active' : ''}${inSelection(first) ? ' selected' : ''}`}
-                title={`Overdub replacing “${original}”`}
-                onMouseDown={(e) => press(first, e, () => onOverdubClick(overdub))}
-                onMouseEnter={() => enter(first)}
-                onClick={(e) => keyActivate(first, e)}
-              >
-                {overdub.text}
-              </button>{' '}
-            </span>
-          );
-        }
-        const { index, word } = token;
-        const status = wordStatus(word, edits);
-        const classes = ['token', status];
-        if (inSelection(index)) classes.push('selected');
-        if (index === activeWord) classes.push('active');
+    <div className="transcript" aria-label="Transcript">
+      {turns.map((turn) => {
+        const first = turn.tokens[0];
+        const key = first ? `turn-${tokenStart(first)}` : 'turn';
         return (
-          <span key={word.id}>
-            <button
-              type="button"
-              className={classes.join(' ')}
-              data-index={index}
-              onMouseDown={(e) => press(index, e)}
-              onMouseEnter={() => enter(index)}
-              onClick={(e) => keyActivate(index, e)}
-            >
-              {word.text}
-            </button>{' '}
-          </span>
+          <div key={key} className="turn">
+            {turn.speaker !== null && (
+              <SpeakerTag
+                speaker={turn.speaker}
+                name={speakerLabel(turn.speaker, speakerNames)}
+                onRename={(name) => onRenameSpeaker(turn.speaker as number, name)}
+              />
+            )}
+            <p className={turn.speaker !== null ? `speech speaker-${turn.speaker % 6}` : 'speech'}>
+              {turn.tokens.map(renderToken)}
+            </p>
+          </div>
         );
       })}
-    </p>
+    </div>
+  );
+}
+
+interface TagProps {
+  speaker: number;
+  name: string;
+  onRename: (name: string) => void;
+}
+
+/** Speaker name above a turn; click to rename every turn by that speaker. */
+function SpeakerTag({ speaker, name, onRename }: TagProps) {
+  const [editing, setEditing] = useState(false);
+  const className = `speaker-tag speaker-${speaker % 6}`;
+  if (editing) {
+    return (
+      <input
+        className={className}
+        defaultValue={name}
+        autoFocus
+        aria-label="Speaker name"
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={(e) => {
+          onRename(e.currentTarget.value);
+          setEditing(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') setEditing(false);
+        }}
+      />
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={className}
+      title="Rename this speaker"
+      onClick={() => setEditing(true)}
+    >
+      {name}
+    </button>
   );
 }

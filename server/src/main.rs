@@ -57,6 +57,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/media", post(routes::upload))
         .route("/api/media/{id}/transcribe", post(routes::transcribe))
         .route("/api/media/{id}/suggest", post(routes::suggest))
+        .route("/api/media/{id}/thumbnails", post(routes::thumbnails))
+        .route("/api/media/{id}/speakers", post(routes::speakers))
         .route("/api/media/{id}/overdub", post(routes::overdub))
         .route("/api/media/{id}/export", post(routes::export))
         .route(

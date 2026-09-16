@@ -105,6 +105,32 @@ header h1 {
   margin: 0;
 }
 
+.home-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: inherit;
+  text-decoration: none;
+}
+
+button.ghost.back {
+  padding: 6px 10px;
+}
+
+.header-file {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40vw;
+}
+
+@media (max-width: 600px) {
+  .tagline {
+    display: none;
+  }
+}
+
 .logo {
   width: 22px;
   height: 22px;
@@ -135,6 +161,7 @@ header h1 {
 }
 
 .stage {
+  min-width: 0;
   position: sticky;
   top: 24px;
   display: flex;
@@ -435,14 +462,59 @@ header h1 {
   background: var(--hover);
 }
 
-.scrubber {
+.scrub-wrap {
   position: relative;
   flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+}
+
+.scrubber {
+  position: relative;
   height: 10px;
   border-radius: 5px;
   background: var(--border);
   cursor: pointer;
   overflow: hidden;
+  touch-action: none;
+}
+
+.scrub-preview {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.scrub-frame {
+  display: block;
+  background-repeat: no-repeat;
+}
+
+.scrub-preview.cut .scrub-frame {
+  opacity: 0.45;
+}
+
+.scrub-time {
+  padding: 2px 6px;
+  font-size: 11px;
+  text-align: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.8);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.scrub-preview.cut .scrub-time {
+  color: #fca5a5;
 }
 
 .scrubber .mark {
@@ -497,6 +569,7 @@ header h1 {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
@@ -636,6 +709,86 @@ button.ghost:hover {
   line-height: 1.9;
   user-select: none;
   cursor: text;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.speech {
+  margin: 0;
+}
+
+.turn:has(.speaker-tag) .speech {
+  padding-left: 14px;
+  border-left: 3px solid var(--speaker, var(--border));
+}
+
+.speaker-tag {
+  display: inline-block;
+  margin: 0 0 2px;
+  padding: 1px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--speaker, var(--muted));
+  cursor: pointer;
+  user-select: none;
+}
+
+button.speaker-tag:hover {
+  border-color: var(--border);
+  background: var(--hover);
+}
+
+input.speaker-tag {
+  border-color: var(--speaker, var(--accent));
+  background: var(--panel);
+  outline: none;
+  width: 16ch;
+}
+
+.speaker-0 {
+  --speaker: #2563eb;
+}
+.speaker-1 {
+  --speaker: #c2410c;
+}
+.speaker-2 {
+  --speaker: #15803d;
+}
+.speaker-3 {
+  --speaker: #9333ea;
+}
+.speaker-4 {
+  --speaker: #be123c;
+}
+.speaker-5 {
+  --speaker: #0e7490;
+}
+
+@media (prefers-color-scheme: dark) {
+  .speaker-0 {
+    --speaker: #60a5fa;
+  }
+  .speaker-1 {
+    --speaker: #fb923c;
+  }
+  .speaker-2 {
+    --speaker: #4ade80;
+  }
+  .speaker-3 {
+    --speaker: #c084fc;
+  }
+  .speaker-4 {
+    --speaker: #fb7185;
+  }
+  .speaker-5 {
+    --speaker: #22d3ee;
+  }
 }
 
 .token {

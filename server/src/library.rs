@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
-use crate::routes::{read_meta, transcribe_item, Meta};
+use crate::routes::{read_meta, speakers_item, transcribe_item, Meta};
 use crate::{media, AppState};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -180,7 +180,7 @@ async fn import(state: &AppState, entry: &Entry) -> AppResult<Meta> {
     Ok(meta)
 }
 
-/// Import and transcribe every downloaded clip in the background, one at a
+/// Import, transcribe and diarize every downloaded clip in the background, one at a
 /// time, so opening a library clip is instant.
 pub async fn warm(state: Arc<AppState>) {
     let entries = match read_entries(&state.config.samples_dir).await {
@@ -196,7 +196,8 @@ pub async fn warm(state: Arc<AppState>) {
         }
         let result = async {
             let meta = import(&state, &entry).await?;
-            transcribe_item(&state, &meta.id).await
+            transcribe_item(&state, &meta.id).await?;
+            speakers_item(&state, &meta.id).await
         }
         .await;
         if let Err(e) = result {
