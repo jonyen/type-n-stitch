@@ -1,14 +1,18 @@
 import { useRef, useState, type DragEvent } from 'react';
 
+import type { LibraryItem } from '../types';
+import { Library } from './Library';
+
 const ACCEPT = '.mp3,.wav,.m4a,.mp4,.mov,audio/*,video/*';
 
 interface Props {
   onFile: (file: File) => void;
+  onLibraryClip: (item: LibraryItem) => void;
   busy: string | null;
   error: string | null;
 }
 
-export function Dropzone({ onFile, busy, error }: Props) {
+export function Dropzone({ onFile, onLibraryClip, busy, error }: Props) {
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
@@ -64,6 +68,7 @@ export function Dropzone({ onFile, busy, error }: Props) {
         <li>Overdub a phrase in a cloned voice</li>
         <li>Export the stitched result</li>
       </ol>
+      <Library onOpen={onLibraryClip} disabled={busy !== null} />
     </div>
   );
 }

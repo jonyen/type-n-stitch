@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
+    pub samples_dir: PathBuf,
     pub whisper_bin: String,
     pub whisper_model: PathBuf,
     pub tts_base_url: String,
@@ -22,6 +23,10 @@ impl Config {
             data_dir: PathBuf::from(env(
                 "DATA_DIR",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/data"),
+            )),
+            samples_dir: PathBuf::from(env(
+                "SAMPLES_DIR",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../samples"),
             )),
             whisper_bin: env("WHISPER_BIN", "whisper-cli"),
             whisper_model: PathBuf::from(env(

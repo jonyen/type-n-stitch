@@ -11,6 +11,7 @@ export default defineConfig({
     proxy: {
       '/api': server,
       '/data': server,
+      '/library': server,
     },
   },
 });

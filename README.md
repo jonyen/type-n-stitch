@@ -74,34 +74,38 @@ curl -L -o models/ggml-large-v3-turbo.bin \
 # the app
 git clone https://github.com/jonyen/type-n-stitch && cd type-n-stitch
 npm install
+npm run library   # optional: starter clips (needs yt-dlp: brew install yt-dlp)
 npm run dev
 ```
 
-Open <http://localhost:5174>. The Rust server listens on 5175 and Vite proxies `/api` and
-`/data` to it.
+Open <http://localhost:5174>. The Rust server listens on 5175 and Vite proxies `/api`,
+`/data` and `/library` to it. The start screen lists the sample library under the drop zone;
+see [samples/README.md](samples/README.md) for what's in it and where it comes from.
 
 **Overdub** needs a local OpenAI-compatible speech endpoint. I use VoiceStudio with a cloned
 voice profile; anything that answers `POST /v1/audio/speech` with `response_format: "wav"` will
 do. Without it, the Overdub button explains what's missing and everything else keeps working.
 
-| Variable        | Default                          | Purpose                          |
-| --------------- | -------------------------------- | -------------------------------- |
-| `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | ggml model file for whisper-cli  |
-| `WHISPER_BIN`   | `whisper-cli`                    | whisper.cpp binary               |
-| `TTS_BASE_URL`  | `http://localhost:3900/v1`       | OpenAI-compatible TTS base URL   |
-| `TTS_VOICE`     | `513bb606`                       | voice id sent to the TTS server  |
-| `DATA_DIR`      | `server/data`                    | uploads, transcripts and renders |
-| `PORT`          | `5175`                           | server port                      |
+| Variable        | Default                          | Purpose                           |
+| --------------- | -------------------------------- | --------------------------------- |
+| `WHISPER_MODEL` | `models/ggml-large-v3-turbo.bin` | ggml model file for whisper-cli   |
+| `WHISPER_BIN`   | `whisper-cli`                    | whisper.cpp binary                |
+| `TTS_BASE_URL`  | `http://localhost:3900/v1`       | OpenAI-compatible TTS base URL    |
+| `TTS_VOICE`     | `513bb606`                       | voice id sent to the TTS server   |
+| `DATA_DIR`      | `server/data`                    | uploads, transcripts and renders  |
+| `SAMPLES_DIR`   | `samples`                        | sample library manifest and clips |
+| `PORT`          | `5175`                           | server port                       |
 
 ## Scripts
 
-| Command          | What it does                                                            |
-| ---------------- | ----------------------------------------------------------------------- |
-| `npm run dev`    | `cargo run -p server` and the Vite client, side by side                 |
-| `npm test`       | `cargo test` (engine unit tests + ffmpeg render test) and client vitest |
-| `npm run lint`   | `cargo fmt --check`, `cargo clippy -D warnings`, eslint, prettier       |
-| `npm run build`  | release build of the server and a production client bundle              |
-| `npm run format` | `cargo fmt` and `prettier --write`                                      |
+| Command           | What it does                                                            |
+| ----------------- | ----------------------------------------------------------------------- |
+| `npm run dev`     | `cargo run -p server` and the Vite client, side by side                 |
+| `npm run library` | makes `samples/sample.mp4` and downloads the sample library             |
+| `npm test`        | `cargo test` (engine unit tests + ffmpeg render test) and client vitest |
+| `npm run lint`    | `cargo fmt --check`, `cargo clippy -D warnings`, eslint, prettier       |
+| `npm run build`   | release build of the server and a production client bundle              |
+| `npm run format`  | `cargo fmt` and `prettier --write`                                      |
 
 The engine's render test needs `samples/sample.mp4` (see `samples/README.md`); it skips itself
 if the clip is missing.

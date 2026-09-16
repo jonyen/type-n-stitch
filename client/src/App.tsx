@@ -3,6 +3,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import {
   exportMedia,
   exportProgress,
+  openLibraryClip,
   suggestEdits,
   synthesizeOverdub,
   transcribeMedia,
@@ -16,7 +17,7 @@ import { Toolbar, type ExportState } from './components/Toolbar';
 import { Transcript } from './components/Transcript';
 import { editorReducer, initialEditor, selectedRange } from './editor';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
-import type { Media } from './types';
+import type { LibraryItem, Media } from './types';
 import { usePlayback } from './usePlayback';
 
 export function App() {
@@ -54,22 +55,32 @@ export function App() {
     };
   }, [media, words, duration, twoWordFillers]);
 
-  const onFile = useCallback(async (file: File) => {
+  const load = useCallback(async (label: string, fetchMedia: () => Promise<Media>) => {
     setLoadError(null);
     setExportState({ status: 'idle' });
     try {
-      setBusy(`Uploading ${file.name}`);
-      const uploaded = await uploadMedia(file);
+      setBusy(label);
+      const loaded = await fetchMedia();
       setBusy('Transcribing');
-      const words = await transcribeMedia(uploaded.id);
-      dispatch({ type: 'load', words, duration: uploaded.duration });
-      setMedia(uploaded);
+      const words = await transcribeMedia(loaded.id);
+      dispatch({ type: 'load', words, duration: loaded.duration });
+      setMedia(loaded);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(null);
     }
   }, []);
+
+  const onFile = useCallback(
+    (file: File) => load(`Uploading ${file.name}`, () => uploadMedia(file)),
+    [load],
+  );
+
+  const onLibraryClip = useCallback(
+    (item: LibraryItem) => load(`Opening ${item.title}`, () => openLibraryClip(item.slug)),
+    [load],
+  );
 
   const onWordClick = useCallback(
     (index: number, extend: boolean) => {
@@ -191,7 +202,7 @@ export function App() {
       </header>
 
       {!media ? (
-        <Dropzone onFile={onFile} busy={busy} error={loadError} />
+        <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError} />
       ) : (
         <main className="editor">
           <section className="stage">

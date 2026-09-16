@@ -20,7 +20,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['*.js', '*.ts'],
+    files: ['*.js', '*.ts', 'samples/**/*.mjs'],
     languageOptions: { globals: globals.node },
   },
   prettier,

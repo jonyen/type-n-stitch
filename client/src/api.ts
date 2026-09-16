@@ -1,6 +1,6 @@
 // Thin fetch wrappers over the Rust server. Errors carry the server's message.
 
-import type { CutEdit, Edit, Media, Word } from './types';
+import type { CutEdit, Edit, LibraryItem, Media, Word } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -42,6 +42,14 @@ export function uploadMedia(file: File): Promise<Media> {
   const form = new FormData();
   form.append('file', file, file.name);
   return request<Media>('/api/media', { method: 'POST', body: form });
+}
+
+export function listLibrary(): Promise<LibraryItem[]> {
+  return request<LibraryItem[]>('/api/library');
+}
+
+export function openLibraryClip(slug: string): Promise<Media> {
+  return request<Media>(`/api/library/${encodeURIComponent(slug)}`, { method: 'POST' });
 }
 
 export async function transcribeMedia(id: string): Promise<Word[]> {

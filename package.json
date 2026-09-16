@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "dev": "concurrently -k -n server,client -c blue,magenta \"cargo run -p server\" \"npm:dev -w client\"",
+    "library": "samples/make-sample.sh && node samples/fetch-library.mjs",
     "test": "cargo test && vitest run",
     "test:watch": "vitest",
     "build": "cargo build --release && npm run build -w client",

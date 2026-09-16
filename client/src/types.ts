@@ -36,3 +36,17 @@ export interface Media {
   kind: MediaKind;
   url: string;
 }
+
+/** A starter clip from samples/library.json (GET /api/library). */
+export interface LibraryItem {
+  slug: string;
+  title: string;
+  blurb: string;
+  author: string;
+  sourceTitle: string;
+  sourceUrl: string | null;
+  kind: MediaKind;
+  duration: number | null;
+  poster: string | null;
+  available: boolean;
+}

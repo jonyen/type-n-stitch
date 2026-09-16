@@ -26,12 +26,12 @@ const ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "m4a", "mp4", "mov", "aac", 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Meta {
-    id: String,
-    filename: String,
-    ext: String,
-    duration: f64,
-    kind: MediaKind,
-    url: String,
+    pub id: String,
+    pub filename: String,
+    pub ext: String,
+    pub duration: f64,
+    pub kind: MediaKind,
+    pub url: String,
 }
 
 /// A media item's directory, validated so `id` can't escape `data/`.
@@ -44,7 +44,7 @@ fn item_dir(state: &AppState, id: &str) -> AppResult<PathBuf> {
     Ok(dir)
 }
 
-async fn read_meta(dir: &Path) -> AppResult<Meta> {
+pub async fn read_meta(dir: &Path) -> AppResult<Meta> {
     let json = tokio::fs::read_to_string(dir.join("meta.json"))
         .await
         .context("reading meta.json")?;
@@ -154,11 +154,16 @@ pub async fn transcribe(
     State(state): State<Arc<AppState>>,
     UrlPath(id): UrlPath<String>,
 ) -> AppResult<Json<Transcript>> {
-    let dir = item_dir(&state, &id)?;
+    let words = transcribe_item(&state, &id).await?;
+    Ok(Json(Transcript { words }))
+}
+
+/// Words for a media item, running whisper.cpp only if nothing is cached.
+pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>> {
+    let dir = item_dir(state, id)?;
     let cached = dir.join(WORDS_CACHE);
     if let Ok(json) = tokio::fs::read_to_string(&cached).await {
-        let words: Vec<Word> = serde_json::from_str(&json).context("parsing cached words")?;
-        return Ok(Json(Transcript { words }));
+        return Ok(serde_json::from_str(&json).context("parsing cached words")?);
     }
 
     let meta = read_meta(&dir).await?;
@@ -180,7 +185,7 @@ pub async fn transcribe(
         .await
         .context("caching words")?;
     tracing::info!(id, words = words.len(), "transcribed");
-    Ok(Json(Transcript { words }))
+    Ok(words)
 }
 
 /// Cached transcript, or a 404 if the item has not been transcribed yet.

@@ -4,6 +4,7 @@
 
 mod config;
 mod error;
+mod library;
 mod media;
 mod routes;
 mod tts;
@@ -51,6 +52,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/api/health", get(routes::health))
+        .route("/api/library", get(library::list))
+        .route("/api/library/{slug}", post(library::open))
         .route("/api/media", post(routes::upload))
         .route("/api/media/{id}/transcribe", post(routes::transcribe))
         .route("/api/media/{id}/suggest", post(routes::suggest))
@@ -61,10 +64,16 @@ async fn main() -> anyhow::Result<()> {
             get(routes::export_progress),
         )
         .nest_service("/data", ServeDir::new(&state.config.data_dir))
+        .nest_service(
+            "/library",
+            ServeDir::new(state.config.samples_dir.join("library")),
+        )
         .layer(DefaultBodyLimit::max(state.config.max_upload_bytes))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
+
+    tokio::spawn(library::warm(state.clone()));
 
     let addr = format!("127.0.0.1:{}", state.config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

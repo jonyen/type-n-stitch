@@ -1,0 +1,81 @@
+[
+  {
+    "slug": "synthetic-demo",
+    "title": "Synthetic demo (20 s)",
+    "blurb": "Generated speech with planted fillers and long pauses. Built by samples/make-sample.sh.",
+    "author": "type-n-stitch",
+    "sourceTitle": "samples/make-sample.sh",
+    "file": "sample.mp4"
+  },
+  {
+    "slug": "vlog-wednesday",
+    "title": "Casual vlog, talking to camera",
+    "blurb": "Unscripted and chatty: lots of fillers and pauses to clean up.",
+    "youtubeId": "VOA_H5aCpG4",
+    "author": "Lucy Sims",
+    "sourceTitle": "I just wanted to talk to the camera/a Wednesday vlog",
+    "start": 20,
+    "end": 80
+  },
+  {
+    "slug": "vlog-camera-confidence",
+    "title": "Vlogging tips",
+    "blurb": "One presenter, direct to camera, quick delivery.",
+    "youtubeId": "LiXw0vovqCc",
+    "author": "Naveed Anwer",
+    "sourceTitle": "GETTING CAMERA CONFIDENCE (HOW TO VLOG)",
+    "start": 30,
+    "end": 90
+  },
+  {
+    "slug": "talk-educational-video",
+    "title": "Short stage talk",
+    "blurb": "A rehearsed talk: tighter speech, fewer fillers.",
+    "youtubeId": "RQaW2bFieo8",
+    "author": "TED (TEDTalentSearch)",
+    "sourceTitle": "Derek Muller: The key to effective educational science videos",
+    "start": 15,
+    "end": 75
+  },
+  {
+    "slug": "tedx-creativity",
+    "title": "TEDx talk",
+    "blurb": "Stage audio with room reverb and audience noise.",
+    "youtubeId": "ltPAsp71rmI",
+    "author": "TEDx Talks",
+    "sourceTitle": "Creativity as a Life Skill: Gerard Puccio at TEDxGramercy",
+    "start": 60,
+    "end": 120
+  },
+  {
+    "slug": "lecture-command-line",
+    "title": "CS lecture",
+    "blurb": "Classroom lecture with screen content and technical vocabulary.",
+    "youtubeId": "e8BO_dYxk5c",
+    "author": "Missing Semester (MIT)",
+    "sourceTitle": "Lecture 5: Command-line Environment (2020)",
+    "start": 30,
+    "end": 90
+  },
+  {
+    "slug": "lecture-yale-audio",
+    "title": "University lecture (audio only)",
+    "blurb": "Exported as mp3 to try the audio-only path.",
+    "youtubeId": "5_yOVARO2Oc",
+    "author": "YaleCourses",
+    "sourceTitle": "1. Introduction",
+    "start": 120,
+    "end": 180,
+    "audioOnly": true
+  },
+  {
+    "slug": "conversation-interview",
+    "title": "Two-person conversation",
+    "blurb": "Two speakers taking turns; see how cuts land between voices.",
+    "youtubeId": "Qq9aYJxALAU",
+    "author": "Daily English Studio",
+    "sourceTitle": "How to Speak in an Interview | Real English Conversation",
+    "start": 10,
+    "end": 70
+  }
+]

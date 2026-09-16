@@ -4,6 +4,9 @@ server/data/
 target/
 samples/*
 !samples/README.md
+!samples/library.json
+!samples/make-sample.sh
+!samples/fetch-library.mjs
 .DS_Store
 *.log
 .vite/
