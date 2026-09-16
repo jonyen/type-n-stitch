@@ -1,6 +1,5 @@
-// Suggested edits: filler words and long pauses. Mirrors engine/src/suggest.rs for instant counts.
-// so the toolbar can show counts instantly; the server's
-// POST /api/media/:id/suggest returns the same lists.
+// Suggested edits: filler words and long pauses. A local mirror of engine/src/suggest.rs, used
+// only if POST /api/media/:id/suggest fails. The server's pause list comes from measured silence.
 
 import { cutRanges } from './editlist';
 import type { CutEdit, Edit, Word } from './types';
