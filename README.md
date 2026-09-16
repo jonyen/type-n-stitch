@@ -35,7 +35,9 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
  │  Dropzone → upload         │ ─────▶ │  POST /api/media            (upload)   │
  │  Transcript (word tokens)  │        │  POST /api/media/:id/transcribe        │
  │  editor reducer + undo     │        │  POST /api/media/:id/overdub           │
- │  usePlayback: live skip    │        │  POST /api/media/:id/export            │
+ │  usePlayback: live skip    │        │  POST /api/media/:id/suggest           │
+ │  suggest.ts (fillers,      │        │  POST /api/media/:id/export  → job id  │
+ │    pauses, preview mirror) │        │  GET  …/export/:job/progress           │
  │  editlist.ts (preview      │ ◀───── │  GET  /data/…       (source, wav, mp4) │
  │    mirror of the engine)   │ /data  │                                        │
  └────────────────────────────┘        │  engine/  Rust library                 │
@@ -104,10 +106,29 @@ do. Without it, the Overdub button explains what's missing and everything else k
 The engine's render test needs `samples/sample.mp4` (see `samples/README.md`); it skips itself
 if the clip is missing.
 
+## Editing tools
+
+- **Remove fillers.** One click cuts every `um`, `uh`, `hmm`, `er`, `ah` (and, with the toggle on,
+  `you know` / `I mean`). The button shows how many are left, and one undo restores them all.
+- **Tighten pauses.** Any gap between words longer than 0.6 s is cut down to 0.25 s; leading
+  silence past 0.5 s goes too.
+- **Drag to select.** Press on a word and drag across the run, or shift-click, or use the arrow
+  keys (shift extends).
+- **Show cuts.** Off hides struck words so the transcript reads the way the output will sound;
+  a `…` marks each removed run.
+- **Export with progress.** Export starts ffmpeg in the background and polls its progress; the
+  bar fills against the planned output length, then the download link shows duration and size.
+- **Stats line.** Source length, output length, seconds removed, cut and overdub counts.
+
+Suggestions are computed by the Rust engine (`engine/src/suggest.rs`, served at
+`POST /api/media/:id/suggest`) with the same rules mirrored in `client/src/suggest.ts` for an
+instant preview.
+
 ## Keyboard
 
 `Delete` / `Backspace` cuts the selection · `⌘Z` / `Ctrl-Z` undoes · `Space` plays and pauses ·
-`Esc` clears the selection · click a word to seek to it · shift-click to extend the selection.
+`Esc` clears the selection · `←` `→` move the selection, with `Shift` extend it · click a word to
+seek to it · shift-click or drag to select a run.
 
 ## Limitations
 
