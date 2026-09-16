@@ -2,8 +2,8 @@ import { formatTime } from '../editlist';
 
 export type ExportState =
   | { status: 'idle' }
-  | { status: 'rendering' }
-  | { status: 'done'; url: string; duration: number }
+  | { status: 'rendering'; progress: number }
+  | { status: 'done'; url: string; duration: number; bytes: number }
   | { status: 'error'; message: string };
 
 interface Props {
@@ -23,6 +23,12 @@ interface Props {
   onTwoWordFillers: (on: boolean) => void;
   onShowCuts: (on: boolean) => void;
   onExport: () => void;
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
 }
 
 function plural(n: number, noun: string): string {
@@ -118,9 +124,21 @@ export function Toolbar({
         </label>
       </div>
 
+      {exportState.status === 'rendering' && (
+        <div
+          className="export-progress"
+          role="progressbar"
+          aria-valuenow={Math.round(exportState.progress * 100)}
+        >
+          <div className="bar">
+            <div className="fill" style={{ width: `${Math.round(exportState.progress * 100)}%` }} />
+          </div>
+          <span className="muted">{Math.round(exportState.progress * 100)}%</span>
+        </div>
+      )}
       {exportState.status === 'done' && (
         <p className="export-result">
-          Rendered {formatTime(exportState.duration)} ·{' '}
+          Rendered {formatTime(exportState.duration)} · {formatBytes(exportState.bytes)} ·{' '}
           <a href={exportState.url} download>
             Download {exportState.url.split('/').pop()}
           </a>

@@ -8,7 +8,8 @@ mod media;
 mod routes;
 mod tts;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
@@ -20,10 +21,11 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 
-/// Shared, read-only server state.
+/// Shared server state: read-only config plus the in-flight export jobs.
 pub struct AppState {
     pub config: Config,
     pub http: reqwest::Client,
+    pub jobs: Mutex<HashMap<String, routes::ExportJob>>,
 }
 
 #[tokio::main]
@@ -44,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         http: reqwest::Client::new(),
         config,
+        jobs: Mutex::new(HashMap::new()),
     });
 
     let app = Router::new()
@@ -53,6 +56,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/media/{id}/suggest", post(routes::suggest))
         .route("/api/media/{id}/overdub", post(routes::overdub))
         .route("/api/media/{id}/export", post(routes::export))
+        .route(
+            "/api/media/{id}/export/{job}/progress",
+            get(routes::export_progress),
+        )
         .nest_service("/data", ServeDir::new(&state.config.data_dir))
         .layer(DefaultBodyLimit::max(state.config.max_upload_bytes))
         .layer(CorsLayer::permissive())

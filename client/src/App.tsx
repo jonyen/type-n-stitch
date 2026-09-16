@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 
 import {
   exportMedia,
+  exportProgress,
   suggestEdits,
   synthesizeOverdub,
   transcribeMedia,
@@ -85,10 +86,29 @@ export function App() {
 
   const onExport = useCallback(async () => {
     if (!media) return;
-    setExportState({ status: 'rendering' });
+    setExportState({ status: 'rendering', progress: 0 });
     try {
-      const result = await exportMedia(media.id, editor.edits);
-      setExportState({ status: 'done', ...result });
+      const { jobId } = await exportMedia(media.id, editor.edits);
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 300));
+        const job = await exportProgress(media.id, jobId);
+        if (job.status === 'running') {
+          setExportState({ status: 'rendering', progress: job.progress });
+        } else if (job.status === 'done') {
+          setExportState({ status: 'rendering', progress: 1 });
+          await new Promise((r) => setTimeout(r, 250));
+          setExportState({
+            status: 'done',
+            url: job.url,
+            duration: job.duration,
+            bytes: job.bytes,
+          });
+          return;
+        } else {
+          setExportState({ status: 'error', message: job.message });
+          return;
+        }
+      }
     } catch (err) {
       setExportState({
         status: 'error',

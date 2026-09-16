@@ -475,10 +475,29 @@ button.ghost:hover {
 
 /* Transcript */
 
+.export-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 0;
+}
+.export-progress .bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--border, #ddd);
+  overflow: hidden;
+}
+.export-progress .fill {
+  height: 100%;
+  background: var(--accent, #4f46e5);
+  transition: width 0.25s ease;
+}
+
 .transcript {
   margin: 0;
-  font-size: 18px;
-  line-height: 1.95;
+  font-size: 20px;
+  line-height: 1.9;
   user-select: none;
   cursor: text;
 }

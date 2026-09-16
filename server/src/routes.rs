@@ -270,9 +270,46 @@ pub struct ExportRequest {
 }
 
 #[derive(Serialize)]
-pub struct ExportResponse {
-    url: String,
-    duration: f64,
+#[serde(rename_all = "camelCase")]
+pub struct ExportStarted {
+    job_id: String,
+    /// Planned output length in seconds, for the client's progress bar.
+    planned: f64,
+}
+
+/// One export, from the moment ffmpeg starts until the client has read the
+/// result. `progress` is a fraction of the planned output length.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum ExportJob {
+    Running {
+        #[serde(skip)]
+        media_id: String,
+        progress: f64,
+    },
+    Done {
+        #[serde(skip)]
+        media_id: String,
+        progress: f64,
+        url: String,
+        duration: f64,
+        bytes: u64,
+    },
+    Error {
+        #[serde(skip)]
+        media_id: String,
+        message: String,
+    },
+}
+
+impl ExportJob {
+    fn media_id(&self) -> &str {
+        match self {
+            ExportJob::Running { media_id, .. }
+            | ExportJob::Done { media_id, .. }
+            | ExportJob::Error { media_id, .. } => media_id,
+        }
+    }
 }
 
 /// Resolve each overdub's `/data/<id>/overdub-n.wav` URL to a file in `dir`.
@@ -301,12 +338,21 @@ fn overdub_files(id: &str, dir: &Path, edits: &[Edit]) -> AppResult<HashMap<Stri
     Ok(files)
 }
 
-/// `POST /api/media/:id/export` — render the edit list with ffmpeg.
+fn set_job(state: &AppState, job_id: &str, job: ExportJob) {
+    state
+        .jobs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(job_id.to_owned(), job);
+}
+
+/// `POST /api/media/:id/export` — plan the render, start ffmpeg in the
+/// background and return a job id to poll.
 pub async fn export(
     State(state): State<Arc<AppState>>,
     UrlPath(id): UrlPath<String>,
     Json(req): Json<ExportRequest>,
-) -> AppResult<Json<ExportResponse>> {
+) -> AppResult<Json<ExportStarted>> {
     let dir = item_dir(&state, &id)?;
     let meta = read_meta(&dir).await?;
     let format = match req.format.as_deref() {
@@ -332,17 +378,80 @@ pub async fn export(
         },
     )
     .map_err(|e| AppError::bad_request(e.to_string()))?;
-
-    tracing::info!(id, edits = req.edits.len(), "rendering with ffmpeg");
-    media::ffmpeg(&args)
-        .await
-        .map_err(|e| AppError::upstream(format!("{e:#}")))?;
-
     let planned = output_duration(&timeline(meta.duration, &req.edits));
-    let duration = media::duration(&output).await.unwrap_or(planned);
-    tracing::info!(id, duration, planned, "export done");
-    Ok(Json(ExportResponse {
-        url: format!("/data/{id}/{name}"),
-        duration,
-    }))
+
+    let job_id = Uuid::new_v4().to_string();
+    set_job(
+        &state,
+        &job_id,
+        ExportJob::Running {
+            media_id: id.clone(),
+            progress: 0.0,
+        },
+    );
+    tracing::info!(
+        id,
+        job = job_id,
+        edits = req.edits.len(),
+        planned,
+        "rendering with ffmpeg"
+    );
+
+    let task_state = state.clone();
+    let task_job = job_id.clone();
+    let url = format!("/data/{id}/{name}");
+    tokio::spawn(async move {
+        let media_id = id.clone();
+        let on_progress = |progress: f64| {
+            set_job(
+                &task_state,
+                &task_job,
+                ExportJob::Running {
+                    media_id: media_id.clone(),
+                    progress,
+                },
+            );
+        };
+        let job = match media::ffmpeg_with_progress(&args, planned, on_progress).await {
+            Ok(()) => {
+                let duration = media::duration(&output).await.unwrap_or(planned);
+                let bytes = tokio::fs::metadata(&output).await.map_or(0, |m| m.len());
+                tracing::info!(id, job = task_job, duration, bytes, "export done");
+                ExportJob::Done {
+                    media_id: id,
+                    progress: 1.0,
+                    url,
+                    duration,
+                    bytes,
+                }
+            }
+            Err(e) => {
+                tracing::error!(id, job = task_job, "export failed: {e:#}");
+                ExportJob::Error {
+                    media_id: id,
+                    message: format!("{e:#}"),
+                }
+            }
+        };
+        set_job(&task_state, &task_job, job);
+    });
+
+    Ok(Json(ExportStarted { job_id, planned }))
+}
+
+/// `GET /api/media/:id/export/:job/progress` — poll an export.
+pub async fn export_progress(
+    State(state): State<Arc<AppState>>,
+    UrlPath((id, job_id)): UrlPath<(String, String)>,
+) -> AppResult<Json<ExportJob>> {
+    item_dir(&state, &id)?;
+    let job = state
+        .jobs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&job_id)
+        .filter(|j| j.media_id() == id)
+        .cloned()
+        .ok_or_else(|| AppError::not_found(format!("no export job {job_id}")))?;
+    Ok(Json(job))
 }

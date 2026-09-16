@@ -67,6 +67,20 @@ export function synthesizeOverdub(
   return postJson(`/api/media/${id}/overdub`, { text });
 }
 
-export function exportMedia(id: string, edits: Edit[]): Promise<{ url: string; duration: number }> {
+export interface ExportStarted {
+  jobId: string;
+  planned: number;
+}
+
+export type ExportJob =
+  | { status: 'running'; progress: number }
+  | { status: 'done'; progress: number; url: string; duration: number; bytes: number }
+  | { status: 'error'; message: string };
+
+export function exportMedia(id: string, edits: Edit[]): Promise<ExportStarted> {
   return postJson(`/api/media/${id}/export`, { edits });
+}
+
+export function exportProgress(id: string, jobId: string): Promise<ExportJob> {
+  return request<ExportJob>(`/api/media/${id}/export/${jobId}/progress`);
 }

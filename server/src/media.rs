@@ -2,10 +2,38 @@
 
 use std::path::{Path, PathBuf};
 
+use std::process::Stdio;
+
 use anyhow::{anyhow, Context};
-use engine::{parse_whisper_json, whisper_args, MediaKind, Word};
+use engine::{
+    parse_progress_line, parse_whisper_json, progress_fraction, whisper_args, MediaKind,
+    ProgressEvent, Word, PROGRESS_ARGS,
+};
 use serde::Deserialize;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+
+/// Last few lines of a tool's stderr, for error messages.
+fn stderr_tail(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let tail: Vec<&str> = text.lines().rev().take(8).collect();
+    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+}
+
+fn check_status(program: &str, output: &std::process::Output) -> anyhow::Result<()> {
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "{program} exited with {}: {}",
+        output.status,
+        stderr_tail(&output.stderr).trim()
+    ))
+}
+
+fn start_error(program: &str) -> String {
+    format!("failed to start {program} (is it installed and on PATH?)")
+}
 
 /// Run a tool, returning stdout or an error that includes stderr.
 async fn run(program: &str, args: &[String]) -> anyhow::Result<String> {
@@ -13,24 +41,8 @@ async fn run(program: &str, args: &[String]) -> anyhow::Result<String> {
         .args(args)
         .output()
         .await
-        .with_context(|| format!("failed to start {program} (is it installed and on PATH?)"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: String = stderr
-            .lines()
-            .rev()
-            .take(8)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(anyhow!(
-            "{program} exited with {}: {}",
-            output.status,
-            tail.trim()
-        ));
-    }
+        .with_context(|| start_error(program))?;
+    check_status(program, &output)?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -142,6 +154,33 @@ pub async fn transcribe(
     Ok(parse_whisper_json(&json)?)
 }
 
-pub async fn ffmpeg(args: &[String]) -> anyhow::Result<()> {
-    run("ffmpeg", args).await.map(drop)
+/// Run ffmpeg with `-progress pipe:1`, calling `on_progress` with the
+/// fraction of `planned` output seconds written so far (0..=1).
+pub async fn ffmpeg_with_progress(
+    args: &[String],
+    planned: f64,
+    mut on_progress: impl FnMut(f64),
+) -> anyhow::Result<()> {
+    let mut child = Command::new("ffmpeg")
+        .args(PROGRESS_ARGS)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| start_error("ffmpeg"))?;
+    let stdout = child.stdout.take().context("ffmpeg stdout")?;
+    let mut lines = BufReader::new(stdout).lines();
+    while let Some(line) = lines.next_line().await? {
+        match parse_progress_line(&line) {
+            Some(ProgressEvent::OutTime(t)) => on_progress(progress_fraction(t, planned)),
+            Some(ProgressEvent::End) => on_progress(1.0),
+            None => {}
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .context("waiting for ffmpeg")?;
+    check_status("ffmpeg", &output)
 }

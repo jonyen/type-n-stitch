@@ -13,6 +13,9 @@ interface Props {
 
 export function Player({ media, mediaRef, edits, playback }: Props) {
   const { duration } = media;
+  const cutCount = cutRanges(edits).length;
+  const overdubCount = overdubs(edits).length;
+  const removed = duration - outputDuration(duration, edits);
   const pct = (t: number) => `${(Math.min(Math.max(t, 0), duration) / duration) * 100}%`;
 
   const onScrub = (e: MouseEvent<HTMLDivElement>) => {
@@ -80,7 +83,21 @@ export function Player({ media, mediaRef, edits, playback }: Props) {
         </div>
       </div>
       <div className="player-meta muted">
-        {media.filename} · output {formatTime(outputDuration(duration, edits))}
+        {media.filename} · source {formatTime(duration)} · output{' '}
+        <strong>{formatTime(outputDuration(duration, edits))}</strong>
+        {removed > 0.05 && <> · {removed.toFixed(1)} s removed</>}
+        {cutCount > 0 && (
+          <>
+            {' '}
+            · {cutCount} {cutCount === 1 ? 'cut' : 'cuts'}
+          </>
+        )}
+        {overdubCount > 0 && (
+          <>
+            {' '}
+            · {overdubCount} {overdubCount === 1 ? 'overdub' : 'overdubs'}
+          </>
+        )}
       </div>
     </div>
   );
