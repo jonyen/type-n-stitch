@@ -368,6 +368,9 @@ header h1 {
   gap: 8px;
   align-items: center;
 }
+.actions button {
+  white-space: nowrap;
+}
 
 .actions button,
 .modal .actions button,
