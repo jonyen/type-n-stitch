@@ -940,3 +940,27 @@ input.speaker-tag {
     transform: rotate(360deg);
   }
 }
+
+/* Login */
+
+.login {
+  max-width: 22rem;
+  margin: 4rem auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.login label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+.login input {
+  font: inherit;
+  padding: 0.5rem 0.6rem;
+}
+.login .error {
+  color: var(--danger);
+  margin: 0;
+}

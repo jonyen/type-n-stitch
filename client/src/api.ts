@@ -1,6 +1,6 @@
 // Thin fetch wrappers over the Rust server. Errors carry the server's message.
 
-import type { CutEdit, Edit, LibraryItem, Media, Word } from './types';
+import type { CutEdit, Edit, LibraryItem, Media, User, Word } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -117,4 +117,24 @@ export function exportMedia(id: string, edits: Edit[]): Promise<ExportStarted> {
 
 export function exportProgress(id: string, jobId: string): Promise<ExportJob> {
   return request<ExportJob>(`/api/media/${id}/export/${jobId}/progress`);
+}
+
+export function fetchMe(): Promise<User> {
+  return request<User>('/api/me');
+}
+
+export function fetchSetup(): Promise<{ needsSetup: boolean }> {
+  return request('/api/auth/setup');
+}
+
+export function register(email: string, password: string, displayName: string): Promise<User> {
+  return postJson('/api/auth/register', { email, password, displayName });
+}
+
+export function login(email: string, password: string): Promise<User> {
+  return postJson('/api/auth/login', { email, password });
+}
+
+export function logout(): Promise<void> {
+  return request('/api/auth/logout', { method: 'POST' });
 }

@@ -50,3 +50,20 @@ export interface LibraryItem {
   poster: string | null;
   available: boolean;
 }
+
+export interface User {
+  id: string;
+  email: string;
+  displayName: string;
+  color: string;
+}
+
+export type Role = 'owner' | 'editor' | 'commenter' | 'viewer';
+
+export interface ProjectSummary {
+  id: string;
+  title: string;
+  role: Role;
+  media: Media;
+  createdAt: number;
+}
