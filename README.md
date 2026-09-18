@@ -17,8 +17,9 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
 2. **Edit.** The transcript is a stream of clickable words. Deleting a run of words adds a
    `cut` from the first word's start to the _next_ word's start, so the pause after the last
    deleted word goes with it and no half-gaps are left behind. Overdubbing a run sends new text
-   to VoiceStudio and adds an `overdub` edit carrying the WAV and its duration. Undo pops the
-   edit list.
+   to VoiceStudio and adds an `overdub` edit carrying the WAV and its duration. Every change is
+   an operation appended to the project's log in SQLite; the edit list is the fold of that log,
+   and undo appends an `undo` targeting your own operation.
 3. **Preview.** The browser plays the original file and honours the edit list live: an
    animation-frame loop seeks past cuts as the playhead reaches them, and for an overdub it
    pauses the picture on the first frame, plays the WAV through a second `Audio` element, then
@@ -32,15 +33,16 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
  ┌────────────────────────────┐        ┌────────────────────────────────────────┐
  │  client/  React + TS       │        │  server/  Rust, axum                   │
  │  ─────────────────────     │  /api  │  ────────────────────────────────────  │
- │  Dropzone → upload         │ ─────▶ │  POST /api/media            (upload)   │
- │  Transcript (word tokens)  │        │  POST /api/media/:id/transcribe        │
- │  editor reducer + undo     │        │  POST /api/media/:id/overdub           │
- │  usePlayback: live skip    │        │  POST /api/media/:id/suggest           │
- │  suggest.ts (fillers,      │        │  POST /api/media/:id/export  → job id  │
+ │  Dropzone → upload         │ ─────▶ │  POST /api/auth/{reg,login,logout}, /me│
+ │  Transcript (word tokens)  │        │  GET/POST /api/projects  (list, upload)│
+ │  editor reducer + undo     │        │  GET  /api/projects/:id  (media + fold)│
+ │  usePlayback: live skip    │        │  POST /api/projects/:id/ops (append)   │
+ │  suggest.ts (fillers,      │        │  POST /api/projects/:id/{transcribe,…} │
  │    pauses, preview mirror) │        │  GET  …/export/:job/progress           │
  │  editlist.ts (preview      │ ◀───── │  GET  /data/…       (source, wav, mp4) │
  │    mirror of the engine)   │ /data  │                                        │
  └────────────────────────────┘        │  engine/  Rust library                 │
+                                       │  SQLite (sqlx): accounts, op log       │
                                        │  ─────────────────────────────────     │
                                        │  Word / Edit types (serde)             │
                                        │  normalize_cuts · kept_segments        │
@@ -82,6 +84,17 @@ npm run dev
 Open <http://localhost:5174>. The Rust server listens on 5175 and Vite proxies `/api`,
 `/data` and `/library` to it. The start screen lists the sample library under the drop zone;
 see [samples/README.md](samples/README.md) for what's in it and where it comes from.
+
+### Accounts
+
+The first visit asks you to create an account. To create an admin non-interactively and
+adopt any media already under `DATA_DIR`, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` before
+starting the server. `ADMIN_PASSWORD` is only used when the admin account is first created;
+changing it later has no effect — reset the password through the app instead. The database
+lives at `$DATA_DIR/type-n-stitch.db`; override with `DATABASE_URL`. Registration is open to
+anyone who can reach the server — put it behind your own network or proxy. The client mirrors
+the engine's edit rules for the live preview, but the server's fold of the operation log is
+what export renders.
 
 **Overdub** needs a local OpenAI-compatible speech endpoint. I use VoiceStudio with a cloned
 voice profile; anything that answers `POST /v1/audio/speech` with `response_format: "wav"` will
@@ -140,7 +153,7 @@ if the clip is missing.
 - **Stats line.** Source length, output length, seconds removed, cut and overdub counts.
 
 Suggestions are computed by the Rust engine (`engine/src/suggest.rs`, served at
-`POST /api/media/:id/suggest`) with the same rules mirrored in `client/src/suggest.ts` for an
+`POST /api/projects/:id/suggest`) with the same rules mirrored in `client/src/suggest.ts` for an
 instant preview.
 
 ## Keyboard
@@ -160,9 +173,6 @@ seek to it · shift-click or drag to select a run.
 - The preview skips cuts on the browser's clock, so a cut boundary can bleed a frame or two;
   the export is frame-accurate.
 - Exports re-encode the whole file with libx264. Fine for clips, slow for an hour of 4K.
-- Projects live only in browser state; reloading the page loses the edit list (the uploaded
-  media and transcript stay cached under `server/data/`).
-- Zero auth. It is a local tool.
 
 ## License
 
