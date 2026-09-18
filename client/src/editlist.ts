@@ -274,3 +274,19 @@ export function formatTime(seconds: number): string {
   const rest = (s - m * 60).toFixed(1).padStart(4, '0');
   return `${m}:${rest}`;
 }
+
+/**
+ * The next override in the cycle a cut's transition button walks through:
+ * nothing set → dip to black → jump cut → nothing set.
+ */
+export function nextCutTransition(current: Transition | null): Transition | null {
+  if (current === 'dip') return 'none';
+  if (current === 'none') return null;
+  return 'dip';
+}
+
+/** The transition override on the cut starting at `start`, if it has one. */
+export function cutTransitionAt(start: number, edits: Edit[]): Transition | null {
+  const cut = edits.find((e): e is CutEdit => e.kind === 'cut' && Math.abs(e.start - start) < EPS);
+  return cut?.transition ?? null;
+}

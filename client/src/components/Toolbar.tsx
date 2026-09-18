@@ -1,4 +1,5 @@
 import { formatTime } from '../editlist';
+import type { Transition } from '../types';
 
 export type ExportState =
   | { status: 'idle' }
@@ -8,6 +9,8 @@ export type ExportState =
 
 interface Props {
   hasSelection: boolean;
+  /** A title card is selected instead of words; Delete removes it. */
+  hasTitleSelection: boolean;
   canUndo: boolean;
   canRedo: boolean;
   /** Viewers and commenters see the editor, but cannot change it. */
@@ -18,7 +21,12 @@ interface Props {
   twoWordFillers: boolean;
   showCuts: boolean;
   exportState: ExportState;
+  /** The project-wide transition between output pieces. */
+  transition: Transition;
   onDelete: () => void;
+  onAddTitle: () => void;
+  onAddCaption: () => void;
+  onTransition: (transition: Transition) => void;
   onOverdub: () => void;
   onUndo: () => void;
   onRedo: () => void;
@@ -41,6 +49,7 @@ function plural(n: number, noun: string): string {
 
 export function Toolbar({
   hasSelection,
+  hasTitleSelection,
   canUndo,
   canRedo,
   readOnly,
@@ -49,7 +58,11 @@ export function Toolbar({
   twoWordFillers,
   showCuts,
   exportState,
+  transition,
   onDelete,
+  onAddTitle,
+  onAddCaption,
+  onTransition,
   onOverdub,
   onUndo,
   onRedo,
@@ -66,7 +79,7 @@ export function Toolbar({
         <button
           type="button"
           onClick={onDelete}
-          disabled={readOnly || !hasSelection}
+          disabled={readOnly || (!hasSelection && !hasTitleSelection)}
           title="Delete / Backspace"
         >
           Delete
@@ -132,6 +145,37 @@ export function Toolbar({
             onChange={(e) => onTwoWordFillers(e.target.checked)}
           />
           + “you know”
+        </label>
+        <button
+          type="button"
+          onClick={onAddTitle}
+          disabled={readOnly}
+          title="Insert a full-frame title card at the selection, or at the playhead"
+        >
+          Add title
+        </button>
+        <button
+          type="button"
+          onClick={onAddCaption}
+          disabled={readOnly || !hasSelection}
+          title="Draw text over the picture while the selected words play"
+        >
+          Add caption
+        </button>
+        <label className="toggle" title="How the pieces either side of a cut meet">
+          Transitions
+          <select
+            value={transition}
+            disabled={readOnly}
+            aria-label="Transitions"
+            onChange={(e) => onTransition(e.target.value as Transition)}
+          >
+            <option value="none">Jump cut</option>
+            <option value="dip">Dip to black</option>
+            <option value="crossfade" disabled>
+              Crossfade (soon)
+            </option>
+          </select>
         </label>
         <span className="spacer" />
         <label className="toggle" title="Off: read the transcript as the output will sound">

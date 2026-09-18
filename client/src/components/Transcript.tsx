@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 
-import { wordStatus } from '../editlist';
+import { captions, cutTransitionAt, EPS, nextCutTransition, wordStatus } from '../editlist';
 import type { Peer } from '../realtime';
 import {
   speakerLabel,
@@ -17,7 +17,7 @@ import {
   turnContains,
   type Token,
 } from '../tokens';
-import type { Edit, OverdubEdit, Word } from '../types';
+import type { CaptionEdit, Edit, OverdubEdit, Transition, Word } from '../types';
 
 interface Props {
   words: Word[];
@@ -33,6 +33,15 @@ interface Props {
   /** The pointer, held down since a word, has reached another word. */
   onWordDrag: (index: number) => void;
   onOverdubClick: (overdub: OverdubEdit) => void;
+  /** The `at` of the selected title card, or null. Exclusive with a word selection. */
+  selectedTitle: number | null;
+  onTitleClick: (at: number) => void;
+  /** Double-click or Enter on a card: open it for editing. */
+  onTitleOpen: (at: number) => void;
+  /** Click a caption tag to remove that caption. */
+  onCaptionClick: (start: number) => void;
+  /** Cycle the transition override on the cut starting at `start`. */
+  onCutTransition: (start: number, transition: Transition | null) => void;
   /** Speaker per word, or null when unknown / a single speaker. */
   speakers: (number | null)[] | null;
   speakerNames: string[];
@@ -52,6 +61,11 @@ export function Transcript({
   onWordClick,
   onWordDrag,
   onOverdubClick,
+  selectedTitle,
+  onTitleClick,
+  onTitleOpen,
+  onCaptionClick,
+  onCutTransition,
   speakers,
   speakerNames,
   onRenameSpeaker,
@@ -127,19 +141,80 @@ export function Transcript({
     if (e.detail === 0) onWordClick(index, e.shiftKey);
   };
 
+  // The caption that begins at word `i`, so its tag is drawn once, after the
+  // first word it covers. A caption's range starts at that word's start.
+  const captionList = captions(edits);
+  const captionStartingAt = (i: number): CaptionEdit | undefined => {
+    const word = words[i];
+    if (!word) return undefined;
+    return captionList.find(
+      (c) =>
+        word.start >= c.start - EPS &&
+        word.start < c.end - EPS &&
+        (i === 0 || (words[i - 1]?.start ?? -1) < c.start - EPS),
+    );
+  };
+
+  const captionTag = (i: number): ReactNode => {
+    const caption = captionStartingAt(i);
+    if (!caption) return null;
+    return (
+      <span
+        className="caption-tag"
+        title={readOnly ? 'Caption' : 'Click to remove'}
+        onClick={readOnly ? undefined : () => onCaptionClick(caption.start)}
+      >
+        {caption.text}
+      </span>
+    );
+  };
+
   const renderToken = (token: Token): ReactNode => {
     if (token.kind === 'gap') {
       const n = token.last - token.first + 1;
+      // The cut op's start is the first cut word's start, which is how
+      // `deleteSelection` builds it, so that instant names this cut.
+      const start = words[token.first]?.start;
+      const override = start === undefined ? null : cutTransitionAt(start, edits);
       return (
         <span key={`gap-${token.first}`}>
           <span className="gap" title={`${n} word${n === 1 ? '' : 's'} cut`} aria-label="cut">
             …
-          </span>{' '}
+          </span>
+          {!readOnly && start !== undefined && (
+            <button
+              type="button"
+              className="gap-transition"
+              title="Transition for this cut"
+              aria-label="Transition for this cut"
+              onClick={() => onCutTransition(start, nextCutTransition(override))}
+            >
+              {override ?? '·'}
+            </button>
+          )}{' '}
         </span>
       );
     }
-    // Title cards get their own chrome in the transcript; nothing to draw yet.
-    if (token.kind === 'title') return null;
+    if (token.kind === 'title') {
+      const { title } = token;
+      const selected = selectedTitle !== null && Math.abs(selectedTitle - title.at) < EPS;
+      return (
+        <button
+          key={`title-${title.at}`}
+          type="button"
+          className={`title-token ${title.style}${selected ? ' selected' : ''}`}
+          title={readOnly ? title.text : 'Click to select · double-click to edit'}
+          onClick={readOnly ? undefined : () => onTitleClick(title.at)}
+          onDoubleClick={readOnly ? undefined : () => onTitleOpen(title.at)}
+          onKeyDown={(e) => {
+            if (!readOnly && e.key === 'Enter') onTitleOpen(title.at);
+          }}
+        >
+          <span className="title-token-text">{title.text}</span>
+          <span className="muted">{title.duration}s</span>
+        </button>
+      );
+    }
     if (token.kind === 'overdub') {
       const { overdub, first, last } = token;
       const active = activeWord >= first && activeWord <= last;
@@ -173,7 +248,8 @@ export function Transcript({
             onClick={(e) => keyActivate(first, e)}
           >
             {overdub.text}
-          </button>{' '}
+          </button>
+          {captionTag(first)}{' '}
         </span>
       );
     }
@@ -205,7 +281,8 @@ export function Transcript({
           onClick={(e) => keyActivate(index, e)}
         >
           {word.text}
-        </button>{' '}
+        </button>
+        {captionTag(index)}{' '}
       </span>
     );
   };

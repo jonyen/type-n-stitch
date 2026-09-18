@@ -1352,3 +1352,156 @@ input.speaker-tag {
 .frame.fading video {
   opacity: 0.15;
 }
+
+/* Title cards and captions in the transcript */
+
+.title-token {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin: 6px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.title-token.dark {
+  background: #111;
+  color: #fff;
+}
+
+.title-token.light {
+  background: #f6f6f7;
+  color: #17181a;
+}
+
+.title-token.accent {
+  background: #2563eb;
+  color: #fff;
+}
+
+.title-token .muted {
+  color: inherit;
+  opacity: 0.6;
+}
+
+.title-token-text {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title-token.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.caption-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.gap-transition {
+  margin-left: 2px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.gap-transition:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Title and caption dialogs */
+
+.modal .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.modal .field input[type='text'],
+.modal .field input[type='number'],
+.modal .field select {
+  font: inherit;
+  font-size: 15px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.modal .field input:focus,
+.modal .field select:focus {
+  outline: 2px solid var(--accent);
+  border-color: transparent;
+}
+
+.modal .field.duration input {
+  width: 110px;
+}
+
+.modal fieldset.styles {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.modal fieldset.styles legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.style-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.style-chip.dark {
+  background: #111;
+  color: #fff;
+}
+
+.style-chip.light {
+  background: #f6f6f7;
+  color: #17181a;
+}
+
+.style-chip.accent {
+  background: #2563eb;
+  color: #fff;
+}
+
+.style-chip.on {
+  box-shadow: 0 0 0 2px var(--accent);
+}

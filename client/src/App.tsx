@@ -16,21 +16,24 @@ import {
   type Suggestions,
 } from './api';
 import { Avatar } from './components/Avatar';
+import { CaptionDialog } from './components/CaptionDialog';
 import { Dropzone } from './components/Dropzone';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
 import { Presence } from './components/Presence';
 import { Projects } from './components/Projects';
+import { TitleDialog, type TitleFields } from './components/TitleDialog';
 import { Toolbar, type ExportState } from './components/Toolbar';
 import { Transcript } from './components/Transcript';
+import { EPS, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
 import { type PresenceState } from './realtime';
 import { useSession } from './session';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
-import type { LibraryItem, ProjectSummary } from './types';
+import type { CaptionPos, LibraryItem, ProjectSummary, TitleEdit, Transition } from './types';
 import { usePlayback } from './usePlayback';
 import { holdOrApply, useRealtime, type RemoteDoc } from './useRealtime';
 
@@ -45,6 +48,11 @@ export function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editor, dispatch] = useReducer(editorReducer, initialEditor);
   const [overdubOpen, setOverdubOpen] = useState(false);
+  // The title dialog, adding at `at` or editing `initial`.
+  const [titleDialog, setTitleDialog] = useState<{ at: number; initial?: TitleEdit } | null>(null);
+  const [captionDialogOpen, setCaptionDialogOpen] = useState(false);
+  // A selected title card, by its instant. Exclusive with the word selection.
+  const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle' });
   const [twoWordFillers, setTwoWordFillers] = useState(false);
   const [showCuts, setShowCuts] = useState(true);
@@ -231,6 +239,9 @@ export function App() {
     heldRemote.current = null;
     dispatch({ type: 'load', words: [], duration: 0 });
     setExportState({ status: 'idle' });
+    setSelectedTitle(null);
+    setTitleDialog(null);
+    setCaptionDialogOpen(false);
   }, []);
 
   // Opening a project pushes a history entry, so the browser's Back button
@@ -319,6 +330,7 @@ export function App() {
 
   const onWordClick = useCallback(
     (index: number, extend: boolean) => {
+      setSelectedTitle(null);
       dispatch({ type: 'select', index, extend });
       const word = editor.words[index];
       if (word && !extend) playback.seek(word.start);
@@ -373,15 +385,70 @@ export function App() {
     [projectId, edit],
   );
 
+  /** Where a new card goes: the end of the selected words, else the playhead. */
+  const onAddTitle = useCallback(() => {
+    const at = selected
+      ? rangeForWords(editor.words, selected[0], selected[1], editor.duration).end
+      : playback.currentTime;
+    setTitleDialog({ at });
+  }, [selected, editor.words, editor.duration, playback.currentTime]);
+
+  const onTitleOpen = useCallback(
+    (at: number) => {
+      const initial = titles(editor.edits).find((t) => Math.abs(t.at - at) < EPS);
+      if (initial) setTitleDialog({ at: initial.at, initial });
+    },
+    [editor.edits],
+  );
+
+  const onTitleSubmit = useCallback(
+    (fields: TitleFields) => {
+      if (!titleDialog) return;
+      const { at, initial } = titleDialog;
+      edit(initial ? { type: 'editTitle', at, ...fields } : { type: 'addTitle', at, ...fields });
+      setTitleDialog(null);
+    },
+    [titleDialog, edit],
+  );
+
+  // Selecting a card and selecting words are exclusive: one clears the other.
+  const onTitleClick = useCallback((at: number) => {
+    setSelectedTitle(at);
+    dispatch({ type: 'clearSelection' });
+  }, []);
+
+  const onCaptionSubmit = useCallback(
+    (text: string, position: CaptionPos) => {
+      edit({ type: 'addCaption', text, position });
+      setCaptionDialogOpen(false);
+    },
+    [edit],
+  );
+
+  // A peer's edit (or an undo) can remove the card we had selected.
+  useEffect(() => {
+    if (selectedTitle === null) return;
+    if (!titles(editor.edits).some((t) => Math.abs(t.at - selectedTitle) < EPS))
+      setSelectedTitle(null);
+  }, [editor.edits, selectedTitle]);
+
   // Keyboard: Delete cuts, ⌘Z undoes, ⇧⌘Z redoes, Space plays, Esc clears, arrows move.
   useEffect(() => {
     if (!projectId) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (overdubOpen || target?.closest('input, textarea, [contenteditable]')) return;
+      if (overdubOpen || titleDialog || captionDialogOpen) return;
+      if (target?.closest('input, textarea, select, [contenteditable]')) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        edit({ type: 'deleteSelection' });
+        // A selected card and a word selection never coexist, so this is
+        // unambiguous: Delete removes whichever one is showing.
+        if (selectedTitle !== null) {
+          edit({ type: 'removeTitle', at: selectedTitle });
+          setSelectedTitle(null);
+        } else {
+          edit({ type: 'deleteSelection' });
+        }
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         undoRedo(e.shiftKey ? 'redo' : 'undo');
@@ -390,6 +457,7 @@ export function App() {
         playback.toggle();
       } else if (e.key === 'Escape') {
         dispatch({ type: 'clearSelection' });
+        setSelectedTitle(null);
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         dispatch({
@@ -402,7 +470,17 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [projectId, overdubOpen, playback, showCuts, edit, undoRedo]);
+  }, [
+    projectId,
+    overdubOpen,
+    titleDialog,
+    captionDialogOpen,
+    selectedTitle,
+    playback,
+    showCuts,
+    edit,
+    undoRedo,
+  ]);
 
   const selectedText = selected
     ? editor.words
@@ -494,6 +572,7 @@ export function App() {
             />
             <Toolbar
               hasSelection={selected !== null}
+              hasTitleSelection={selectedTitle !== null}
               canUndo={editor.undoable !== null}
               canRedo={editor.redoable !== null}
               readOnly={!canEdit}
@@ -502,7 +581,15 @@ export function App() {
               twoWordFillers={twoWordFillers}
               showCuts={showCuts}
               exportState={exportState}
-              onDelete={() => edit({ type: 'deleteSelection' })}
+              transition={editor.transition}
+              onDelete={() =>
+                selectedTitle !== null
+                  ? (edit({ type: 'removeTitle', at: selectedTitle }), setSelectedTitle(null))
+                  : edit({ type: 'deleteSelection' })
+              }
+              onAddTitle={onAddTitle}
+              onAddCaption={() => setCaptionDialogOpen(true)}
+              onTransition={(transition: Transition) => edit({ type: 'setTransition', transition })}
               onRemoveFillers={() => edit({ type: 'applyCuts', cuts: fillers })}
               onTightenPauses={() => edit({ type: 'applyCuts', cuts: pauses })}
               onTwoWordFillers={setTwoWordFillers}
@@ -524,6 +611,13 @@ export function App() {
               onWordClick={onWordClick}
               onWordDrag={onWordDrag}
               onOverdubClick={(od) => playback.seek(od.start)}
+              selectedTitle={selectedTitle}
+              onTitleClick={onTitleClick}
+              onTitleOpen={onTitleOpen}
+              onCaptionClick={(start) => edit({ type: 'removeCaption', start })}
+              onCutTransition={(start, transition) =>
+                edit({ type: 'setCutTransition', start, transition })
+              }
               speakers={speakers}
               speakerNames={editor.speakerNames}
               onRenameSpeaker={onRenameSpeaker}
@@ -539,6 +633,23 @@ export function App() {
           original={selectedText}
           onSubmit={onOverdubSubmit}
           onCancel={() => setOverdubOpen(false)}
+        />
+      )}
+
+      {titleDialog && (
+        <TitleDialog
+          at={titleDialog.at}
+          initial={titleDialog.initial}
+          onSubmit={onTitleSubmit}
+          onCancel={() => setTitleDialog(null)}
+        />
+      )}
+
+      {captionDialogOpen && selected && (
+        <CaptionDialog
+          original={selectedText}
+          onSubmit={onCaptionSubmit}
+          onCancel={() => setCaptionDialogOpen(false)}
         />
       )}
     </div>

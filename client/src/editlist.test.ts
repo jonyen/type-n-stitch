@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   captionsAt,
+  cutTransitionAt,
   formatTime,
   joins,
   keptSegments,
   nearDipJoin,
+  nextCutTransition,
   normalizeCuts,
   outputDuration,
   overdubAt,
@@ -188,5 +190,23 @@ describe('titles and joins', () => {
     const c: CaptionEdit = { kind: 'caption', start: 1, end: 2, text: 'c', position: 'topLeft' };
     expect(captionsAt(1.5, [c])).toEqual([c]);
     expect(captionsAt(2, [c])).toEqual([]);
+  });
+});
+
+describe('cut transition overrides', () => {
+  it('cycles none set → dip → jump cut → none set', () => {
+    expect(nextCutTransition(null)).toBe('dip');
+    expect(nextCutTransition('dip')).toBe('none');
+    expect(nextCutTransition('none')).toBe(null);
+  });
+
+  it('reads the override off the cut starting at an instant', () => {
+    const edits: Edit[] = [
+      { kind: 'cut', start: 1, end: 2, transition: 'dip' },
+      { kind: 'cut', start: 3, end: 4 },
+    ];
+    expect(cutTransitionAt(1, edits)).toBe('dip');
+    expect(cutTransitionAt(3, edits)).toBe(null);
+    expect(cutTransitionAt(9, edits)).toBe(null);
   });
 });
