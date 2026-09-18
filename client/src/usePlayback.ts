@@ -4,8 +4,18 @@
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
-import { cutRanges, overdubAt, skipTarget, wordIndexAt } from './editlist';
-import type { Edit, OverdubEdit, Word } from './types';
+import { cutRanges, overdubAt, skipTarget, titles, wordIndexAt } from './editlist';
+import type { Edit, OverdubEdit, TitleEdit, Word } from './types';
+
+/** The earliest title whose instant lies in (prev, now]; null when none or when moving backwards. */
+export function titleCrossed(list: TitleEdit[], prev: number, now: number): TitleEdit | null {
+  if (now <= prev) return null;
+  let best: TitleEdit | null = null;
+  for (const title of list) {
+    if (title.at > prev && title.at <= now && (best === null || title.at < best.at)) best = title;
+  }
+  return best;
+}
 
 export interface Playback {
   playing: boolean;
@@ -14,6 +24,8 @@ export interface Playback {
   activeWord: number;
   /** The overdub whose audio is currently playing, if any. */
   overdubbing: OverdubEdit | null;
+  /** The title card the preview is paused on, if any. */
+  titling: TitleEdit | null;
   toggle: () => void;
   seek: (t: number) => void;
 }
@@ -30,6 +42,7 @@ export function usePlayback(
   const [currentTime, setCurrentTime] = useState(0);
   const [activeWord, setActiveWord] = useState(-1);
   const [overdubbing, setOverdubbing] = useState<OverdubEdit | null>(null);
+  const [titling, setTitling] = useState<TitleEdit | null>(null);
 
   // Latest props for the animation-frame loop without re-subscribing.
   const editsRef = useRef(edits);
@@ -41,6 +54,13 @@ export function usePlayback(
   const activeOverdub = useRef<OverdubEdit | null>(null);
   const overdubAudio = useRef<HTMLAudioElement | null>(null);
   const frame = useRef(0);
+  const activeTitle = useRef<TitleEdit | null>(null);
+  const titleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * The playhead at the previous tick, so a title instant is crossed only once.
+   * It starts behind zero so a title at 0 plays when playback first starts.
+   */
+  const lastTime = useRef(-1);
 
   const audio = useCallback(() => {
     overdubAudio.current ??= new Audio();
@@ -51,9 +71,46 @@ export function usePlayback(
     const media = mediaRef.current;
     if (!media) return;
     const t = media.currentTime;
+    lastTime.current = t;
     setCurrentTime(Math.round(t * 10) / 10);
     setActiveWord(wordIndexAt(t, wordsRef.current));
   }, [mediaRef]);
+
+  const clearTitleTimer = useCallback(() => {
+    if (titleTimer.current !== null) {
+      clearTimeout(titleTimer.current);
+      titleTimer.current = null;
+    }
+  }, []);
+
+  const leaveTitle = useCallback(
+    (resume: boolean) => {
+      clearTitleTimer();
+      const title = activeTitle.current;
+      const media = mediaRef.current;
+      activeTitle.current = null;
+      setTitling(null);
+      if (!title || !media) return;
+      // Park the crossing behind us so the card does not re-trigger.
+      lastTime.current = title.at;
+      if (resume && wantPlaying.current) void media.play();
+    },
+    [clearTitleTimer, mediaRef],
+  );
+
+  const enterTitle = useCallback(
+    (title: TitleEdit) => {
+      const media = mediaRef.current;
+      if (!media) return;
+      clearTitleTimer();
+      activeTitle.current = title;
+      setTitling(title);
+      media.pause();
+      media.currentTime = title.at;
+      titleTimer.current = setTimeout(() => leaveTitle(true), title.duration * 1000);
+    },
+    [clearTitleTimer, leaveTitle, mediaRef],
+  );
 
   const leaveOverdub = useCallback(
     (resume: boolean) => {
@@ -90,29 +147,38 @@ export function usePlayback(
   const tick = useCallback(() => {
     const media = mediaRef.current;
     if (!media) return;
+    const title = activeTitle.current;
     const od = activeOverdub.current;
-    if (od) {
+    if (title) {
+      // The title was undone while its card was showing.
+      if (!editsRef.current.includes(title)) leaveTitle(true);
+    } else if (od) {
       // The overdub was undone while it was playing.
       if (!editsRef.current.includes(od)) leaveOverdub(true);
     } else {
       const t = media.currentTime;
-      const next = overdubAt(t, editsRef.current);
-      if (next) {
-        enterOverdub(next);
+      const crossed = titleCrossed(titles(editsRef.current), lastTime.current, t);
+      if (crossed) {
+        enterTitle(crossed);
       } else {
-        const skip = skipTarget(t, cutRanges(editsRef.current));
-        if (skip !== null) {
-          if (skip >= duration - 0.01) {
-            media.pause();
-            media.currentTime = duration;
-          } else {
-            media.currentTime = skip;
+        const next = overdubAt(t, editsRef.current);
+        if (next) {
+          enterOverdub(next);
+        } else {
+          const skip = skipTarget(t, cutRanges(editsRef.current));
+          if (skip !== null) {
+            if (skip >= duration - 0.01) {
+              media.pause();
+              media.currentTime = duration;
+            } else {
+              media.currentTime = skip;
+            }
           }
         }
       }
     }
     sync();
-  }, [duration, enterOverdub, leaveOverdub, mediaRef, sync]);
+  }, [duration, enterOverdub, enterTitle, leaveOverdub, leaveTitle, mediaRef, sync]);
 
   useEffect(() => {
     if (!playing) return;
@@ -132,8 +198,8 @@ export function usePlayback(
       setPlaying(true);
     };
     const onPause = () => {
-      // Pausing to enter an overdub is not a user pause.
-      if (!activeOverdub.current) setPlaying(false);
+      // Pausing to enter an overdub or a title card is not a user pause.
+      if (!activeOverdub.current && !activeTitle.current) setPlaying(false);
     };
     const onEnded = () => {
       wantPlaying.current = false;
@@ -152,6 +218,12 @@ export function usePlayback(
       media.removeEventListener('seeked', sync);
       setPlaying(false);
       wantPlaying.current = false;
+      // A card must not outlive the media it belongs to.
+      if (titleTimer.current !== null) clearTimeout(titleTimer.current);
+      titleTimer.current = null;
+      activeTitle.current = null;
+      setTitling(null);
+      lastTime.current = -1;
     };
   }, [mediaRef, src, sync]);
 
@@ -160,12 +232,20 @@ export function usePlayback(
     return () => {
       overdubAudio.current?.pause();
       activeOverdub.current = null;
+      activeTitle.current = null;
+      if (titleTimer.current !== null) clearTimeout(titleTimer.current);
+      titleTimer.current = null;
     };
   }, []);
 
   const toggle = useCallback(() => {
     const media = mediaRef.current;
     if (!media) return;
+    // Clicking through a title card dismisses it and plays on.
+    if (activeTitle.current) {
+      leaveTitle(true);
+      return;
+    }
     if (activeOverdub.current) {
       const a = audio();
       if (a.paused) {
@@ -186,23 +266,27 @@ export function usePlayback(
       wantPlaying.current = false;
       media.pause();
     }
-  }, [audio, duration, mediaRef]);
+  }, [audio, duration, leaveTitle, mediaRef]);
 
   const seek = useCallback(
     (t: number) => {
       const media = mediaRef.current;
       if (!media) return;
+      if (activeTitle.current) leaveTitle(false);
       if (activeOverdub.current) {
         activeOverdub.current = null;
         setOverdubbing(null);
         audio().pause();
       }
-      media.currentTime = Math.max(0, Math.min(t, duration));
+      const to = Math.max(0, Math.min(t, duration));
+      media.currentTime = to;
       if (wantPlaying.current && media.paused) void media.play();
       sync();
+      // Titles before the destination must not fire on the next tick.
+      lastTime.current = to;
     },
-    [audio, duration, mediaRef, sync],
+    [audio, duration, leaveTitle, mediaRef, sync],
   );
 
-  return { playing, currentTime, activeWord, overdubbing, toggle, seek };
+  return { playing, currentTime, activeWord, overdubbing, titling, toggle, seek };
 }

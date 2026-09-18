@@ -490,6 +490,7 @@ export function App() {
               edits={editor.edits}
               playback={playback}
               peers={peers}
+              transition={editor.transition}
             />
             <Toolbar
               hasSelection={selected !== null}

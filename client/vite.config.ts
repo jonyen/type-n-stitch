@@ -12,6 +12,7 @@ export default defineConfig({
       '/api': { target: server, ws: true },
       '/data': server,
       '/library': server,
+      '/fonts': server,
     },
   },
 });

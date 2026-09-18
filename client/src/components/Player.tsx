@@ -1,17 +1,23 @@
-import { useEffect, useRef, useState, type PointerEvent, type RefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from 'react';
 
 import { fetchThumbnails, type Thumbnails } from '../api';
 import {
+  captionsAt,
   cutRanges,
   formatTime,
+  joins,
+  nearDipJoin,
   outputDuration,
   overdubAt,
   overdubs,
+  pieces,
   skipTarget,
+  titles,
 } from '../editlist';
 import type { Peer } from '../realtime';
-import type { Edit, Media, MediaKind } from '../types';
+import type { Edit, Media, MediaKind, Transition } from '../types';
 import type { Playback } from '../usePlayback';
+import { Caption, TitleCard } from './TitleCard';
 
 interface Props {
   media: Media;
@@ -21,14 +27,23 @@ interface Props {
   edits: Edit[];
   playback: Playback;
   peers: Peer[];
+  /** The project default transition, for the dip preview. */
+  transition: Transition;
 }
 
-export function Player({ media, projectId, mediaRef, edits, playback, peers }: Props) {
+export function Player({ media, projectId, mediaRef, edits, playback, peers, transition }: Props) {
   const { duration } = media;
   const cutCount = cutRanges(edits).length;
   const overdubCount = overdubs(edits).length;
   const removed = duration - outputDuration(duration, edits);
   const pct = (t: number) => `${(Math.min(Math.max(t, 0), duration) / duration) * 100}%`;
+
+  // The output timeline, so the preview can dim the frame around dipping joins.
+  const timeline = useMemo(() => {
+    const list = pieces(duration, edits);
+    return { list, joinList: joins(list, edits, transition) };
+  }, [duration, edits, transition]);
+  const fading = nearDipJoin(playback.currentTime, timeline.list, timeline.joinList);
 
   const thumbs = useThumbnails(projectId, media.kind);
   const [hover, setHover] = useState<{ ratio: number; width: number } | null>(null);
@@ -64,7 +79,7 @@ export function Player({ media, projectId, mediaRef, edits, playback, peers }: P
 
   return (
     <div className="player">
-      <div className={`frame ${media.kind}`}>
+      <div className={`frame ${media.kind}${fading ? ' fading' : ''}`}>
         <video
           ref={mediaRef}
           src={media.url}
@@ -77,6 +92,10 @@ export function Player({ media, projectId, mediaRef, edits, playback, peers }: P
         {playback.overdubbing && (
           <div className="overdub-badge">Overdub: “{playback.overdubbing.text}”</div>
         )}
+        {captionsAt(playback.currentTime, edits).map((c, i) => (
+          <Caption key={`${i}-${c.start}-${c.position}`} caption={c} />
+        ))}
+        {playback.titling && <TitleCard title={playback.titling} />}
       </div>
 
       <div className="transport">
@@ -119,6 +138,9 @@ export function Player({ media, projectId, mediaRef, edits, playback, peers }: P
                 className="mark overdub"
                 style={{ left: pct(r.start), width: pct(r.end - r.start) }}
               />
+            ))}
+            {titles(edits).map((t, i) => (
+              <span key={`t${i}-${t.at}`} className="mark title" style={{ left: pct(t.at) }} />
             ))}
             <span className="playhead" style={{ left: pct(playback.currentTime) }} />
             {peers.map((p) => (
