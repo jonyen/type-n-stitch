@@ -33,8 +33,9 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    resumes at the end of the range.
 4. **Export.** The Rust engine turns the edit list into a timeline of output pieces, then into
    one ffmpeg `filter_complex`: `trim`/`atrim` + `setpts` per kept piece, a `select`/`tpad`
-   freeze-frame over the synthesized audio per overdub, `overlay` for title cards and captions,
-   and `fade`/`afade` for dip transitions, joined with a `concat`. ffmpeg renders an mp4
+   freeze-frame over the synthesized audio per overdub, title cards as looped PNG inputs,
+   `overlay` for captions, and `fade`/`afade` for dip transitions, joined with a `concat`.
+   ffmpeg renders an mp4
    (or mp3/wav for audio-only sources) and the UI offers a download.
 
 ```
