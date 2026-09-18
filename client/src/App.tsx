@@ -15,6 +15,7 @@ import {
   uploadMedia,
   type Suggestions,
 } from './api';
+import { Avatar } from './components/Avatar';
 import { Dropzone } from './components/Dropzone';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
@@ -376,17 +377,16 @@ export function App() {
         <span className="tagline muted">edit media by editing its words</span>
         <span className="spacer" />
         {project && <span className="header-file muted">{project.media.filename}</span>}
-        <span className="muted">{user.displayName}</span>
+        <Avatar user={user} withName size="sm" />
         <button type="button" className="ghost" onClick={signOut}>
           Sign out
         </button>
       </header>
 
       {!project ? (
-        <>
-          <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError} />
-          <Projects items={projects} onOpen={onOpenProject} />
-        </>
+        <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError}>
+          <Projects items={projects} onOpen={onOpenProject} disabled={busy !== null} />
+        </Dropzone>
       ) : (
         <main className="editor">
           {loadError && (

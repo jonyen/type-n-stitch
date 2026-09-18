@@ -1,4 +1,4 @@
-import { useRef, useState, type DragEvent } from 'react';
+import { useRef, useState, type DragEvent, type ReactNode } from 'react';
 
 import type { LibraryItem } from '../types';
 import { Library } from './Library';
@@ -10,9 +10,11 @@ interface Props {
   onLibraryClip: (item: LibraryItem) => void;
   busy: string | null;
   error: string | null;
+  /** Rendered between the how-to steps and the sample library. */
+  children?: ReactNode;
 }
 
-export function Dropzone({ onFile, onLibraryClip, busy, error }: Props) {
+export function Dropzone({ onFile, onLibraryClip, busy, error, children }: Props) {
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
 
@@ -68,6 +70,7 @@ export function Dropzone({ onFile, onLibraryClip, busy, error }: Props) {
         <li>Overdub a phrase in a cloned voice</li>
         <li>Export the stitched result</li>
       </ol>
+      {children}
       <Library onOpen={onLibraryClip} disabled={busy !== null} />
     </div>
   );

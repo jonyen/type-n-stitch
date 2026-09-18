@@ -34,65 +34,78 @@ export function Login({ needsSetup, onSignedIn }: Props) {
     }
   };
 
+  const title =
+    mode === 'login' ? 'Sign in' : needsSetup ? 'Create the first account' : 'Create an account';
+  const hint = needsSetup
+    ? 'This account becomes the owner of any media already on this server.'
+    : mode === 'login'
+      ? 'Welcome back. Your projects are waiting.'
+      : 'Projects, edits and comments are saved to your account.';
+
   return (
-    <form className="login" onSubmit={onSubmit}>
-      <h2>
-        {mode === 'login'
-          ? 'Sign in'
-          : needsSetup
-            ? 'Create the first account'
-            : 'Create an account'}
-      </h2>
-      {mode === 'register' && (
+    <div className="login-wrap">
+      <form className="login" onSubmit={onSubmit}>
+        <div className="login-brand">
+          <span className="logo" aria-hidden />
+          <span className="wordmark">type-n-stitch</span>
+          <span className="muted">edit media by editing its words</span>
+        </div>
+        <h2>{title}</h2>
+        <p className="muted hint">{hint}</p>
+        {mode === 'register' && (
+          <label>
+            Name
+            <input
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              disabled={busy}
+              placeholder="Ada Lovelace"
+              autoFocus
+            />
+          </label>
+        )}
         <label>
-          Name
+          Email
           <input
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
             disabled={busy}
-            autoFocus
+            placeholder="you@example.com"
+            autoFocus={mode === 'login'}
+            required
           />
         </label>
-      )}
-      <label>
-        Email
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          disabled={busy}
-          autoFocus={mode === 'login'}
-          required
-        />
-      </label>
-      <label>
-        Password
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          disabled={busy}
-          minLength={8}
-          required
-        />
-      </label>
-      {error && <p className="error">{error}</p>}
-      <button type="submit" disabled={busy}>
-        {mode === 'login' ? 'Sign in' : 'Create account'}
-      </button>
-      {!needsSetup && (
-        <button
-          type="button"
-          className="ghost"
-          disabled={busy}
-          onClick={() => {
-            setError(null);
-            setMode(mode === 'login' ? 'register' : 'login');
-          }}
-        >
-          {mode === 'login' ? 'Need an account?' : 'Have an account? Sign in'}
+        <label>
+          Password
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={busy}
+            placeholder={mode === 'register' ? 'at least 8 characters' : ''}
+            minLength={8}
+            required
+          />
+        </label>
+        {error && <p className="error">{error}</p>}
+        <button type="submit" className="primary" disabled={busy}>
+          {busy ? 'One moment…' : mode === 'login' ? 'Sign in' : 'Create account'}
         </button>
-      )}
-    </form>
+        {!needsSetup && (
+          <button
+            type="button"
+            className="link"
+            disabled={busy}
+            onClick={() => {
+              setError(null);
+              setMode(mode === 'login' ? 'register' : 'login');
+            }}
+          >
+            {mode === 'login' ? 'Need an account? Create one' : 'Have an account? Sign in'}
+          </button>
+        )}
+      </form>
+    </div>
   );
 }

@@ -1,16 +1,12 @@
 import { useEffect, useState } from 'react';
 
 import { listLibrary } from '../api';
+import { clipLength } from '../format';
 import type { LibraryItem } from '../types';
 
 interface Props {
   onOpen: (item: LibraryItem) => void;
   disabled: boolean;
-}
-
-function formatLength(seconds: number): string {
-  const s = Math.round(seconds);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 /** Starter clips from samples/library.json; hidden when the manifest is empty. */
@@ -29,7 +25,7 @@ export function Library({ onOpen, disabled }: Props) {
   return (
     <section className="library" aria-labelledby="library-heading">
       <div className="library-head">
-        <h2 id="library-heading">Or start from a sample</h2>
+        <h2 id="library-heading">Start from a sample</h2>
         {missing > 0 && (
           <span className="muted">
             {missing} not downloaded yet · run <code>npm run library</code>
@@ -54,7 +50,7 @@ export function Library({ onOpen, disabled }: Props) {
                   </span>
                 )}
                 {item.duration !== null && (
-                  <span className="length">{formatLength(item.duration)}</span>
+                  <span className="length">{clipLength(item.duration)}</span>
                 )}
               </span>
               <strong>{item.title}</strong>
