@@ -145,16 +145,21 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return withEdits(state, [...state.edits, ...action.cuts]);
     }
 
-    case 'sync':
+    case 'sync': {
+      // The undo targets are ours alone, so a reply always brings them. Its
+      // fold, though, can be older than one a peer's broadcast already
+      // applied — a slower reply must not undo newer server truth.
+      const stale = action.doc.headSeq < state.headSeq;
       return {
         ...state,
-        edits: action.doc.edits,
-        speakerNames: action.doc.speakerNames,
-        headSeq: action.doc.headSeq,
+        edits: stale ? state.edits : action.doc.edits,
+        speakerNames: stale ? state.speakerNames : action.doc.speakerNames,
+        headSeq: stale ? state.headSeq : action.doc.headSeq,
         undoable: action.doc.undoable,
         redoable: action.doc.redoable,
-        selection: null,
+        selection: stale ? state.selection : null,
       };
+    }
 
     case 'remote':
       // Out-of-order broadcasts, and our own append arriving before its POST

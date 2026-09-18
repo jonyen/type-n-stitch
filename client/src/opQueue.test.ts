@@ -105,6 +105,27 @@ describe('createOpQueue', () => {
     await expect(p2).resolves.toEqual(doc(1));
   });
 
+  it('close() abandons a pending retry and stops submitting for a project left behind', async () => {
+    vi.useFakeTimers();
+    const { submit, calls } = manualSubmit();
+    const q = createOpQueue(submit, { retryDelayMs: 500 });
+    q.push(cut('a'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
+    calls[0]?.reject(new ApiError('offline', 0));
+    await vi.advanceTimersByTimeAsync(0);
+    q.close();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(calls).toHaveLength(1);
+    expect(q.pending).toBe(0);
+    q.push(cut('b'));
+    q.flush();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(calls).toHaveLength(1);
+    expect(q.pending).toBe(0);
+    vi.useRealTimers();
+  });
+
   it('flush() retries immediately instead of waiting out the delay', async () => {
     vi.useFakeTimers();
     const { submit, calls } = manualSubmit();

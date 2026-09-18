@@ -29,11 +29,14 @@ export function useRealtime(
   const [status, setStatus] = useState<ConnectionStatus>('closed');
   const rt = useRef<Realtime | null>(null);
 
-  // Latest callbacks without reconnecting when they change identity.
+  // Latest callbacks without reconnecting when they change identity. Written
+  // in an effect, since a render-phase ref write is not concurrent-safe.
   const onDocRef = useRef(onDoc);
   const onOpenRef = useRef(onOpen);
-  onDocRef.current = onDoc;
-  onOpenRef.current = onOpen;
+  useEffect(() => {
+    onDocRef.current = onDoc;
+    onOpenRef.current = onOpen;
+  }, [onDoc, onOpen]);
 
   useEffect(() => {
     if (!projectId) return;

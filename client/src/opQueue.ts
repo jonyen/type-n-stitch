@@ -12,6 +12,13 @@ export interface OpQueue {
   push(op: ClientOp): Promise<DocState>;
   /** Try again now (after a reconnect). */
   flush(): void;
+  /**
+   * Abandon this queue: the project it belongs to is gone. Any pending retry
+   * is cancelled and queued ops are dropped. A `push()` after this resolves
+   * never — deliberately: rejecting would fire a `.catch` that shows an error
+   * about a document the user has already left.
+   */
+  close(): void;
   readonly pending: number;
 }
 
@@ -37,21 +44,26 @@ export function createOpQueue(submit: Submit, opts: Options = {}): OpQueue {
   const classify = opts.onError ?? defaultClassify;
   const entries: Entry[] = [];
   let inFlight = false;
+  let closed = false;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   const run = async () => {
     // A pending retry timer owns the next attempt; a `push()` arriving while
     // we wait must not resubmit the head op early and bypass retryDelayMs.
     // `flush()` clears the timer first, so it still retries immediately.
-    if (inFlight || retryTimer !== null) return;
+    if (closed || inFlight || retryTimer !== null) return;
     const entry = entries[0];
     if (!entry) return;
     inFlight = true;
     try {
       const doc = await submit([entry.op]);
+      // Closed while this was in flight: the project is gone, so neither the
+      // fold nor a failure concerns anyone any more.
+      if (closed) return;
       entries.shift();
       entry.resolve(doc);
     } catch (err) {
+      if (closed) return;
       if (classify(err, entry.op) === 'drop') {
         entries.shift();
         entry.reject(err);
@@ -71,11 +83,21 @@ export function createOpQueue(submit: Submit, opts: Options = {}): OpQueue {
   return {
     push(op) {
       return new Promise<DocState>((resolve, reject) => {
+        if (closed) return;
         entries.push({ op, resolve, reject });
         void run();
       });
     },
+    close() {
+      closed = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      entries.length = 0;
+    },
     flush() {
+      if (closed) return;
       if (retryTimer) {
         clearTimeout(retryTimer);
         retryTimer = null;

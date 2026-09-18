@@ -158,29 +158,41 @@ export function App() {
       queue.current = null;
       return;
     }
-    queue.current = createOpQueue((ops) => submitOps(projectId, ops));
+    const q = createOpQueue((ops) => submitOps(projectId, ops));
+    queue.current = q;
     return () => {
+      // Closing matters: a queue left retrying would POST to a project the
+      // user has left, forever.
+      q.close();
       queue.current = null;
     };
   }, [projectId]);
 
   // The socket delivers everyone's appends, including our own; `remote` keeps
   // only folds newer than ours, so it never fights the reply to our own POST.
-  const onRemoteDoc = useCallback((doc: RemoteDoc) => dispatch({ type: 'remote', ...doc }), []);
+  const onRemoteDoc = useCallback(
+    ({ headSeq, edits, speakerNames }: RemoteDoc) =>
+      dispatch({ type: 'remote', headSeq, edits, speakerNames }),
+    [],
+  );
   const onSocketOpen = useCallback(() => queue.current?.flush(), []);
   const { sendPresence } = useRealtime(projectId, onRemoteDoc, onSocketOpen);
 
   // Tell peers where we are: playhead, selection, caret. Coalesced by the socket client.
+  const selection = editor.selection;
   useEffect(() => {
     if (!projectId) return;
+    // `selected` is a fresh tuple every render, so this depends on the
+    // selection itself and derives the range here.
+    const range = selectedRange(selection);
     const state: PresenceState = {
       playhead: playback.currentTime,
-      selection: selected,
-      caret: selected && selected[0] === selected[1] ? selected[0] : null,
+      selection: range,
+      caret: range && range[0] === range[1] ? range[0] : null,
       playing: playback.playing,
     };
     sendPresence(state);
-  }, [projectId, playback.currentTime, playback.playing, selected, sendPresence]);
+  }, [projectId, playback.currentTime, playback.playing, selection, sendPresence]);
 
   // Back to the start screen. The document lives on the server, so nothing is lost.
   const goHome = useCallback(() => {

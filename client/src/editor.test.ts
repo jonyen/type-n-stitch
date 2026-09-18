@@ -161,6 +161,47 @@ describe('sync', () => {
     expect(state.selection).toBeNull();
   });
 
+  it('keeps a newer remote fold when a slower reply arrives, but takes its undo targets', () => {
+    const remote8 = editorReducer(loaded, {
+      type: 'remote',
+      headSeq: 8,
+      edits: [{ kind: 'cut', start: 5, end: 6 }],
+      speakerNames: ['Ada'],
+    });
+    const state = editorReducer(remote8, {
+      type: 'sync',
+      doc: {
+        headSeq: 7,
+        edits: [],
+        speakerNames: [],
+        undoable: 7,
+        redoable: 6,
+      },
+    });
+    expect(state.headSeq).toBe(8);
+    expect(state.edits).toEqual([{ kind: 'cut', start: 5, end: 6 }]);
+    expect(state.speakerNames).toEqual(['Ada']);
+    expect(state.undoable).toBe(7);
+    expect(state.redoable).toBe(6);
+  });
+
+  it('applies a reply whose fold is level with what it has', () => {
+    const remote8 = editorReducer(select(loaded, 1), {
+      type: 'remote',
+      headSeq: 8,
+      edits: [{ kind: 'cut', start: 5, end: 6 }],
+      speakerNames: ['Ada'],
+    });
+    const state = editorReducer(remote8, {
+      type: 'sync',
+      doc: { headSeq: 8, edits: [], speakerNames: [], undoable: 8, redoable: null },
+    });
+    expect(state.headSeq).toBe(8);
+    expect(state.edits).toEqual([]);
+    expect(state.speakerNames).toEqual([]);
+    expect(state.selection).toBeNull();
+  });
+
   it('renameSpeaker updates names optimistically', () => {
     const state = editorReducer(loaded, { type: 'renameSpeaker', speaker: 2, name: 'Bob' });
     expect(state.speakerNames).toEqual(['', '', 'Bob']);
