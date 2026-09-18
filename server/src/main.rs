@@ -16,6 +16,7 @@ mod routes;
 #[cfg(test)]
 mod test_util;
 mod tts;
+mod ws;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

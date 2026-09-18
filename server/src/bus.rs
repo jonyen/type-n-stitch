@@ -85,9 +85,10 @@ pub enum ServerMsg {
         code: String,
         detail: String,
     },
+    /// The answer to a client's `{"t":"ping"}` liveness probe.
+    Pong,
 }
 
-#[allow(dead_code)] // Task 2 wires a WebSocket handler that calls these.
 pub trait Bus: Send + Sync {
     fn publish(&self, project_id: &str, msg: ServerMsg);
     fn subscribe(&self, project_id: &str, conn_id: &str, user: PeerInfo) -> Subscription;
@@ -113,7 +114,6 @@ struct Hub {
 
 /// One project's live subscription. Dropping it removes the peer and tells
 /// the others; the hub itself goes away with its last subscription.
-#[allow(dead_code)] // `rx` is read directly by Task 2's socket loop.
 pub struct Subscription {
     pub rx: broadcast::Receiver<ServerMsg>,
     hub: Arc<Hub>,

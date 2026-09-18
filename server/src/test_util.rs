@@ -93,3 +93,14 @@ pub async fn register(state: &Arc<AppState>, email: &str) -> String {
     assert_eq!(status, StatusCode::OK);
     cookie_of(&headers).expect("register sets a cookie")
 }
+
+/// Serve the app on an ephemeral port; returns `http://127.0.0.1:PORT`.
+pub async fn serve(state: &Arc<AppState>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = app(state);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}

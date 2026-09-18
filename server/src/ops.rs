@@ -266,6 +266,9 @@ pub async fn apply_ops(
     let dir = state.config.data_dir.join(&project.media_id);
     let duration = read_meta(&dir).await?.duration;
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
+    // A batch of nothing but replayed op ids appends nothing; there is then
+    // no new fold to announce.
+    let mut appended = false;
     for (index, client_op) in ops.iter().enumerate() {
         let exists: Option<(i64,)> =
             sqlx::query_as("SELECT seq FROM edit_ops WHERE project_id = ? AND op_id = ?")
@@ -303,6 +306,7 @@ pub async fn apply_ops(
         .bind(now())
         .execute(&mut *tx)
         .await?;
+        appended = true;
         match &client_op.op {
             Op::Undo { target_seq } => {
                 sqlx::query("UPDATE edit_ops SET undone_by = ? WHERE project_id = ? AND seq = ?")
@@ -333,6 +337,21 @@ pub async fn apply_ops(
     }
     tx.commit().await?;
     invalidate(state, &project.id);
+    if appended {
+        // Everyone with the project open, this user included, gets the new
+        // fold. `doc_state` below then hits the cache `load_doc` just filled.
+        let (head_seq, doc) = load_doc(state, &project.id).await?;
+        state.bus.publish(
+            &project.id,
+            crate::bus::ServerMsg::Doc {
+                seq: head_seq,
+                author_id: user.id.clone(),
+                head_seq,
+                edits: doc.edits,
+                speaker_names: doc.speaker_names,
+            },
+        );
+    }
     doc_state(state, project, user).await
 }
 
