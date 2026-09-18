@@ -38,13 +38,18 @@ pub struct DocState {
     pub redoable: Option<i64>,
 }
 
-/// Every stored operation for a project, in order.
-async fn read_log(db: &sqlx::SqlitePool, project_id: &str) -> AppResult<Vec<SeqOp>> {
+/// Every stored operation for a project, in order. Takes any executor so the
+/// caller may run it inside a transaction and share a snapshot with another
+/// read (see `load_doc`).
+async fn read_log<'e, E>(exec: E, project_id: &str) -> AppResult<Vec<SeqOp>>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
     let rows: Vec<(i64, String, String, Option<i64>)> = sqlx::query_as(
         "SELECT seq, author_id, op, undone_by FROM edit_ops WHERE project_id = ? ORDER BY seq",
     )
     .bind(project_id)
-    .fetch_all(db)
+    .fetch_all(exec)
     .await?;
     let mut ops = Vec::with_capacity(rows.len());
     for (seq, author_id, op, undone_by) in rows {
@@ -60,12 +65,16 @@ async fn read_log(db: &sqlx::SqlitePool, project_id: &str) -> AppResult<Vec<SeqO
     Ok(ops)
 }
 
-/// The folded document and head seq, from the cache when it is current.
+/// The folded document and head seq, from the cache when it is current. The
+/// head and the log are read inside one transaction so they share a
+/// snapshot: two unsynchronised reads could otherwise see a head seq from
+/// after a concurrent append but a log from before it, understating the fold.
 pub async fn load_doc(state: &AppState, project_id: &str) -> AppResult<(i64, ProjectDoc)> {
+    let mut tx = state.db.begin().await?;
     let (head,): (Option<i64>,) =
         sqlx::query_as("SELECT MAX(seq) FROM edit_ops WHERE project_id = ?")
             .bind(project_id)
-            .fetch_one(&state.db)
+            .fetch_one(&mut *tx)
             .await?;
     let head = head.unwrap_or(0);
     if let Some((seq, doc)) = state
@@ -78,7 +87,7 @@ pub async fn load_doc(state: &AppState, project_id: &str) -> AppResult<(i64, Pro
             return Ok((head, doc.clone()));
         }
     }
-    let doc = fold(&read_log(&state.db, project_id).await?);
+    let doc = fold(&read_log(&mut *tx, project_id).await?);
     state
         .folds
         .lock()
@@ -135,6 +144,7 @@ pub async fn doc_state(state: &AppState, project: &Project, user: &User) -> AppR
 
 /// Reject operations that cannot apply to this media: ranges outside the
 /// duration, overdub audio that is not this media's, undo of someone else's.
+/// `duration` is read once by the caller and shared across the whole batch.
 async fn validate(
     tx: &mut Transaction<'_, Sqlite>,
     state: &AppState,
@@ -142,9 +152,9 @@ async fn validate(
     user: &User,
     index: usize,
     op: &Op,
+    duration: f64,
 ) -> AppResult<()> {
     let dir = state.config.data_dir.join(&project.media_id);
-    let duration = read_meta(&dir).await?.duration;
     let check_range = |start: f64, end: f64| -> AppResult<()> {
         if !(0.0..=duration).contains(&start) || !(0.0..=duration).contains(&end) || end < start {
             return Err(AppError::bad_request_at(
@@ -165,10 +175,16 @@ async fn validate(
         } => {
             check_range(*start, *end)?;
             let prefix = format!("/data/{}/", project.media_id);
-            let ok = audio_url
+            let name = audio_url
                 .strip_prefix(&prefix)
-                .filter(|n| n.starts_with("overdub-") && n.ends_with(".wav") && !n.contains('/'))
-                .is_some_and(|n| dir.join(n).is_file());
+                .filter(|n| n.starts_with("overdub-") && n.ends_with(".wav") && !n.contains('/'));
+            let ok = match name {
+                Some(n) => tokio::fs::metadata(dir.join(n))
+                    .await
+                    .map(|m| m.is_file())
+                    .unwrap_or(false),
+                None => false,
+            };
             if ok {
                 Ok(())
             } else {
@@ -225,13 +241,23 @@ async fn validate(
 
 /// Append `ops` for `user`, in one transaction. Replays (same `op_id`) are
 /// skipped so a client may resend after a lost response.
+///
+/// The transaction opens with `BEGIN IMMEDIATE` rather than sqlx's default
+/// `BEGIN DEFERRED`: a deferred transaction only takes a write lock on its
+/// first write, and this one's first statements are reads, so two concurrent
+/// appends could both proceed past those reads and then race on the insert,
+/// one of them failing with `SQLITE_BUSY_SNAPSHOT` (which `busy_timeout`
+/// does not retry). Taking the write lock up front serialises appends
+/// instead of letting one fail.
 pub async fn apply_ops(
     state: &AppState,
     project: &Project,
     user: &User,
     ops: Vec<ClientOp>,
 ) -> AppResult<DocState> {
-    let mut tx = state.db.begin().await?;
+    let dir = state.config.data_dir.join(&project.media_id);
+    let duration = read_meta(&dir).await?.duration;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     for (index, client_op) in ops.iter().enumerate() {
         let exists: Option<(i64,)> =
             sqlx::query_as("SELECT seq FROM edit_ops WHERE project_id = ? AND op_id = ?")
@@ -242,7 +268,16 @@ pub async fn apply_ops(
         if exists.is_some() {
             continue;
         }
-        validate(&mut tx, state, project, user, index, &client_op.op).await?;
+        validate(
+            &mut tx,
+            state,
+            project,
+            user,
+            index,
+            &client_op.op,
+            duration,
+        )
+        .await?;
         let (head,): (Option<i64>,) =
             sqlx::query_as("SELECT MAX(seq) FROM edit_ops WHERE project_id = ?")
                 .bind(&project.id)
@@ -562,5 +597,92 @@ mod tests {
         )
         .await;
         assert_eq!(body["speakerNames"], json!(["", "Ada"]));
+    }
+
+    #[tokio::test]
+    async fn undoing_an_undo_row_is_rejected() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        post_ops(&state, &ada, &project, vec![cut("a", 1.0, 2.0)]).await; // seq 1
+        post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "u1", "kind": "undo", "targetSeq": 1 })],
+        )
+        .await; // seq 2, an undo row
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "u2", "kind": "undo", "targetSeq": 2 })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn redoing_a_plain_edit_is_rejected() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        post_ops(&state, &ada, &project, vec![cut("a", 1.0, 2.0)]).await; // seq 1, a cut
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "r1", "kind": "redo", "targetSeq": 1 })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn commenter_cannot_submit_ops() {
+        let (state, _d, _ada, bob, project) = setup(Some("commenter")).await;
+        let (status, _) = post_ops(&state, &bob, &project, vec![cut("a", 1.0, 2.0)]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn empty_batch_is_a_no_op() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let (status, body) = post_ops(&state, &ada, &project, vec![]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["headSeq"], 0);
+        assert_eq!(body["edits"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn concurrent_appends_all_succeed_and_head_seq_matches_count() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let n = 8;
+        let mut handles = Vec::new();
+        for i in 0..n {
+            let state = state.clone();
+            let ada = ada.clone();
+            let project = project.clone();
+            handles.push(tokio::spawn(async move {
+                post_ops(
+                    &state,
+                    &ada,
+                    &project,
+                    vec![cut(&format!("op{i}"), 0.0, 1.0)],
+                )
+                .await
+            }));
+        }
+        for handle in handles {
+            let (status, body) = handle.await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (_, body, _) = call(
+            app(&state),
+            json_req(
+                Method::GET,
+                &format!("/api/projects/{project}"),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(body["doc"]["headSeq"], n as i64);
     }
 }
