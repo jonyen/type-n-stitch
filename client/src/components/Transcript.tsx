@@ -29,6 +29,8 @@ interface Props {
   speakers: (number | null)[] | null;
   speakerNames: string[];
   onRenameSpeaker: (speaker: number, name: string) => void;
+  /** Viewers and commenters read the transcript; they cannot rename speakers. */
+  readOnly: boolean;
 }
 
 export function Transcript({
@@ -44,6 +46,7 @@ export function Transcript({
   speakers,
   speakerNames,
   onRenameSpeaker,
+  readOnly,
 }: Props) {
   const inSelection = (i: number) => selected !== null && i >= selected[0] && i <= selected[1];
 
@@ -183,6 +186,7 @@ export function Transcript({
                 speaker={turn.speaker}
                 name={speakerLabel(turn.speaker, speakerNames)}
                 onRename={(name) => onRenameSpeaker(turn.speaker as number, name)}
+                readOnly={readOnly}
               />
             )}
             <p className={turn.speaker !== null ? `speech speaker-${turn.speaker % 6}` : 'speech'}>
@@ -199,12 +203,14 @@ interface TagProps {
   speaker: number;
   name: string;
   onRename: (name: string) => void;
+  readOnly: boolean;
 }
 
 /** Speaker name above a turn; click to rename every turn by that speaker. */
-function SpeakerTag({ speaker, name, onRename }: TagProps) {
+function SpeakerTag({ speaker, name, onRename, readOnly }: TagProps) {
   const [editing, setEditing] = useState(false);
   const className = `speaker-tag speaker-${speaker % 6}`;
+  if (readOnly) return <span className={className}>{name}</span>;
   if (editing) {
     return (
       <input

@@ -17,7 +17,9 @@ use engine::MediaKind;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
+use crate::projects::{create_project, member_role, summary, Project, ProjectSummary, Role};
 use crate::routes::{read_meta, speakers_item, transcribe_item, Meta};
 use crate::{media, AppState};
 
@@ -115,17 +117,36 @@ pub async fn list(State(state): State<Arc<AppState>>) -> AppResult<Json<Vec<Libr
     Ok(Json(items))
 }
 
-/// `POST /api/library/:slug` — import a library clip and return its media meta.
+/// `POST /api/library/:slug` — import a library clip (once) and open a
+/// project on it for the caller, reusing their existing one if any.
 pub async fn open(
     State(state): State<Arc<AppState>>,
+    CurrentUser(user): CurrentUser,
     UrlPath(slug): UrlPath<String>,
-) -> AppResult<Json<Meta>> {
+) -> AppResult<Json<ProjectSummary>> {
     let entries = read_entries(&state.config.samples_dir).await?;
     let entry = entries
         .iter()
         .find(|e| e.slug == slug)
         .ok_or_else(|| AppError::not_found(format!("no library clip {slug}")))?;
-    import(&state, entry).await.map(Json)
+    let meta = import(&state, entry).await?;
+    let existing: Option<Project> = sqlx::query_as(
+        "SELECT p.id, p.media_id, p.owner_id, p.title, p.created_at FROM projects p
+         JOIN project_members m ON m.project_id = p.id
+         WHERE p.media_id = ? AND m.user_id = ? ORDER BY p.created_at LIMIT 1",
+    )
+    .bind(&meta.id)
+    .bind(&user.id)
+    .fetch_optional(&state.db)
+    .await?;
+    let project = match existing {
+        Some(p) => p,
+        None => create_project(&state.db, &user, &meta.id, &entry.title).await?,
+    };
+    let role = member_role(&state.db, &project.id, &user.id)
+        .await?
+        .unwrap_or(Role::Viewer);
+    Ok(Json(summary(&state, &project, role).await?))
 }
 
 async fn import(state: &AppState, entry: &Entry) -> AppResult<Meta> {

@@ -1,7 +1,8 @@
-// The editor's state machine: words, the edit list, an undo stack and the
-// current word selection. Pure, so it is easy to test.
+// The editor's state machine: words, the edit list, server-fold metadata and
+// the current word selection. Pure, so it is easy to test.
 
 import { rangeForWords, wordStatus } from './editlist';
+import type { DocState } from './ops';
 import type { CutEdit, Edit, OverdubEdit, Word } from './types';
 
 export interface Selection {
@@ -15,28 +16,38 @@ export interface EditorState {
   words: Word[];
   duration: number;
   edits: Edit[];
-  /** Previous edit lists, newest last. */
-  past: Edit[][];
+  /** Display names by speaker index; '' means unnamed. */
+  speakerNames: string[];
+  /** Sequence number of the last server operation folded into `edits`. */
+  headSeq: number;
+  /** This user's next undo / redo target on the server, if any. */
+  undoable: number | null;
+  redoable: number | null;
   selection: Selection | null;
 }
 
 export type EditorAction =
   | { type: 'load'; words: Word[]; duration: number }
+  /** The server's authoritative document replaces local edits. */
+  | { type: 'sync'; doc: DocState }
   | { type: 'select'; index: number; extend: boolean }
   /** Arrow keys: step the selection one word; `extend` keeps the anchor (Shift). */
   | { type: 'move'; delta: -1 | 1; extend: boolean; skipCut?: boolean }
   | { type: 'clearSelection' }
   | { type: 'deleteSelection' }
   | { type: 'overdub'; text: string; audioUrl: string; audioDuration: number }
-  /** Append a batch of cuts (filler removal, pause tightening) as one undo step. */
+  /** Append a batch of cuts (filler removal, pause tightening) as one edit list. */
   | { type: 'applyCuts'; cuts: CutEdit[] }
-  | { type: 'undo' };
+  | { type: 'renameSpeaker'; speaker: number; name: string };
 
 export const initialEditor: EditorState = {
   words: [],
   duration: 0,
   edits: [],
-  past: [],
+  speakerNames: [],
+  headSeq: 0,
+  undoable: null,
+  redoable: null,
   selection: null,
 };
 
@@ -47,7 +58,7 @@ export function selectedRange(selection: Selection | null): [number, number] | n
 }
 
 function withEdits(state: EditorState, edits: Edit[]): EditorState {
-  return { ...state, edits, past: [...state.past, state.edits], selection: null };
+  return { ...state, edits, selection: null };
 }
 
 function inside(inner: OverdubEdit, outer: { start: number; end: number }): boolean {
@@ -132,10 +143,22 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return withEdits(state, [...state.edits, ...action.cuts]);
     }
 
-    case 'undo': {
-      const previous = state.past[state.past.length - 1];
-      if (!previous) return state;
-      return { ...state, edits: previous, past: state.past.slice(0, -1), selection: null };
+    case 'sync':
+      return {
+        ...state,
+        edits: action.doc.edits,
+        speakerNames: action.doc.speakerNames,
+        headSeq: action.doc.headSeq,
+        undoable: action.doc.undoable,
+        redoable: action.doc.redoable,
+        selection: null,
+      };
+
+    case 'renameSpeaker': {
+      const speakerNames = [...state.speakerNames];
+      while (speakerNames.length <= action.speaker) speakerNames.push('');
+      speakerNames[action.speaker] = action.name.trim();
+      return { ...state, speakerNames };
     }
   }
 }

@@ -60,6 +60,7 @@ Modified:
 ### Task 1: Database module and schema
 
 **Files:**
+
 - Modify: `server/Cargo.toml`
 - Create: `server/migrations/0001_foundation.sql`
 - Create: `server/src/db.rs`
@@ -68,6 +69,7 @@ Modified:
 - Modify: `.gitignore`
 
 **Interfaces:**
+
 - Produces: `db::open(url: &str) -> anyhow::Result<SqlitePool>`, `db::now() -> i64`, `Config.database_url: String`, `Config.admin_email: Option<String>`, `Config.admin_password: Option<String>`, `AppState.db: SqlitePool`.
 
 - [ ] **Step 1: Add dependencies**
@@ -274,10 +276,12 @@ git commit -m "server: add SQLite pool, migrations and the foundation schema"
 ### Task 2: Engine operation type and fold
 
 **Files:**
+
 - Create: `engine/src/ops.rs`
 - Modify: `engine/src/lib.rs`
 
 **Interfaces:**
+
 - Produces:
   - `enum Op { Cut{start,end}, Overdub{start,end,text,audio_url,audio_duration}, ApplyCuts{cuts: Vec<Range>}, RenameSpeaker{speaker: u32, name: String}, Undo{target_seq: i64}, Redo{target_seq: i64} }` — serde `tag = "kind"`, lowercase, camelCase fields.
   - `struct SeqOp { seq: i64, author_id: String, op: Op, undone: bool }`
@@ -609,6 +613,7 @@ git commit -m "engine: add the operation log type and its fold"
 ### Task 3: Auth — passwords, sessions, `CurrentUser`, handlers
 
 **Files:**
+
 - Create: `server/src/auth.rs`
 - Create: `server/src/test_util.rs`
 - Create: `server/src/app.rs`
@@ -616,6 +621,7 @@ git commit -m "engine: add the operation log type and its fold"
 - Modify: `server/src/main.rs`
 
 **Interfaces:**
+
 - Consumes: `db::now()`, `AppState.db`.
 - Produces:
   - `struct User { id, email, display_name, color }` (Serialize camelCase).
@@ -1237,11 +1243,13 @@ git commit -m "server: add accounts, sessions and the CurrentUser extractor"
 ### Task 4: Projects, roles and the `ProjectAccess` extractor
 
 **Files:**
+
 - Modify: `server/src/projects.rs`
 - Modify: `server/src/app.rs`
 - Modify: `server/src/routes.rs` (make `Meta` fields `pub`, already are; expose `item_dir` as `pub(crate)`)
 
 **Interfaces:**
+
 - Consumes: `CurrentUser`, `routes::read_meta`, `routes::Meta`.
 - Produces:
   - `enum Role { Owner, Editor, Commenter, Viewer }` with `as_str()`, `parse(&str) -> Option<Role>`, `can_edit()`, `can_manage()`.
@@ -1792,11 +1800,13 @@ git commit -m "server: add projects, roles, membership and the ProjectAccess ext
 ### Task 5: Operation log — `apply_ops`, fold cache, `POST /ops`, `GET /projects/:id`
 
 **Files:**
+
 - Create: `server/src/ops.rs`
 - Modify: `server/src/main.rs` (`AppState.folds` already added in Task 3)
 - Modify: `server/src/app.rs`
 
 **Interfaces:**
+
 - Consumes: `engine::{Op, SeqOp, ProjectDoc, fold}`, `ProjectAccess`, `read_meta`.
 - Produces:
   - `struct ClientOp { op_id: String, #[serde(flatten)] op: Op }` (Deserialize).
@@ -2249,12 +2259,14 @@ git commit -m "server: append, validate and fold the operation log"
 ### Task 6: Move media routes under projects; server-side export
 
 **Files:**
+
 - Modify: `server/src/routes.rs`
 - Modify: `server/src/library.rs`
 - Modify: `server/src/app.rs`
 - Modify: `server/src/main.rs`
 
 **Interfaces:**
+
 - Consumes: `ProjectAccess`, `projects::create_project`, `projects::summary`, `ops::load_doc`.
 - Produces routes (all replace the `/api/media/…` ones, which are removed):
   - `POST /api/projects` (multipart `file`) → `ProjectSummary`
@@ -2374,7 +2386,7 @@ pub async fn export(
     // …the existing body follows, with `req.edits` replaced by `edits`.
 ```
 
-   Everything after (`format` match, `overdub_files`, `build_ffmpeg_args`, job spawn) is unchanged except `&req.edits` → `&edits` and `req.edits.len()` → `edits.len()`.
+Everything after (`format` match, `overdub_files`, `build_ffmpeg_args`, job spawn) is unchanged except `&req.edits` → `&edits` and `req.edits.len()` → `edits.len()`.
 
 6. `export_progress`:
 
@@ -2489,6 +2501,7 @@ git commit -m "server: move media routes under projects and export from the fold
 ### Task 7: Client — session and login screen
 
 **Files:**
+
 - Modify: `client/src/types.ts`
 - Modify: `client/src/api.ts`
 - Create: `client/src/session.ts`
@@ -2496,6 +2509,7 @@ git commit -m "server: move media routes under projects and export from the fold
 - Modify: `client/src/styles.css`
 
 **Interfaces:**
+
 - Produces:
   - types: `User { id, email, displayName, color }`, `Role`, `ProjectSummary { id, title, role, media: Media, createdAt }`.
   - api: `fetchMe(): Promise<User>`, `fetchSetup(): Promise<{needsSetup: boolean}>`, `register(email, password, displayName)`, `login(email, password)`, `logout()`.
@@ -2635,7 +2649,13 @@ export function Login({ needsSetup, onSignedIn }: Props) {
 
   return (
     <form className="login" onSubmit={onSubmit}>
-      <h2>{mode === 'login' ? 'Sign in' : needsSetup ? 'Create the first account' : 'Create an account'}</h2>
+      <h2>
+        {mode === 'login'
+          ? 'Sign in'
+          : needsSetup
+            ? 'Create the first account'
+            : 'Create an account'}
+      </h2>
       {mode === 'register' && (
         <label>
           Name
@@ -2722,6 +2742,7 @@ git commit -m "client: add session hook, auth API and login screen"
 ### Task 8: Client — operations module and reducer sync
 
 **Files:**
+
 - Create: `client/src/ops.ts`
 - Create: `client/src/ops.test.ts`
 - Modify: `client/src/editor.ts`
@@ -2729,6 +2750,7 @@ git commit -m "client: add session hook, auth API and login screen"
 - Modify: `client/src/api.ts`
 
 **Interfaces:**
+
 - Produces:
   - types in `ops.ts`: `Op` (union mirroring `engine::Op`, camelCase, `kind` lowercase: `'cut' | 'overdub' | 'applycuts' | 'renamespeaker' | 'undo' | 'redo'`), `ClientOp = Op & { opId: string }`, `DocState { headSeq, edits, speakerNames, undoable, redoable }`.
   - `opForAction(state: EditorState, action: EditorAction): Op | null` — the operation an editing action corresponds to, or null for selection-only actions.
@@ -3044,6 +3066,7 @@ git commit -m "client: add the operations module and sync the reducer with the s
 ### Task 9: Client — project list, editor wiring, optimistic ops
 
 **Files:**
+
 - Create: `client/src/components/Projects.tsx`
 - Modify: `client/src/App.tsx`
 - Modify: `client/src/components/Toolbar.tsx`
@@ -3051,6 +3074,7 @@ git commit -m "client: add the operations module and sync the reducer with the s
 - Modify: `client/src/styles.css`
 
 **Interfaces:**
+
 - Consumes: `useSession`, `Login`, `fetchProject`, `submitOps`, `listProjects`, `opForAction`, `newOpId`.
 - Produces: `<Projects items onOpen />`; `App` screens: loading → `Login` → home (`Dropzone` + `Projects`) → editor.
 - Toolbar gains `canRedo: boolean` and `onRedo: () => void`; `canUndo` now means `editor.undoable !== null`.
@@ -3120,9 +3144,9 @@ Append styles:
 In `client/src/components/Toolbar.tsx` add to `Props`: `canRedo: boolean; onRedo: () => void;` and next to the existing undo button:
 
 ```tsx
-      <button type="button" onClick={onRedo} disabled={!canRedo} title="Redo (⇧⌘Z)">
-        Redo
-      </button>
+<button type="button" onClick={onRedo} disabled={!canRedo} title="Redo (⇧⌘Z)">
+  Redo
+</button>
 ```
 
 Read the file first and match the existing button markup exactly (class names, `title` style).
@@ -3136,36 +3160,38 @@ Apply these edits to `client/src/App.tsx`:
 2. Replace `const [media, setMedia] = useState<Media | null>(null);` with:
 
 ```tsx
-  const { user, setUser, signOut } = useSession();
-  const [needsSetup, setNeedsSetup] = useState(false);
-  const [project, setProject] = useState<ProjectSummary | null>(null);
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const media = project?.media ?? null;
-  const canEdit = project?.role === 'owner' || project?.role === 'editor';
+const { user, setUser, signOut } = useSession();
+const [needsSetup, setNeedsSetup] = useState(false);
+const [project, setProject] = useState<ProjectSummary | null>(null);
+const [projects, setProjects] = useState<ProjectSummary[]>([]);
+const media = project?.media ?? null;
+const canEdit = project?.role === 'owner' || project?.role === 'editor';
 ```
 
 3. Load the setup flag once and the project list whenever the user changes:
 
 ```tsx
-  useEffect(() => {
-    fetchSetup().then((s) => setNeedsSetup(s.needsSetup)).catch(() => undefined);
-  }, []);
+useEffect(() => {
+  fetchSetup()
+    .then((s) => setNeedsSetup(s.needsSetup))
+    .catch(() => undefined);
+}, []);
 
-  useEffect(() => {
-    if (!user) {
-      setProjects([]);
-      return;
-    }
-    let cancelled = false;
-    listProjects()
-      .then((list) => {
-        if (!cancelled) setProjects(list);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [user, project]);
+useEffect(() => {
+  if (!user) {
+    setProjects([]);
+    return;
+  }
+  let cancelled = false;
+  listProjects()
+    .then((list) => {
+      if (!cancelled) setProjects(list);
+    })
+    .catch(() => undefined);
+  return () => {
+    cancelled = true;
+  };
+}, [user, project]);
 ```
 
 (`fetchSetup` import from `./api`.)
@@ -3173,31 +3199,31 @@ Apply these edits to `client/src/App.tsx`:
 4. Replace `load`:
 
 ```tsx
-  const load = useCallback(async (label: string, fetchSummary: () => Promise<ProjectSummary>) => {
-    setLoadError(null);
-    setExportState({ status: 'idle' });
-    try {
-      setBusy(label);
-      const summary = await fetchSummary();
-      setBusy('Transcribing');
-      const [words, { doc }] = await Promise.all([
-        transcribeMedia(summary.id),
-        fetchProject(summary.id),
-      ]);
-      dispatch({ type: 'load', words, duration: summary.media.duration });
-      dispatch({ type: 'sync', doc });
-      setProject(summary);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(null);
-    }
-  }, []);
+const load = useCallback(async (label: string, fetchSummary: () => Promise<ProjectSummary>) => {
+  setLoadError(null);
+  setExportState({ status: 'idle' });
+  try {
+    setBusy(label);
+    const summary = await fetchSummary();
+    setBusy('Transcribing');
+    const [words, { doc }] = await Promise.all([
+      transcribeMedia(summary.id),
+      fetchProject(summary.id),
+    ]);
+    dispatch({ type: 'load', words, duration: summary.media.duration });
+    dispatch({ type: 'sync', doc });
+    setProject(summary);
+  } catch (err) {
+    setLoadError(err instanceof Error ? err.message : String(err));
+  } finally {
+    setBusy(null);
+  }
+}, []);
 
-  const onOpenProject = useCallback(
-    (p: ProjectSummary) => load(`Opening ${p.title}`, () => Promise.resolve(p)),
-    [load],
-  );
+const onOpenProject = useCallback(
+  (p: ProjectSummary) => load(`Opening ${p.title}`, () => Promise.resolve(p)),
+  [load],
+);
 ```
 
 `onFile` and `onLibraryClip` are unchanged apart from the type (both helpers now return `ProjectSummary`). Wherever `media.id` was passed to an API helper (`suggestEdits`, `fetchSpeakers`, `fetchThumbnails` in `Player`, `synthesizeOverdub`, `exportMedia`, `exportProgress`), pass `project.id` instead. `Player` receives `media={media}` still (it reads `url`/`kind`); check whether it calls `fetchThumbnails(media.id)` — if so, add a `projectId` prop and pass `project.id`.
@@ -3207,48 +3233,48 @@ Apply these edits to `client/src/App.tsx`:
 6. Optimistic edit dispatch — add after `const [editor, dispatch] = useReducer(...)`:
 
 ```tsx
-  // The server's last confirmed document, for rolling back a rejected op.
-  const confirmed = useRef<DocState | null>(null);
+// The server's last confirmed document, for rolling back a rejected op.
+const confirmed = useRef<DocState | null>(null);
 
-  /**
-   * Apply an editing action locally, send its operation, and settle on the
-   * server's fold. A rejected operation rolls back to the last confirmed doc.
-   */
-  const edit = useCallback(
-    (action: EditorAction) => {
-      if (!project) return;
-      const op = opForAction(editor, action);
-      dispatch(action);
-      if (!op) return;
-      if (!canEdit) return;
-      const clientOp: ClientOp = { ...op, opId: newOpId() };
-      submitOps(project.id, [clientOp])
-        .then((doc) => {
-          confirmed.current = doc;
-          dispatch({ type: 'sync', doc });
-        })
-        .catch((err: unknown) => {
-          setLoadError(err instanceof Error ? err.message : String(err));
-          if (confirmed.current) dispatch({ type: 'sync', doc: confirmed.current });
-        });
-    },
-    [project, editor, canEdit],
-  );
+/**
+ * Apply an editing action locally, send its operation, and settle on the
+ * server's fold. A rejected operation rolls back to the last confirmed doc.
+ */
+const edit = useCallback(
+  (action: EditorAction) => {
+    if (!project) return;
+    const op = opForAction(editor, action);
+    dispatch(action);
+    if (!op) return;
+    if (!canEdit) return;
+    const clientOp: ClientOp = { ...op, opId: newOpId() };
+    submitOps(project.id, [clientOp])
+      .then((doc) => {
+        confirmed.current = doc;
+        dispatch({ type: 'sync', doc });
+      })
+      .catch((err: unknown) => {
+        setLoadError(err instanceof Error ? err.message : String(err));
+        if (confirmed.current) dispatch({ type: 'sync', doc: confirmed.current });
+      });
+  },
+  [project, editor, canEdit],
+);
 
-  const undoRedo = useCallback(
-    (kind: 'undo' | 'redo') => {
-      if (!project) return;
-      const targetSeq = kind === 'undo' ? editor.undoable : editor.redoable;
-      if (targetSeq === null) return;
-      submitOps(project.id, [{ kind, targetSeq, opId: newOpId() }])
-        .then((doc) => {
-          confirmed.current = doc;
-          dispatch({ type: 'sync', doc });
-        })
-        .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
-    },
-    [project, editor.undoable, editor.redoable],
-  );
+const undoRedo = useCallback(
+  (kind: 'undo' | 'redo') => {
+    if (!project) return;
+    const targetSeq = kind === 'undo' ? editor.undoable : editor.redoable;
+    if (targetSeq === null) return;
+    submitOps(project.id, [{ kind, targetSeq, opId: newOpId() }])
+      .then((doc) => {
+        confirmed.current = doc;
+        dispatch({ type: 'sync', doc });
+      })
+      .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+  },
+  [project, editor.undoable, editor.redoable],
+);
 ```
 
 with `import type { DocState } from './ops'` and `type EditorAction` from `./editor`. In `load`, after the `sync` dispatch, set `confirmed.current = doc;`.
@@ -3262,8 +3288,18 @@ with `import type { DocState } from './ops'` and `type EditorAction` from `./edi
 10. Render:
 
 ```tsx
-  if (user === undefined) return <div className="app"><p className="muted">Loading…</p></div>;
-  if (!user) return <div className="app"><Login needsSetup={needsSetup} onSignedIn={setUser} /></div>;
+if (user === undefined)
+  return (
+    <div className="app">
+      <p className="muted">Loading…</p>
+    </div>
+  );
+if (!user)
+  return (
+    <div className="app">
+      <Login needsSetup={needsSetup} onSignedIn={setUser} />
+    </div>
+  );
 ```
 
 before the existing `return`, and in the header add after the tagline:
@@ -3302,6 +3338,7 @@ git commit -m "client: sign in, list projects and send every edit as an operatio
 ### Task 10: README and configuration notes
 
 **Files:**
+
 - Modify: `README.md`
 
 - [ ] **Step 1: Update the README**
@@ -3344,6 +3381,7 @@ git commit -m "README: document accounts, projects and the operation log"
 ## Self-review
 
 **Spec coverage (Foundation scope):**
+
 - Accounts, sessions, roles → Tasks 3, 4. ✔
 - SQLite persistence for users, projects, membership, op log → Tasks 1, 4, 5. ✔
 - Server-authoritative edit list folded from the log; cache; invalidation → Tasks 2, 5. ✔

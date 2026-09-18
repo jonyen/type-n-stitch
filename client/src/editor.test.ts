@@ -98,7 +98,7 @@ describe('deleteSelection', () => {
 });
 
 describe('applyCuts', () => {
-  it('appends the batch as a single undo step and clears the selection', () => {
+  it('appends the batch as one edit list and clears the selection', () => {
     const cuts = [
       { kind: 'cut' as const, start: 0.91, end: 1.25 },
       { kind: 'cut' as const, start: 2.0, end: 20 },
@@ -106,8 +106,6 @@ describe('applyCuts', () => {
     const state = editorReducer(select(loaded, 2), { type: 'applyCuts', cuts });
     expect(state.edits).toEqual(cuts);
     expect(state.selection).toBeNull();
-    expect(state.past).toHaveLength(1);
-    expect(editorReducer(state, { type: 'undo' }).edits).toEqual([]);
   });
 
   it('is a no-op for an empty batch', () => {
@@ -144,16 +142,27 @@ describe('overdub', () => {
   });
 });
 
-describe('undo', () => {
-  it('restores the previous edit list step by step', () => {
-    let state = editorReducer(select(loaded, 0), { type: 'deleteSelection' });
-    state = editorReducer(select(state, 3), { type: 'deleteSelection' });
-    expect(state.edits).toHaveLength(2);
+describe('sync', () => {
+  it('replaces edits and metadata with the server document and clears the selection', () => {
+    const state = editorReducer(select(loaded, 1), {
+      type: 'sync',
+      doc: {
+        headSeq: 4,
+        edits: [{ kind: 'cut', start: 1, end: 2 }],
+        speakerNames: ['Ada'],
+        undoable: 4,
+        redoable: null,
+      },
+    });
+    expect(state.edits).toEqual([{ kind: 'cut', start: 1, end: 2 }]);
+    expect(state.headSeq).toBe(4);
+    expect(state.speakerNames).toEqual(['Ada']);
+    expect(state.undoable).toBe(4);
+    expect(state.selection).toBeNull();
+  });
 
-    state = editorReducer(state, { type: 'undo' });
-    expect(state.edits).toEqual([{ kind: 'cut', start: 0, end: 0.91 }]);
-    state = editorReducer(state, { type: 'undo' });
-    expect(state.edits).toEqual([]);
-    expect(editorReducer(state, { type: 'undo' })).toBe(state);
+  it('renameSpeaker updates names optimistically', () => {
+    const state = editorReducer(loaded, { type: 'renameSpeaker', speaker: 2, name: 'Bob' });
+    expect(state.speakerNames).toEqual(['', '', 'Bob']);
   });
 });

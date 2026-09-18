@@ -2,22 +2,23 @@
 //! stores uploads, shells out to ffmpeg / whisper-cli / VoiceStudio, and
 //! serves `data/` back to the client.
 
+mod app;
+mod auth;
 mod config;
+mod db;
 mod error;
 mod library;
 mod media;
+mod ops;
+mod projects;
 mod routes;
+#[cfg(test)]
+mod test_util;
 mod tts;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::DefaultBodyLimit;
-use axum::routing::{get, post};
-use axum::Router;
-use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
@@ -27,6 +28,9 @@ pub struct AppState {
     pub config: Config,
     pub http: reqwest::Client,
     pub jobs: Mutex<HashMap<String, routes::ExportJob>>,
+    pub db: sqlx::SqlitePool,
+    /// In-memory fold cache for collaborative editing sessions.
+    pub folds: Mutex<HashMap<String, (i64, engine::ProjectDoc)>>,
 }
 
 #[tokio::main]
@@ -37,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env();
     tokio::fs::create_dir_all(&config.data_dir).await?;
+    let db = db::open(&config.database_url).await?;
     tracing::info!(
         data_dir = %config.data_dir.display(),
         model = %config.whisper_model.display(),
@@ -48,32 +53,31 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         config,
         jobs: Mutex::new(HashMap::new()),
+        db,
+        folds: Mutex::new(HashMap::new()),
     });
 
-    let app = Router::new()
-        .route("/api/health", get(routes::health))
-        .route("/api/library", get(library::list))
-        .route("/api/library/{slug}", post(library::open))
-        .route("/api/media", post(routes::upload))
-        .route("/api/media/{id}/transcribe", post(routes::transcribe))
-        .route("/api/media/{id}/suggest", post(routes::suggest))
-        .route("/api/media/{id}/thumbnails", post(routes::thumbnails))
-        .route("/api/media/{id}/speakers", post(routes::speakers))
-        .route("/api/media/{id}/overdub", post(routes::overdub))
-        .route("/api/media/{id}/export", post(routes::export))
-        .route(
-            "/api/media/{id}/export/{job}/progress",
-            get(routes::export_progress),
-        )
-        .nest_service("/data", ServeDir::new(&state.config.data_dir))
-        .nest_service(
-            "/library",
-            ServeDir::new(state.config.samples_dir.join("library")),
-        )
-        .layer(DefaultBodyLimit::max(state.config.max_upload_bytes))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state.clone());
+    let app = app::router(state.clone());
+
+    if let (Some(email), Some(password)) = (&state.config.admin_email, &state.config.admin_password)
+    {
+        let admin = match auth::create_user(&state.db, email, password, "admin").await {
+            Ok(user) => Some(user.id),
+            Err(e) if e.status() == axum::http::StatusCode::BAD_REQUEST => {
+                let row: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE email = ?")
+                    .bind(email.trim().to_ascii_lowercase())
+                    .fetch_optional(&state.db)
+                    .await?;
+                row.map(|r| r.0)
+            }
+            Err(e) => anyhow::bail!("creating admin user: {e:?}"),
+        };
+        if let Some(id) = admin {
+            projects::adopt_orphans(&state, &id)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        }
+    }
 
     tokio::spawn(library::warm(state.clone()));
 

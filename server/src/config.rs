@@ -17,6 +17,9 @@ pub struct Config {
     pub tts_base_url: String,
     pub tts_voice: String,
     pub max_upload_bytes: usize,
+    pub database_url: String,
+    pub admin_email: Option<String>,
+    pub admin_password: Option<String>,
 }
 
 impl Config {
@@ -67,6 +70,14 @@ impl Config {
                 .to_owned(),
             tts_voice: env("TTS_VOICE", "513bb606"),
             max_upload_bytes: 2 * 1024 * 1024 * 1024,
+            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+                format!(
+                    "sqlite://{}/type-n-stitch.db",
+                    env("DATA_DIR", concat!(env!("CARGO_MANIFEST_DIR"), "/data"))
+                )
+            }),
+            admin_email: std::env::var("ADMIN_EMAIL").ok(),
+            admin_password: std::env::var("ADMIN_PASSWORD").ok(),
         }
     }
 }
