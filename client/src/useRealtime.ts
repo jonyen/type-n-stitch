@@ -19,6 +19,27 @@ export interface RemoteDoc {
   speakerNames: string[];
 }
 
+/**
+ * Decide what to do with a fold that arrived over the socket while our own
+ * edits may still be in flight.
+ *
+ * `remote` replaces the whole edit list, so a peer's fold landing between our
+ * optimistic cut and the reply to our POST would put the word we just cut
+ * back on screen, only for the reply to cut it again — a visible flicker.
+ * While the queue has anything pending we therefore hold the fold (keeping
+ * only the newest by `headSeq`) and apply it once the queue drains; the
+ * reducer's `headSeq >` rule drops it if our own reply already covered it.
+ */
+export function holdOrApply(
+  incoming: RemoteDoc,
+  held: RemoteDoc | null,
+  pending: number,
+): { apply: RemoteDoc | null; held: RemoteDoc | null } {
+  if (pending === 0) return { apply: incoming, held: null };
+  if (held && held.headSeq >= incoming.headSeq) return { apply: null, held };
+  return { apply: null, held: incoming };
+}
+
 export function useRealtime(
   projectId: string | null,
   onDoc: (doc: RemoteDoc) => void,
@@ -27,6 +48,7 @@ export function useRealtime(
   const [peers, setPeers] = useState<Peer[]>([]);
   const [me, setMe] = useState<Peer | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('closed');
+  const [lastError, setLastError] = useState<string | null>(null);
   const rt = useRef<Realtime | null>(null);
 
   // Latest callbacks without reconnecting when they change identity. Written
@@ -45,6 +67,7 @@ export function useRealtime(
       switch (msg.t) {
         case 'hello':
           myConn = msg.you.connId;
+          setLastError(null);
           setMe(msg.you);
           setPeers(msg.peers.filter((p) => p.connId !== msg.you.connId));
           onDocRef.current(msg);
@@ -69,6 +92,7 @@ export function useRealtime(
           break;
         case 'error':
           console.error('realtime:', msg.code, msg.detail);
+          setLastError(`${msg.code}: ${msg.detail}`);
           break;
         case 'pong':
           break;
@@ -88,6 +112,7 @@ export function useRealtime(
       rt.current = null;
       setPeers([]);
       setMe(null);
+      setLastError(null);
     };
   }, [projectId]);
 
@@ -95,5 +120,5 @@ export function useRealtime(
     rt.current?.sendPresence(state);
   }, []);
 
-  return { peers, me, status, sendPresence };
+  return { peers, me, status, lastError, sendPresence };
 }

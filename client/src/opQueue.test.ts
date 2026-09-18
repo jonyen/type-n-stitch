@@ -46,6 +46,21 @@ describe('createOpQueue', () => {
     expect(q.pending).toBe(0);
   });
 
+  it('has already dropped the entry by the time its promise resolves', async () => {
+    // The App reads `pending` inside `.then(settle)` to decide whether a fold
+    // it held back can land, so the shift must happen before the resolve.
+    const { submit, calls } = manualSubmit();
+    const q = createOpQueue(submit);
+    let pendingAtResolve = -1;
+    const p = q.push(cut('a')).then(() => {
+      pendingAtResolve = q.pending;
+    });
+    await tick();
+    calls[0]?.resolve(doc(1));
+    await p;
+    expect(pendingAtResolve).toBe(0);
+  });
+
   it('retries the same op after a network error and keeps the order', async () => {
     vi.useFakeTimers();
     const { submit, calls } = manualSubmit();

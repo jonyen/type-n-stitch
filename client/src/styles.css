@@ -1166,6 +1166,14 @@ input.speaker-tag {
   background: #f59e0b;
 }
 
+.presence .status.error {
+  color: var(--danger);
+}
+
+.presence .status.error .dot {
+  background: var(--danger);
+}
+
 .peer-avatars {
   display: inline-flex;
 }

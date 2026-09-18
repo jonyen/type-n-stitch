@@ -32,7 +32,7 @@ import { useSession } from './session';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
 import type { LibraryItem, ProjectSummary } from './types';
 import { usePlayback } from './usePlayback';
-import { useRealtime, type RemoteDoc } from './useRealtime';
+import { holdOrApply, useRealtime, type RemoteDoc } from './useRealtime';
 
 export function App() {
   const { user, setUser, signOut } = useSession();
@@ -67,12 +67,28 @@ export function App() {
   // One serial queue per open project; ops go out in order, one at a time.
   const queue = useRef<OpQueue | null>(null);
 
-  /** Accept the server's fold as the truth: remember it and show it. */
-  const settle = useCallback((doc: DocState) => {
-    confirmed.current = doc;
-    setLoadError(null);
-    dispatch({ type: 'sync', doc });
+  // A peer's fold that arrived while our own edits were still in flight; see
+  // `holdOrApply`. Applied as soon as the queue drains.
+  const heldRemote = useRef<RemoteDoc | null>(null);
+
+  /** Once nothing is in flight, the fold we held back can land. */
+  const releaseHeldRemote = useCallback(() => {
+    const held = heldRemote.current;
+    if (!held || queue.current?.pending !== 0) return;
+    heldRemote.current = null;
+    dispatch({ type: 'remote', ...held });
   }, []);
+
+  /** Accept the server's fold as the truth: remember it and show it. */
+  const settle = useCallback(
+    (doc: DocState) => {
+      confirmed.current = doc;
+      setLoadError(null);
+      dispatch({ type: 'sync', doc });
+      releaseHeldRemote();
+    },
+    [releaseHeldRemote],
+  );
 
   /**
    * Apply an editing action locally, send its operation, and settle on the
@@ -91,9 +107,10 @@ export function App() {
         .catch((err: unknown) => {
           setLoadError(err instanceof Error ? err.message : String(err));
           if (confirmed.current) dispatch({ type: 'sync', doc: confirmed.current });
+          releaseHeldRemote();
         });
     },
-    [project, editor, canEdit, settle],
+    [project, editor, canEdit, settle, releaseHeldRemote],
   );
 
   // Undo and redo are server round-trips: the fold decides what they mean.
@@ -105,9 +122,12 @@ export function App() {
       queue.current
         ?.push({ kind, targetSeq, opId: newOpId() })
         .then(settle)
-        .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+        .catch((err: unknown) => {
+          setLoadError(err instanceof Error ? err.message : String(err));
+          releaseHeldRemote();
+        });
     },
-    [project, canEdit, editor.undoable, editor.redoable, settle],
+    [project, canEdit, editor.undoable, editor.redoable, settle, releaseHeldRemote],
   );
 
   const selected = selectedRange(editor.selection);
@@ -157,6 +177,7 @@ export function App() {
   useEffect(() => {
     if (!projectId) {
       queue.current = null;
+      heldRemote.current = null;
       return;
     }
     const q = createOpQueue((ops) => submitOps(projectId, ops));
@@ -166,18 +187,24 @@ export function App() {
       // user has left, forever.
       q.close();
       queue.current = null;
+      heldRemote.current = null;
     };
   }, [projectId]);
 
   // The socket delivers everyone's appends, including our own; `remote` keeps
   // only folds newer than ours, so it never fights the reply to our own POST.
-  const onRemoteDoc = useCallback(
-    ({ headSeq, edits, speakerNames }: RemoteDoc) =>
-      dispatch({ type: 'remote', headSeq, edits, speakerNames }),
-    [],
-  );
+  // A fold arriving while our own edit is un-acked waits instead of erasing it.
+  const onRemoteDoc = useCallback((doc: RemoteDoc) => {
+    const { apply, held } = holdOrApply(doc, heldRemote.current, queue.current?.pending ?? 0);
+    heldRemote.current = held;
+    if (apply) dispatch({ type: 'remote', ...apply });
+  }, []);
   const onSocketOpen = useCallback(() => queue.current?.flush(), []);
-  const { peers, status, sendPresence } = useRealtime(projectId, onRemoteDoc, onSocketOpen);
+  const { peers, status, lastError, sendPresence } = useRealtime(
+    projectId,
+    onRemoteDoc,
+    onSocketOpen,
+  );
 
   // Tell peers where we are: playhead, selection, caret. Coalesced by the socket client.
   const selection = editor.selection;
@@ -201,6 +228,7 @@ export function App() {
     setProject(null);
     setLoadError(null);
     confirmed.current = null;
+    heldRemote.current = null;
     dispatch({ type: 'load', words: [], duration: 0 });
     setExportState({ status: 'idle' });
   }, []);
@@ -427,7 +455,7 @@ export function App() {
         <span className="tagline muted">edit media by editing its words</span>
         <span className="spacer" />
         {project && <span className="header-file muted">{project.media.filename}</span>}
-        {project && <Presence peers={peers} status={status} />}
+        {project && <Presence peers={peers} status={status} lastError={lastError} />}
         <Avatar user={user} withName size="sm" />
         <button type="button" className="ghost" onClick={signOut}>
           Sign out
