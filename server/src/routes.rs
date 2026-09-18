@@ -12,7 +12,7 @@ use axum::Json;
 use engine::{
     assign_speakers, build_ffmpeg_args, filler_cuts, output_duration, pause_cuts,
     silence_pause_cuts, thumbnail_args, thumbnail_sheet, timeline, Edit, ExportOptions, MediaKind,
-    OutputFormat, Range, SpeakerTurn, SuggestOptions, ThumbnailSheet, Word,
+    OutputFormat, Range, SpeakerTurn, SuggestOptions, ThumbnailSheet, Transition, Word,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -529,6 +529,10 @@ pub async fn export(
             format,
             output: &output,
             overdub_audio: &overdub_audio,
+            // Task 4 supplies the real frame info, font and project transition.
+            video: None,
+            font: Path::new(""),
+            transition: Transition::None,
         },
     )
     .map_err(|e| AppError::bad_request(e.to_string()))?;

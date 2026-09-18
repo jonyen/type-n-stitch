@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use engine::{build_ffmpeg_args, Edit, ExportOptions, MediaKind, OutputFormat};
+use engine::{build_ffmpeg_args, Edit, ExportOptions, MediaKind, OutputFormat, Transition};
 
 fn sample() -> Option<PathBuf> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/sample.mp4");
@@ -131,6 +131,9 @@ fn renders_cuts_and_an_overdub_to_the_expected_length() {
             format: OutputFormat::Mp4,
             output: &output,
             overdub_audio: &overdub_audio,
+            video: None,
+            font: Path::new(""),
+            transition: Transition::None,
         },
     )
     .unwrap();
@@ -167,6 +170,9 @@ fn renders_audio_only_export_from_a_video_source() {
             format: OutputFormat::Mp3,
             output: &output,
             overdub_audio: &none,
+            video: None,
+            font: Path::new(""),
+            transition: Transition::None,
         },
     )
     .unwrap();
