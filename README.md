@@ -19,7 +19,11 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    deleted word goes with it and no half-gaps are left behind. Overdubbing a run sends new text
    to VoiceStudio and adds an `overdub` edit carrying the WAV and its duration. Every change is
    an operation appended to the project's log in SQLite; the edit list is the fold of that log,
-   and undo appends an `undo` targeting your own operation.
+   and undo appends an `undo` targeting your own operation. Everyone with the project open holds
+   a WebSocket (`GET /api/projects/:id/ws`); after each append the server pushes its fold to all
+   of them, and presence frames carry each person's playhead, selection, caret and whether they
+   are playing. Edits still go over `POST …/ops`, one at a time from a queue that retries after a
+   dropped connection — the socket only fans out.
 3. **Preview.** The browser plays the original file and honours the edit list live: an
    animation-frame loop seeks past cuts as the playhead reaches them, and for an overdub it
    pauses the picture on the first frame, plays the WAV through a second `Audio` element, then
@@ -37,6 +41,7 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
  │  Transcript (word tokens)  │        │  GET/POST /api/projects  (list, upload)│
  │  editor reducer + undo     │        │  GET  /api/projects/:id  (media + fold)│
  │  usePlayback: live skip    │        │  POST /api/projects/:id/ops (append)   │
+ │                            │        │  GET  /api/projects/:id/ws (fold+peers)│
  │  suggest.ts (fillers,      │        │  POST /api/projects/:id/{transcribe,…} │
  │    pauses, preview mirror) │        │  GET  …/export/:job/progress           │
  │  editlist.ts (preview      │ ◀───── │  GET  /data/…       (source, wav, mp4) │
@@ -93,7 +98,9 @@ starting the server. `ADMIN_PASSWORD` is only used when the admin account is fir
 changing it later has no effect (there is no password-reset flow yet; edit the `users` row if
 you must). The database lives at `$DATA_DIR/type-n-stitch.db`; override with `DATABASE_URL`.
 Registration is open to anyone who can reach the server — put it behind your own network or
-proxy. The client mirrors the engine's edit rules for the live preview, but the server's fold
+proxy. The live socket refuses a handshake whose `Origin` does not match the request's `Host`
+(an absent `Origin`, as non-browser clients send, is allowed), so a reverse proxy in front of
+it must preserve `Host`. The client mirrors the engine's edit rules for the live preview, but the server's fold
 of the operation log is what export renders.
 
 **Overdub** needs a local OpenAI-compatible speech endpoint. I use VoiceStudio with a cloned
@@ -179,6 +186,8 @@ seek to it · shift-click or drag to select a run.
 - `/data/<media id>/…` (source media, transcripts, overdub audio, exports) is served without
   authentication — anyone who learns a media id can fetch the files. The server binds to
   127.0.0.1, so this is only reachable from your machine; a per-project media route is planned.
+- Presence and the live channel are in-process; running two server instances would split them
+  (the `Bus` trait is the seam for a shared implementation).
 
 ## License
 

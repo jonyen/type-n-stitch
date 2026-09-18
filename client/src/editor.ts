@@ -38,7 +38,9 @@ export type EditorAction =
   | { type: 'overdub'; text: string; audioUrl: string; audioDuration: number }
   /** Append a batch of cuts (filler removal, pause tightening) as one edit list. */
   | { type: 'applyCuts'; cuts: CutEdit[] }
-  | { type: 'renameSpeaker'; speaker: number; name: string };
+  | { type: 'renameSpeaker'; speaker: number; name: string }
+  /** Another collaborator's append, as the server's fold. Per-user fields stay. */
+  | { type: 'remote'; headSeq: number; edits: Edit[]; speakerNames: string[] };
 
 export const initialEditor: EditorState = {
   words: [],
@@ -143,15 +145,31 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return withEdits(state, [...state.edits, ...action.cuts]);
     }
 
-    case 'sync':
+    case 'sync': {
+      // The undo targets are ours alone, so a reply always brings them. Its
+      // fold, though, can be older than one a peer's broadcast already
+      // applied — a slower reply must not undo newer server truth.
+      const stale = action.doc.headSeq < state.headSeq;
       return {
         ...state,
-        edits: action.doc.edits,
-        speakerNames: action.doc.speakerNames,
-        headSeq: action.doc.headSeq,
+        edits: stale ? state.edits : action.doc.edits,
+        speakerNames: stale ? state.speakerNames : action.doc.speakerNames,
+        headSeq: stale ? state.headSeq : action.doc.headSeq,
         undoable: action.doc.undoable,
         redoable: action.doc.redoable,
-        selection: null,
+        selection: stale ? state.selection : null,
+      };
+    }
+
+    case 'remote':
+      // Out-of-order broadcasts, and our own append arriving before its POST
+      // reply, are both harmless as long as only newer folds win.
+      if (action.headSeq <= state.headSeq) return state;
+      return {
+        ...state,
+        edits: action.edits,
+        speakerNames: action.speakerNames,
+        headSeq: action.headSeq,
       };
 
     case 'renameSpeaker': {

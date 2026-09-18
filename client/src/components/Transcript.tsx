@@ -1,6 +1,14 @@
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
 
 import { wordStatus } from '../editlist';
+import type { Peer } from '../realtime';
 import {
   speakerLabel,
   splitTurns,
@@ -31,6 +39,7 @@ interface Props {
   onRenameSpeaker: (speaker: number, name: string) => void;
   /** Viewers and commenters read the transcript; they cannot rename speakers. */
   readOnly: boolean;
+  peers: Peer[];
 }
 
 export function Transcript({
@@ -47,8 +56,16 @@ export function Transcript({
   speakerNames,
   onRenameSpeaker,
   readOnly,
+  peers,
 }: Props) {
   const inSelection = (i: number) => selected !== null && i >= selected[0] && i <= selected[1];
+
+  // Which peer (first wins) covers each word, and which peers sit before a word.
+  const peerFor = (i: number) =>
+    peers.find(
+      (p) => p.state.selection !== null && i >= p.state.selection[0] && i <= p.state.selection[1],
+    );
+  const caretsAt = (i: number) => peers.filter((p) => p.state.caret === i);
 
   // Mouse-down on a word starts a drag; every word the pointer enters while
   // the button is held extends the selection, like selecting text.
@@ -128,11 +145,26 @@ export function Transcript({
         .slice(first, last + 1)
         .map((w) => w.text)
         .join(' ');
+      const odPeer = peerFor(first);
+      const odClasses = ['token', 'overdub'];
+      if (active) odClasses.push('active');
+      if (inSelection(first)) odClasses.push('selected');
+      if (odPeer) odClasses.push('peer-selected');
       return (
         <span key={`od-${first}`}>
+          {caretsAt(first).map((p) => (
+            <span
+              key={p.connId}
+              className="peer-caret"
+              style={{ background: p.user.color }}
+              data-name={p.user.displayName}
+              aria-hidden
+            />
+          ))}
           <button
             type="button"
-            className={`token overdub${active ? ' active' : ''}${inSelection(first) ? ' selected' : ''}`}
+            className={odClasses.join(' ')}
+            style={odPeer ? ({ '--peer': odPeer.user.color } as CSSProperties) : undefined}
             title={`Overdub replacing “${original}”`}
             onMouseDown={(e) => press(first, e, () => onOverdubClick(overdub))}
             onMouseEnter={() => enter(first)}
@@ -148,12 +180,24 @@ export function Transcript({
     const classes = ['token', status];
     if (inSelection(index)) classes.push('selected');
     if (index === activeWord) classes.push('active');
+    const peer = peerFor(index);
+    if (peer) classes.push('peer-selected');
     return (
       <span key={word.id}>
+        {caretsAt(index).map((p) => (
+          <span
+            key={p.connId}
+            className="peer-caret"
+            style={{ background: p.user.color }}
+            data-name={p.user.displayName}
+            aria-hidden
+          />
+        ))}
         <button
           type="button"
           className={classes.join(' ')}
           data-index={index}
+          style={peer ? ({ '--peer': peer.user.color } as CSSProperties) : undefined}
           onMouseDown={(e) => press(index, e)}
           onMouseEnter={() => enter(index)}
           onClick={(e) => keyActivate(index, e)}

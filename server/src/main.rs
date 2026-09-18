@@ -4,6 +4,7 @@
 
 mod app;
 mod auth;
+mod bus;
 mod config;
 mod db;
 mod error;
@@ -15,6 +16,7 @@ mod routes;
 #[cfg(test)]
 mod test_util;
 mod tts;
+mod ws;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -31,6 +33,8 @@ pub struct AppState {
     pub db: sqlx::SqlitePool,
     /// In-memory fold cache for collaborative editing sessions.
     pub folds: Mutex<HashMap<String, (i64, engine::ProjectDoc)>>,
+    /// Fan-out for live edits and presence, one hub per project.
+    pub bus: Arc<dyn bus::Bus>,
 }
 
 #[tokio::main]
@@ -55,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
         jobs: Mutex::new(HashMap::new()),
         db,
         folds: Mutex::new(HashMap::new()),
+        bus: Arc::new(bus::LocalBus::new()),
     });
 
     let app = app::router(state.clone());

@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::config::Config;
-use crate::{app, db, AppState};
+use crate::{app, bus, db, AppState};
 
 /// A state whose data dir and database live in a fresh temp dir.
 pub async fn state() -> (Arc<AppState>, TempDir) {
@@ -30,6 +30,7 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
         jobs: Mutex::new(HashMap::new()),
         db,
         folds: Mutex::new(HashMap::new()),
+        bus: Arc::new(bus::LocalBus::new()),
     });
     (state, dir)
 }
@@ -91,4 +92,15 @@ pub async fn register(state: &Arc<AppState>, email: &str) -> String {
     .await;
     assert_eq!(status, StatusCode::OK);
     cookie_of(&headers).expect("register sets a cookie")
+}
+
+/// Serve the app on an ephemeral port; returns `http://127.0.0.1:PORT`.
+pub async fn serve(state: &Arc<AppState>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = app(state);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
 }
