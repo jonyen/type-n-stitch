@@ -28,7 +28,7 @@ const COLORS: &[&str] = &[
     "#e0575b", "#e08f3c", "#c9a227", "#4caf6e", "#3c8fd1", "#7c5cd6", "#d15ca7", "#3fb3b3",
 ];
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub id: String,

@@ -47,7 +47,6 @@ impl AppError {
         }
     }
 
-    #[allow(dead_code)] // consumed once collaboration roles are enforced (Task 4)
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
