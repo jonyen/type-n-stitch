@@ -6,7 +6,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use engine::{build_ffmpeg_args, Edit, ExportOptions, MediaKind, OutputFormat, Transition};
+use engine::text;
+use engine::{
+    build_ffmpeg_args, CaptionPos, Edit, ExportOptions, MediaKind, OutputFormat, TitleStyle,
+    Transition, VideoInfo,
+};
 
 fn sample() -> Option<PathBuf> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/sample.mp4");
@@ -132,7 +136,8 @@ fn renders_cuts_and_an_overdub_to_the_expected_length() {
             output: &output,
             overdub_audio: &overdub_audio,
             video: None,
-            font: Path::new(""),
+            title_images: &HashMap::new(),
+            caption_images: &HashMap::new(),
             transition: Transition::None,
         },
     )
@@ -171,7 +176,8 @@ fn renders_audio_only_export_from_a_video_source() {
             output: &output,
             overdub_audio: &none,
             video: None,
-            font: Path::new(""),
+            title_images: &HashMap::new(),
+            caption_images: &HashMap::new(),
             transition: Transition::None,
         },
     )
@@ -184,4 +190,123 @@ fn renders_audio_only_export_from_a_video_source() {
         "rendered {rendered} s, expected 10 s"
     );
     assert!(!probe_video_stream(&output));
+}
+
+/// Is ffmpeg on the PATH at all?
+fn have_ffmpeg() -> bool {
+    let ok = Command::new("which")
+        .arg("ffmpeg")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: ffmpeg not on PATH");
+    }
+    ok
+}
+
+/// A 3 s colour-bar clip with a tone, standing in for a real recording.
+fn testsrc_clip(dir: &Path) -> PathBuf {
+    let clip = dir.join("clip.mp4");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=30:duration=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=3",
+            "-shortest",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&clip)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(status.success());
+    clip
+}
+
+#[test]
+fn renders_a_title_card_a_caption_and_a_dip_from_rasterised_pngs() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let clip = testsrc_clip(dir.path());
+    let video = VideoInfo {
+        width: 320,
+        height: 240,
+        fps: 30.0,
+    };
+
+    let edits = [
+        Edit::Title {
+            at: 1.0,
+            duration: 2.0,
+            text: "Chapter one".into(),
+            subtitle: Some("a subtitle".into()),
+            style: TitleStyle::Accent,
+        },
+        Edit::Caption {
+            start: 0.5,
+            end: 2.5,
+            text: "Ada Lovelace".into(),
+            position: CaptionPos::BottomLeft,
+        },
+        Edit::Cut {
+            start: 2.0,
+            end: 2.5,
+            transition: None,
+        },
+    ];
+
+    // The engine draws the text; ffmpeg only composites the PNGs.
+    let card = dir.path().join("title-0.png");
+    std::fs::write(
+        &card,
+        text::render_title("Chapter one", Some("a subtitle"), TitleStyle::Accent, video).to_png(),
+    )
+    .unwrap();
+    let mut title_images = HashMap::new();
+    title_images.insert(0, card);
+
+    let boxed = text::render_caption("Ada Lovelace", CaptionPos::BottomLeft, video);
+    let cap = dir.path().join("caption-1.png");
+    std::fs::write(&cap, boxed.raster.to_png()).unwrap();
+    let mut caption_images = HashMap::new();
+    caption_images.insert(1, (cap, boxed.x, boxed.y));
+
+    let output = dir.path().join("out.mp4");
+    let none = HashMap::new();
+    let args = build_ffmpeg_args(
+        &clip,
+        &edits,
+        &ExportOptions {
+            duration: 3.0,
+            kind: MediaKind::Video,
+            format: OutputFormat::Mp4,
+            output: &output,
+            overdub_audio: &none,
+            video: Some(video),
+            title_images: &title_images,
+            caption_images: &caption_images,
+            transition: Transition::Dip,
+        },
+    )
+    .unwrap();
+    run(&args);
+
+    // 3 s, less the 0.5 s cut, plus the 2 s title card.
+    let rendered = probe_duration(&output);
+    assert!(
+        (rendered - 4.5).abs() < 0.2,
+        "rendered {rendered} s, expected 4.5 s"
+    );
+    assert!(probe_video_stream(&output));
 }

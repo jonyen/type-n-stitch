@@ -529,9 +529,10 @@ pub async fn export(
             format,
             output: &output,
             overdub_audio: &overdub_audio,
-            // Task 4 supplies the real frame info, font and project transition.
+            // Task 4 supplies the real frame info, rendered text and transition.
             video: None,
-            font: Path::new(""),
+            title_images: &HashMap::new(),
+            caption_images: &HashMap::new(),
             transition: Transition::None,
         },
     )
