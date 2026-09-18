@@ -22,9 +22,6 @@ pub async fn open(url: &str) -> anyhow::Result<SqlitePool> {
 }
 
 /// Unix seconds, the timestamp format used by every table.
-///
-/// Not yet called outside tests; later tasks stamp rows with it.
-#[allow(dead_code)]
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

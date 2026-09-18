@@ -2,23 +2,22 @@
 //! stores uploads, shells out to ffmpeg / whisper-cli / VoiceStudio, and
 //! serves `data/` back to the client.
 
+mod app;
+mod auth;
 mod config;
 mod db;
 mod error;
 mod library;
 mod media;
+mod projects;
 mod routes;
+#[cfg(test)]
+mod test_util;
 mod tts;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::DefaultBodyLimit;
-use axum::routing::{get, post};
-use axum::Router;
-use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
@@ -29,6 +28,9 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub jobs: Mutex<HashMap<String, routes::ExportJob>>,
     pub db: sqlx::SqlitePool,
+    /// In-memory fold cache for collaborative editing sessions; wired up in Task 5.
+    #[allow(dead_code)]
+    pub folds: Mutex<HashMap<String, (i64, engine::ProjectDoc)>>,
 }
 
 #[tokio::main]
@@ -52,32 +54,10 @@ async fn main() -> anyhow::Result<()> {
         config,
         jobs: Mutex::new(HashMap::new()),
         db,
+        folds: Mutex::new(HashMap::new()),
     });
 
-    let app = Router::new()
-        .route("/api/health", get(routes::health))
-        .route("/api/library", get(library::list))
-        .route("/api/library/{slug}", post(library::open))
-        .route("/api/media", post(routes::upload))
-        .route("/api/media/{id}/transcribe", post(routes::transcribe))
-        .route("/api/media/{id}/suggest", post(routes::suggest))
-        .route("/api/media/{id}/thumbnails", post(routes::thumbnails))
-        .route("/api/media/{id}/speakers", post(routes::speakers))
-        .route("/api/media/{id}/overdub", post(routes::overdub))
-        .route("/api/media/{id}/export", post(routes::export))
-        .route(
-            "/api/media/{id}/export/{job}/progress",
-            get(routes::export_progress),
-        )
-        .nest_service("/data", ServeDir::new(&state.config.data_dir))
-        .nest_service(
-            "/library",
-            ServeDir::new(state.config.samples_dir.join("library")),
-        )
-        .layer(DefaultBodyLimit::max(state.config.max_upload_bytes))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state.clone());
+    let app = app::router(state.clone());
 
     tokio::spawn(library::warm(state.clone()));
 

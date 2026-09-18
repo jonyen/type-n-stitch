@@ -9,6 +9,8 @@ use serde_json::json;
 pub struct AppError {
     status: StatusCode,
     message: String,
+    /// Which item in a submitted batch was rejected, if any.
+    index: Option<usize>,
 }
 
 impl AppError {
@@ -16,6 +18,7 @@ impl AppError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            index: None,
         }
     }
 
@@ -23,6 +26,7 @@ impl AppError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            index: None,
         }
     }
 
@@ -31,7 +35,40 @@ impl AppError {
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: message.into(),
+            index: None,
         }
+    }
+
+    pub fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: "sign in first".into(),
+            index: None,
+        }
+    }
+
+    #[allow(dead_code)] // consumed once collaboration roles are enforced (Task 4)
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+            index: None,
+        }
+    }
+
+    /// A bad request that names which entry of a batch was rejected.
+    #[allow(dead_code)] // consumed once batched op submission lands (Task 5)
+    pub fn bad_request_at(index: usize, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+            index: Some(index),
+        }
+    }
+
+    #[allow(dead_code)] // consumed once batched op submission lands (Task 5)
+    pub fn status(&self) -> StatusCode {
+        self.status
     }
 }
 
@@ -42,13 +79,18 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: format!("{err:#}"),
+            index: None,
         }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "error": self.message }))).into_response()
+        let mut body = json!({ "error": self.message });
+        if let Some(index) = self.index {
+            body["index"] = json!(index);
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 

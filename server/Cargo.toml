@@ -20,6 +20,10 @@ reqwest = { version = "0.12", features = ["json"], default-features = false }
 uuid = { version = "1", features = ["v4", "v5", "v7"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 argon2 = "0.5"
+# argon2's default features pull in password-hash/rand_core, but not
+# rand_core's own `getrandom` feature, so `OsRng` isn't otherwise available.
+# Depending on password-hash directly unifies the feature across the graph.
+password-hash = { version = "0.5", features = ["getrandom"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
