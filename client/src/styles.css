@@ -985,3 +985,16 @@ input.speaker-tag {
   font: inherit;
   padding: 0.6rem 0.8rem;
 }
+
+/* A rejected edit, above the two editor columns. */
+.editor .error.banner {
+  grid-column: 1 / -1;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+}

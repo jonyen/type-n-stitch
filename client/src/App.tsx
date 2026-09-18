@@ -68,6 +68,7 @@ export function App() {
       submitOps(project.id, [clientOp])
         .then((doc) => {
           confirmed.current = doc;
+          setLoadError(null);
           dispatch({ type: 'sync', doc });
         })
         .catch((err: unknown) => {
@@ -81,17 +82,18 @@ export function App() {
   // Undo and redo are server round-trips: the fold decides what they mean.
   const undoRedo = useCallback(
     (kind: 'undo' | 'redo') => {
-      if (!project) return;
+      if (!project || !canEdit) return;
       const targetSeq = kind === 'undo' ? editor.undoable : editor.redoable;
       if (targetSeq === null) return;
       submitOps(project.id, [{ kind, targetSeq, opId: newOpId() }])
         .then((doc) => {
           confirmed.current = doc;
+          setLoadError(null);
           dispatch({ type: 'sync', doc });
         })
         .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
     },
-    [project, editor.undoable, editor.redoable],
+    [project, canEdit, editor.undoable, editor.redoable],
   );
 
   const selected = selectedRange(editor.selection);
@@ -157,6 +159,15 @@ export function App() {
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, [projectId, goHome]);
+
+  // A different account must not inherit the previous one's open document.
+  const userId = user?.id ?? null;
+  const lastUserId = useRef(userId);
+  useEffect(() => {
+    if (lastUserId.current === userId) return;
+    lastUserId.current = userId;
+    goHome();
+  }, [userId, goHome]);
 
   const onBack = useCallback(() => {
     if (history.state?.project) history.back();
@@ -374,6 +385,20 @@ export function App() {
         </>
       ) : (
         <main className="editor">
+          {loadError && (
+            <p className="error banner">
+              {loadError}
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setLoadError(null)}
+                aria-label="Dismiss"
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </p>
+          )}
           <section className="stage">
             <Player
               media={media}
@@ -417,6 +442,7 @@ export function App() {
               speakers={speakers}
               speakerNames={editor.speakerNames}
               onRenameSpeaker={onRenameSpeaker}
+              readOnly={!canEdit}
             />
           </section>
         </main>
