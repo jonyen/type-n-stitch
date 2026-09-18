@@ -160,6 +160,10 @@ pub struct Transcript {
 const WORDS_CACHE: &str = "words-v2.json";
 
 /// `POST /api/projects/:id/transcribe` — whisper.cpp word timestamps (cached).
+///
+/// Deliberately open to every member, viewers included: the transcript *is*
+/// the document, so a viewer cannot see the project without it. The result is
+/// cached per media, so a viewer cannot force repeated work either.
 pub async fn transcribe(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
@@ -213,6 +217,9 @@ pub struct Speakers {
 const SPEAKERS_CACHE: &str = "speakers-v1.json";
 
 /// `POST /api/projects/:id/speakers` — who says each word (cached).
+///
+/// Readable by every member, viewers included: speaker turns are part of
+/// viewing the transcript, and the answer is cached per media.
 pub async fn speakers(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
@@ -258,6 +265,9 @@ const THUMBS_CACHE: &str = "thumbs-v1.jpg";
 
 /// `POST /api/projects/:id/thumbnails` — a sprite sheet of frames for the
 /// scrubber preview, rendered once per video and cached.
+///
+/// Readable by every member, viewers included: the scrubber preview is part
+/// of playback, and the sheet is rendered once per media and cached.
 pub async fn thumbnails(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
@@ -329,12 +339,14 @@ pub struct Suggestions {
 }
 
 /// `POST /api/projects/:id/suggest` — filler-word and long-pause cuts the
-/// client can apply as one batch. The body is optional.
+/// client can apply as one batch. The body is optional. Unlike the other
+/// read-only media routes this one prepares edits, so it needs edit rights.
 pub async fn suggest(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
     body: Option<Json<SuggestRequest>>,
 ) -> AppResult<Json<Suggestions>> {
+    access.require_edit()?;
     let id = access.project.media_id.clone();
     let dir = media_dir(&state, &id)?;
     let meta = read_meta(&dir).await?;

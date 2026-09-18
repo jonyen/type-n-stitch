@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
-use crate::projects::{create_project, summary, Project, ProjectSummary, Role};
+use crate::projects::{create_project, member_role, summary, Project, ProjectSummary, Role};
 use crate::routes::{read_meta, speakers_item, transcribe_item, Meta};
 use crate::{media, AppState};
 
@@ -143,14 +143,8 @@ pub async fn open(
         Some(p) => p,
         None => create_project(&state.db, &user, &meta.id, &entry.title).await?,
     };
-    let role: Option<(String,)> =
-        sqlx::query_as("SELECT role FROM project_members WHERE project_id = ? AND user_id = ?")
-            .bind(&project.id)
-            .bind(&user.id)
-            .fetch_optional(&state.db)
-            .await?;
-    let role = role
-        .and_then(|(r,)| Role::parse(&r))
+    let role = member_role(&state.db, &project.id, &user.id)
+        .await?
         .unwrap_or(Role::Viewer);
     Ok(Json(summary(&state, &project, role).await?))
 }

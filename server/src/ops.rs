@@ -638,6 +638,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn viewer_cannot_ask_for_suggestions() {
+        let (state, _d, _ada, bob, project) = setup(Some("viewer")).await;
+        let (status, _, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{project}/suggest"),
+                Some(&bob),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn undoing_an_undo_row_is_rejected() {
         let (state, _d, ada, _bob, project) = setup(None).await;
         post_ops(&state, &ada, &project, vec![cut("a", 1.0, 2.0)]).await; // seq 1

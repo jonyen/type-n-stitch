@@ -143,7 +143,11 @@ pub async fn find_project(db: &SqlitePool, id: &str) -> AppResult<Option<Project
     .await?)
 }
 
-async fn member_role(db: &SqlitePool, project_id: &str, user_id: &str) -> AppResult<Option<Role>> {
+pub(crate) async fn member_role(
+    db: &SqlitePool,
+    project_id: &str,
+    user_id: &str,
+) -> AppResult<Option<Role>> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT role FROM project_members WHERE project_id = ? AND user_id = ?")
             .bind(project_id)
@@ -151,6 +155,15 @@ async fn member_role(db: &SqlitePool, project_id: &str, user_id: &str) -> AppRes
             .fetch_optional(db)
             .await?;
     Ok(row.and_then(|(r,)| Role::parse(&r)))
+}
+
+/// A stored role string as a `Role`. An unrecognised value (a hand-edited row,
+/// or a role from a newer build) is treated as the least privileged one.
+fn role_or_viewer(role: &str) -> Role {
+    Role::parse(role).unwrap_or_else(|| {
+        tracing::warn!(role, "unknown role in project_members; treating as viewer");
+        Role::Viewer
+    })
 }
 
 pub async fn create_project(
@@ -219,7 +232,7 @@ pub async fn list(
             title,
             created_at,
         };
-        let role = Role::parse(&role).unwrap_or(Role::Viewer);
+        let role = role_or_viewer(&role);
         // A project whose media directory vanished is skipped, not fatal.
         match summary(&state, &project, role).await {
             Ok(s) => out.push(s),
@@ -269,7 +282,7 @@ async fn list_members(db: &SqlitePool, project_id: &str) -> AppResult<Vec<Member
                 display_name,
                 color,
             },
-            role: Role::parse(&role).unwrap_or(Role::Viewer),
+            role: role_or_viewer(&role),
         })
         .collect())
 }
