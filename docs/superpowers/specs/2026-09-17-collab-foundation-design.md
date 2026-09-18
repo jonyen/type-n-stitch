@@ -46,7 +46,7 @@ is a range operation over immutable source media. That makes an append-only
 operation log the natural representation:
 
 ```
-edit_ops(project_id, seq, author_id, op json, undone_by, created_at)
+edit_ops(project_id, seq, op_id, author_id, op json, undone_by, created_at)
 ```
 
 Project state is the fold of its operations. The `seq` column is the version
