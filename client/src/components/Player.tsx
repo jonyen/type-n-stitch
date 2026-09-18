@@ -9,6 +9,7 @@ import {
   overdubs,
   skipTarget,
 } from '../editlist';
+import type { Peer } from '../realtime';
 import type { Edit, Media, MediaKind } from '../types';
 import type { Playback } from '../usePlayback';
 
@@ -19,9 +20,10 @@ interface Props {
   mediaRef: RefObject<HTMLVideoElement | null>;
   edits: Edit[];
   playback: Playback;
+  peers: Peer[];
 }
 
-export function Player({ media, projectId, mediaRef, edits, playback }: Props) {
+export function Player({ media, projectId, mediaRef, edits, playback, peers }: Props) {
   const { duration } = media;
   const cutCount = cutRanges(edits).length;
   const overdubCount = overdubs(edits).length;
@@ -119,6 +121,14 @@ export function Player({ media, projectId, mediaRef, edits, playback }: Props) {
               />
             ))}
             <span className="playhead" style={{ left: pct(playback.currentTime) }} />
+            {peers.map((p) => (
+              <span
+                key={p.connId}
+                className={`peer-head${p.state.playing ? ' playing' : ''}`}
+                style={{ left: pct(p.state.playhead), background: p.user.color }}
+                title={p.user.displayName}
+              />
+            ))}
           </div>
           {hover && duration > 0 && (
             <ScrubPreview

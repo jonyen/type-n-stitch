@@ -20,6 +20,7 @@ import { Dropzone } from './components/Dropzone';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
+import { Presence } from './components/Presence';
 import { Projects } from './components/Projects';
 import { Toolbar, type ExportState } from './components/Toolbar';
 import { Transcript } from './components/Transcript';
@@ -176,7 +177,7 @@ export function App() {
     [],
   );
   const onSocketOpen = useCallback(() => queue.current?.flush(), []);
-  const { sendPresence } = useRealtime(projectId, onRemoteDoc, onSocketOpen);
+  const { peers, status, sendPresence } = useRealtime(projectId, onRemoteDoc, onSocketOpen);
 
   // Tell peers where we are: playhead, selection, caret. Coalesced by the socket client.
   const selection = editor.selection;
@@ -426,6 +427,7 @@ export function App() {
         <span className="tagline muted">edit media by editing its words</span>
         <span className="spacer" />
         {project && <span className="header-file muted">{project.media.filename}</span>}
+        {project && <Presence peers={peers} status={status} />}
         <Avatar user={user} withName size="sm" />
         <button type="button" className="ghost" onClick={signOut}>
           Sign out
@@ -459,6 +461,7 @@ export function App() {
               mediaRef={mediaRef}
               edits={editor.edits}
               playback={playback}
+              peers={peers}
             />
             <Toolbar
               hasSelection={selected !== null}
@@ -496,6 +499,7 @@ export function App() {
               speakerNames={editor.speakerNames}
               onRenameSpeaker={onRenameSpeaker}
               readOnly={!canEdit}
+              peers={peers}
             />
           </section>
         </main>

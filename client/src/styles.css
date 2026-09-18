@@ -1132,3 +1132,112 @@ input.speaker-tag {
   border: 1px solid var(--danger);
   border-radius: 6px;
 }
+
+/* Presence */
+
+.presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.presence .status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.presence .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.presence .status.open .dot {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+}
+
+.presence .status.reconnecting .dot,
+.presence .status.connecting .dot {
+  background: #f59e0b;
+}
+
+.peer-avatars {
+  display: inline-flex;
+}
+
+.peer-avatars .avatar + .avatar {
+  margin-left: -6px;
+}
+
+.peer-avatars .avatar-dot {
+  border: 2px solid var(--panel);
+}
+
+.avatar-more {
+  margin-left: 4px;
+  font-size: 12px;
+}
+
+/* A peer's playhead on the scrubber. */
+.scrubber .peer-head {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  transform: translateX(-1px);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.scrubber .peer-head::after {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: inherit;
+}
+
+/* A peer's selection and caret in the transcript. */
+.token.peer-selected {
+  box-shadow: inset 0 -2px 0 var(--peer);
+}
+
+.peer-caret {
+  position: relative;
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-right: 1px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+}
+
+.peer-caret::after {
+  content: attr(data-name);
+  position: absolute;
+  left: -2px;
+  top: -1.4em;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: inherit;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.12s;
+  pointer-events: none;
+}
+
+.peer-caret:hover::after,
+.turn:hover .peer-caret::after {
+  opacity: 1;
+}
