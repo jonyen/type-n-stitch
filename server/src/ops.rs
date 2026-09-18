@@ -293,6 +293,9 @@ async fn validate(
                     "title duration must be between 0.5 and 30 seconds",
                 ));
             }
+            if text.trim().is_empty() {
+                return Err(AppError::bad_request_at(index, "title text is empty"));
+            }
             if text.chars().count() > 200
                 || subtitle.as_deref().is_some_and(|s| s.chars().count() > 200)
             {
@@ -313,6 +316,9 @@ async fn validate(
             check_range(*start, *end)?;
             if *end <= *start {
                 return Err(AppError::bad_request_at(index, "caption range is empty"));
+            }
+            if text.trim().is_empty() {
+                return Err(AppError::bad_request_at(index, "caption text is empty"));
             }
             if text.chars().count() > 200 {
                 return Err(AppError::bad_request_at(index, "caption text is too long"));
@@ -1000,6 +1006,11 @@ mod tests {
                     "text": "x".repeat(201), "subtitle": null, "style": "dark" }),
             json!({ "opId": "e", "kind": "addcaption", "start": 3.0, "end": 2.0,
                     "text": "x", "position": "topLeft" }),
+            // Blank text draws nothing, so it never reaches the log.
+            json!({ "opId": "h", "kind": "addtitle", "at": 1.0, "duration": 2.0,
+                    "text": "  ", "subtitle": null, "style": "dark" }),
+            json!({ "opId": "i", "kind": "addcaption", "start": 1.0, "end": 2.0,
+                    "text": " \t ", "position": "topLeft" }),
             json!({ "opId": "f", "kind": "settransition", "transition": "crossfade" }),
             json!({ "opId": "g", "kind": "setcuttransition", "start": 1.0, "transition": "crossfade" }),
         ]

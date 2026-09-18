@@ -614,12 +614,17 @@ pub async fn export(
         }
     }
     let (_, doc) = load_doc(&state, &access.project.id).await?;
-    // A caption with nothing but whitespace draws nothing; dropping it here
-    // keeps the planner from asking for an image that would be blank.
+    // A title or caption with nothing but whitespace draws nothing; dropping
+    // it here keeps the planner from asking for an image that would be blank.
+    // `validate` rejects blank text on the way in, so this only catches
+    // anything logged before that check existed.
     let edits: Vec<Edit> = doc
         .edits
         .into_iter()
-        .filter(|e| !matches!(e, Edit::Caption { text, .. } if text.trim().is_empty()))
+        .filter(|e| match e {
+            Edit::Caption { text, .. } | Edit::Title { text, .. } => !text.trim().is_empty(),
+            _ => true,
+        })
         .collect();
     let format = match req.format.as_deref() {
         None => OutputFormat::for_kind(meta.kind),

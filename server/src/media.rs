@@ -6,9 +6,9 @@ use std::process::Stdio;
 
 use anyhow::{anyhow, Context};
 use engine::{
-    diarize_args, parse_diarization, parse_progress_line, parse_silencedetect, parse_whisper_json,
-    progress_fraction, silencedetect_args, whisper_args, DiarizeOptions, MediaKind, ProgressEvent,
-    Range, SpeakerTurn, VideoInfo, Word, PROGRESS_ARGS,
+    diarize_args, oriented, parse_diarization, parse_progress_line, parse_silencedetect,
+    parse_whisper_json, progress_fraction, silencedetect_args, whisper_args, DiarizeOptions,
+    MediaKind, ProgressEvent, Range, SpeakerTurn, VideoInfo, Word, PROGRESS_ARGS,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -78,6 +78,25 @@ struct ProbeStream {
     height: Option<u32>,
     #[serde(default)]
     r_frame_rate: Option<String>,
+    /// ffprobe puts the display matrix's rotation here, when there is one.
+    #[serde(default)]
+    side_data_list: Vec<ProbeSideData>,
+}
+
+#[derive(Deserialize)]
+struct ProbeSideData {
+    #[serde(default)]
+    rotation: Option<f64>,
+}
+
+/// Degrees from the stream's display matrix, 0 when the source has none.
+fn parse_rotation(stream: &ProbeStream) -> i32 {
+    stream
+        .side_data_list
+        .iter()
+        .find_map(|d| d.rotation)
+        .map(|r| r.round() as i32)
+        .unwrap_or(0)
 }
 
 /// ffprobe reports the frame rate as a rational, e.g. `"30000/1001"`.
@@ -104,7 +123,7 @@ pub async fn probe(path: &Path) -> anyhow::Result<Probe> {
         "-v",
         "error",
         "-show_entries",
-        "format=duration:stream=codec_type,width,height,r_frame_rate:stream_disposition=attached_pic",
+        "format=duration:stream=codec_type,width,height,r_frame_rate:stream_disposition=attached_pic:stream_side_data=rotation",
         "-of",
         "json",
     ]
@@ -123,12 +142,17 @@ pub async fn probe(path: &Path) -> anyhow::Result<Probe> {
     if !has_audio {
         return Err(anyhow!("the file has no audio track to transcribe"));
     }
+    // ffprobe reports the coded size, but ffmpeg autorotates the picture as it
+    // decodes, so a quarter-turn source arrives transposed in the filtergraph.
     let video = picture.and_then(|s| {
-        Some(VideoInfo {
-            width: s.width?,
-            height: s.height?,
-            fps: parse_frame_rate(s.r_frame_rate.as_deref()),
-        })
+        Some(oriented(
+            VideoInfo {
+                width: s.width?,
+                height: s.height?,
+                fps: parse_frame_rate(s.r_frame_rate.as_deref()),
+            },
+            parse_rotation(s),
+        ))
     });
     Ok(Probe {
         duration,
