@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use crate::config::Config;
-use crate::{app, db, AppState};
+use crate::{app, bus, db, AppState};
 
 /// A state whose data dir and database live in a fresh temp dir.
 pub async fn state() -> (Arc<AppState>, TempDir) {
@@ -30,6 +30,7 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
         jobs: Mutex::new(HashMap::new()),
         db,
         folds: Mutex::new(HashMap::new()),
+        bus: Arc::new(bus::LocalBus::new()),
     });
     (state, dir)
 }
