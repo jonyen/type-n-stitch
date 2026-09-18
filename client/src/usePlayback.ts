@@ -17,6 +17,18 @@ export function titleCrossed(list: TitleEdit[], prev: number, now: number): Titl
   return best;
 }
 
+/**
+ * The next title at instant `at` that has not been shown yet, in edit order.
+ * Several titles may share an instant; they play one after another.
+ */
+export function nextTitleAt(
+  list: TitleEdit[],
+  at: number,
+  shown: readonly TitleEdit[],
+): TitleEdit | null {
+  return list.find((title) => title.at === at && !shown.includes(title)) ?? null;
+}
+
 export interface Playback {
   playing: boolean;
   currentTime: number;
@@ -56,6 +68,10 @@ export function usePlayback(
   const frame = useRef(0);
   const activeTitle = useRef<TitleEdit | null>(null);
   const titleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The cards already played at the current instant, so the rest still follow. */
+  const shownTitles = useRef<{ at: number; list: TitleEdit[] }>({ at: Number.NaN, list: [] });
+  /** `enterTitle`, so `leaveTitle` can chain into the next card at the same instant. */
+  const enterTitleRef = useRef<((title: TitleEdit) => void) | null>(null);
   /**
    * The playhead at the previous tick, so a title instant is crossed only once.
    * It starts behind zero so a title at 0 plays when playback first starts.
@@ -91,8 +107,18 @@ export function usePlayback(
       activeTitle.current = null;
       setTitling(null);
       if (!title || !media) return;
-      // Park the crossing behind us so the card does not re-trigger.
+      if (resume) {
+        // Another card at the same instant plays straight after this one.
+        const seen = shownTitles.current.at === title.at ? shownTitles.current.list : [];
+        const next = nextTitleAt(titles(editsRef.current), title.at, seen);
+        if (next) {
+          enterTitleRef.current?.(next);
+          return;
+        }
+      }
+      // Park the crossing behind us so the cards do not re-trigger.
       lastTime.current = title.at;
+      shownTitles.current = { at: Number.NaN, list: [] };
       if (resume && wantPlaying.current) void media.play();
     },
     [clearTitleTimer, mediaRef],
@@ -103,6 +129,8 @@ export function usePlayback(
       const media = mediaRef.current;
       if (!media) return;
       clearTitleTimer();
+      if (shownTitles.current.at === title.at) shownTitles.current.list.push(title);
+      else shownTitles.current = { at: title.at, list: [title] };
       activeTitle.current = title;
       setTitling(title);
       media.pause();
@@ -111,6 +139,10 @@ export function usePlayback(
     },
     [clearTitleTimer, leaveTitle, mediaRef],
   );
+
+  useEffect(() => {
+    enterTitleRef.current = enterTitle;
+  }, [enterTitle]);
 
   const leaveOverdub = useCallback(
     (resume: boolean) => {
@@ -223,6 +255,7 @@ export function usePlayback(
       titleTimer.current = null;
       activeTitle.current = null;
       setTitling(null);
+      shownTitles.current = { at: Number.NaN, list: [] };
       lastTime.current = -1;
     };
   }, [mediaRef, src, sync]);
@@ -233,6 +266,7 @@ export function usePlayback(
       overdubAudio.current?.pause();
       activeOverdub.current = null;
       activeTitle.current = null;
+      shownTitles.current = { at: Number.NaN, list: [] };
       if (titleTimer.current !== null) clearTimeout(titleTimer.current);
       titleTimer.current = null;
     };
@@ -273,6 +307,7 @@ export function usePlayback(
       const media = mediaRef.current;
       if (!media) return;
       if (activeTitle.current) leaveTitle(false);
+      shownTitles.current = { at: Number.NaN, list: [] };
       if (activeOverdub.current) {
         activeOverdub.current = null;
         setOverdubbing(null);

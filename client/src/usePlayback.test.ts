@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TitleEdit } from './types';
-import { titleCrossed } from './usePlayback';
+import { nextTitleAt, titleCrossed } from './usePlayback';
 
 const t = (at: number): TitleEdit => ({
   kind: 'title',
@@ -30,5 +30,31 @@ describe('titleCrossed', () => {
     const first = { ...t(5), text: 'first' };
     const second = { ...t(5), text: 'second' };
     expect(titleCrossed([first, second], 4, 6)).toEqual(first);
+  });
+});
+
+describe('nextTitleAt', () => {
+  it('walks the titles sharing an instant in edit order, then stops', () => {
+    const first = { ...t(5), text: 'first' };
+    const second = { ...t(5), text: 'second' };
+    const later = t(9);
+    const list = [first, second, later];
+    expect(nextTitleAt(list, 5, [])).toEqual(first);
+    expect(nextTitleAt(list, 5, [first])).toEqual(second);
+    expect(nextTitleAt(list, 5, [first, second])).toBeNull();
+  });
+
+  it('ignores titles at other instants and titles already shown', () => {
+    const only = t(5);
+    expect(nextTitleAt([t(9)], 5, [])).toBeNull();
+    expect(nextTitleAt([only], 5, [only])).toBeNull();
+    expect(nextTitleAt([], 5, [])).toBeNull();
+  });
+
+  it('still offers a surviving card when the one that was shown is undone', () => {
+    const shown = { ...t(5), text: 'undone' };
+    const survivor = { ...t(5), text: 'survivor' };
+    // `shown` was removed from the edit list while its card was up.
+    expect(nextTitleAt([survivor], 5, [shown])).toEqual(survivor);
   });
 });
