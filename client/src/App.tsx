@@ -3,8 +3,12 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import {
   exportMedia,
   exportProgress,
+  fetchProject,
+  fetchSetup,
   fetchSpeakers,
+  listProjects,
   openLibraryClip,
+  submitOps,
   suggestEdits,
   synthesizeOverdub,
   transcribeMedia,
@@ -12,17 +16,27 @@ import {
   type Suggestions,
 } from './api';
 import { Dropzone } from './components/Dropzone';
+import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
+import { Projects } from './components/Projects';
 import { Toolbar, type ExportState } from './components/Toolbar';
 import { Transcript } from './components/Transcript';
-import { editorReducer, initialEditor, selectedRange } from './editor';
+import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
+import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
+import { useSession } from './session';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
-import type { LibraryItem, Media } from './types';
+import type { LibraryItem, ProjectSummary } from './types';
 import { usePlayback } from './usePlayback';
 
 export function App() {
-  const [media, setMedia] = useState<Media | null>(null);
+  const { user, setUser, signOut } = useSession();
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const [project, setProject] = useState<ProjectSummary | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const media = project?.media ?? null;
+  const canEdit = project?.role === 'owner' || project?.role === 'editor';
+
   const [busy, setBusy] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editor, dispatch] = useReducer(editorReducer, initialEditor);
@@ -33,23 +47,88 @@ export function App() {
   const [suggestions, setSuggestions] = useState<Suggestions>({ fillers: [], pauses: [] });
 
   const [speakers, setSpeakers] = useState<(number | null)[] | null>(null);
-  const [speakerNames, setSpeakerNames] = useState<string[]>([]);
 
   const mediaRef = useRef<HTMLVideoElement>(null);
   const playback = usePlayback(mediaRef, editor.words, editor.edits, editor.duration, media?.url);
+
+  // The server's last confirmed document, for rolling back a rejected op.
+  const confirmed = useRef<DocState | null>(null);
+
+  /**
+   * Apply an editing action locally, send its operation, and settle on the
+   * server's fold. A rejected operation rolls back to the last confirmed doc.
+   */
+  const edit = useCallback(
+    (action: EditorAction) => {
+      if (!project || !canEdit) return;
+      const op = opForAction(editor, action);
+      dispatch(action);
+      if (!op) return;
+      const clientOp: ClientOp = { ...op, opId: newOpId() };
+      submitOps(project.id, [clientOp])
+        .then((doc) => {
+          confirmed.current = doc;
+          dispatch({ type: 'sync', doc });
+        })
+        .catch((err: unknown) => {
+          setLoadError(err instanceof Error ? err.message : String(err));
+          if (confirmed.current) dispatch({ type: 'sync', doc: confirmed.current });
+        });
+    },
+    [project, editor, canEdit],
+  );
+
+  // Undo and redo are server round-trips: the fold decides what they mean.
+  const undoRedo = useCallback(
+    (kind: 'undo' | 'redo') => {
+      if (!project) return;
+      const targetSeq = kind === 'undo' ? editor.undoable : editor.redoable;
+      if (targetSeq === null) return;
+      submitOps(project.id, [{ kind, targetSeq, opId: newOpId() }])
+        .then((doc) => {
+          confirmed.current = doc;
+          dispatch({ type: 'sync', doc });
+        })
+        .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
+    },
+    [project, editor.undoable, editor.redoable],
+  );
 
   const selected = selectedRange(editor.selection);
   const fillers = pending(suggestions.fillers, editor.edits);
   const pauses = pending(suggestions.pauses, editor.edits);
 
+  useEffect(() => {
+    fetchSetup()
+      .then((s) => setNeedsSetup(s.needsSetup))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setProjects([]);
+      return;
+    }
+    let cancelled = false;
+    listProjects()
+      .then((list) => {
+        if (!cancelled) setProjects(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [user, project]);
+
   // Ask the engine for suggestions; fall back to the local mirror if the
   // server is unreachable so the buttons still work.
   const { words, duration } = editor;
+  const projectId = project?.id ?? null;
   useEffect(() => {
-    if (!media || words.length === 0) return;
+    if (!projectId || words.length === 0) return;
     const opts = { ...defaultSuggestOptions, twoWordFillers };
     let cancelled = false;
-    suggestEdits(media.id, twoWordFillers)
+    suggestEdits(projectId, twoWordFillers)
       .catch(() => ({ fillers: fillerCuts(words, duration, opts), pauses: pauseCuts(words, opts) }))
       .then((s) => {
         if (!cancelled) setSuggestions(s);
@@ -57,48 +136,59 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [media, words, duration, twoWordFillers]);
+  }, [projectId, words, duration, twoWordFillers]);
 
-  // Back to the start screen. Edits live only in this state, so they are dropped.
+  // Back to the start screen. The document lives on the server, so nothing is lost.
   const goHome = useCallback(() => {
     mediaRef.current?.pause();
-    setMedia(null);
+    setProject(null);
     setLoadError(null);
+    confirmed.current = null;
     dispatch({ type: 'load', words: [], duration: 0 });
     setExportState({ status: 'idle' });
   }, []);
 
-  // Opening media pushes a history entry, so the browser's Back button (and
-  // the header's back link) return to the start screen.
+  // Opening a project pushes a history entry, so the browser's Back button
+  // (and the header's back link) return to the start screen.
   useEffect(() => {
-    if (!media) return;
-    if (history.state?.media !== media.id) history.pushState({ media: media.id }, '');
+    if (!projectId) return;
+    if (history.state?.project !== projectId) history.pushState({ project: projectId }, '');
     const onPop = () => goHome();
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
-  }, [media, goHome]);
+  }, [projectId, goHome]);
 
   const onBack = useCallback(() => {
-    if (history.state?.media) history.back();
+    if (history.state?.project) history.back();
     else goHome();
   }, [goHome]);
 
-  const load = useCallback(async (label: string, fetchMedia: () => Promise<Media>) => {
+  const load = useCallback(async (label: string, fetchSummary: () => Promise<ProjectSummary>) => {
     setLoadError(null);
     setExportState({ status: 'idle' });
     try {
       setBusy(label);
-      const loaded = await fetchMedia();
+      const summary = await fetchSummary();
       setBusy('Transcribing');
-      const words = await transcribeMedia(loaded.id);
-      dispatch({ type: 'load', words, duration: loaded.duration });
-      setMedia(loaded);
+      const [words, { doc }] = await Promise.all([
+        transcribeMedia(summary.id),
+        fetchProject(summary.id),
+      ]);
+      dispatch({ type: 'load', words, duration: summary.media.duration });
+      dispatch({ type: 'sync', doc });
+      confirmed.current = doc;
+      setProject(summary);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(null);
     }
   }, []);
+
+  const onOpenProject = useCallback(
+    (p: ProjectSummary) => load(`Opening ${p.title}`, () => Promise.resolve(p)),
+    [load],
+  );
 
   const onFile = useCallback(
     (file: File) => load(`Uploading ${file.name}`, () => uploadMedia(file)),
@@ -114,10 +204,9 @@ export function App() {
   // One speaker means nothing to split, so labels stay hidden.
   useEffect(() => {
     setSpeakers(null);
-    if (!media) return;
-    setSpeakerNames(readSpeakerNames(media.id));
+    if (!projectId) return;
     let cancelled = false;
-    fetchSpeakers(media.id)
+    fetchSpeakers(projectId)
       .then((s) => {
         if (!cancelled && s.count > 1) setSpeakers(s.words);
       })
@@ -127,19 +216,11 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [media]);
+  }, [projectId]);
 
   const onRenameSpeaker = useCallback(
-    (speaker: number, name: string) => {
-      if (!media) return;
-      setSpeakerNames((names) => {
-        const next = [...names];
-        next[speaker] = name.trim();
-        writeSpeakerNames(media.id, next);
-        return next;
-      });
-    },
-    [media],
+    (speaker: number, name: string) => edit({ type: 'renameSpeaker', speaker, name }),
+    [edit],
   );
 
   const onWordClick = useCallback(
@@ -156,13 +237,13 @@ export function App() {
   }, []);
 
   const onExport = useCallback(async () => {
-    if (!media) return;
+    if (!projectId) return;
     setExportState({ status: 'rendering', progress: 0 });
     try {
-      const { jobId } = await exportMedia(media.id, editor.edits);
+      const { jobId } = await exportMedia(projectId);
       for (;;) {
         await new Promise((r) => setTimeout(r, 300));
-        const job = await exportProgress(media.id, jobId);
+        const job = await exportProgress(projectId, jobId);
         if (job.status === 'running') {
           setExportState({ status: 'rendering', progress: job.progress });
         } else if (job.status === 'done') {
@@ -186,30 +267,30 @@ export function App() {
         message: err instanceof Error ? err.message : String(err),
       });
     }
-  }, [editor.edits, media]);
+  }, [projectId]);
 
   const onOverdubSubmit = useCallback(
     async (text: string) => {
-      if (!media) return;
-      const { audioUrl, duration } = await synthesizeOverdub(media.id, text);
-      dispatch({ type: 'overdub', text, audioUrl, audioDuration: duration });
+      if (!projectId) return;
+      const { audioUrl, duration } = await synthesizeOverdub(projectId, text);
+      edit({ type: 'overdub', text, audioUrl, audioDuration: duration });
       setOverdubOpen(false);
     },
-    [media],
+    [projectId, edit],
   );
 
-  // Keyboard: Delete cuts, ⌘Z undoes, Space plays, Esc clears, arrows move.
+  // Keyboard: Delete cuts, ⌘Z undoes, ⇧⌘Z redoes, Space plays, Esc clears, arrows move.
   useEffect(() => {
-    if (!media) return;
+    if (!projectId) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (overdubOpen || target?.closest('input, textarea, [contenteditable]')) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        dispatch({ type: 'deleteSelection' });
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        edit({ type: 'deleteSelection' });
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
-        dispatch({ type: 'undo' });
+        undoRedo(e.shiftKey ? 'redo' : 'undo');
       } else if (e.key === ' ') {
         e.preventDefault();
         playback.toggle();
@@ -227,7 +308,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [media, overdubOpen, playback, showCuts]);
+  }, [projectId, overdubOpen, playback, showCuts, edit, undoRedo]);
 
   const selectedText = selected
     ? editor.words
@@ -236,16 +317,29 @@ export function App() {
         .join(' ')
     : '';
 
+  if (user === undefined)
+    return (
+      <div className="app">
+        <p className="muted">Loading…</p>
+      </div>
+    );
+  if (!user)
+    return (
+      <div className="app">
+        <Login needsSetup={needsSetup} onSignedIn={setUser} />
+      </div>
+    );
+
   return (
     <div className="app">
       <header>
-        {media && (
+        {project && (
           <button type="button" className="ghost back" onClick={onBack} title="Back to samples">
             <span aria-hidden>←</span> Home
           </button>
         )}
         <h1>
-          {media ? (
+          {project ? (
             <a
               href="/"
               className="home-link"
@@ -267,29 +361,45 @@ export function App() {
         <span className="tagline muted">edit media by editing its words</span>
         <span className="spacer" />
         {media && <span className="header-file muted">{media.filename}</span>}
+        <span className="muted">{user.displayName}</span>
+        <button type="button" className="ghost" onClick={signOut}>
+          Sign out
+        </button>
       </header>
 
-      {!media ? (
-        <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError} />
+      {!project || !media ? (
+        <>
+          <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError} />
+          <Projects items={projects} onOpen={onOpenProject} />
+        </>
       ) : (
         <main className="editor">
           <section className="stage">
-            <Player media={media} mediaRef={mediaRef} edits={editor.edits} playback={playback} />
+            <Player
+              media={media}
+              projectId={project.id}
+              mediaRef={mediaRef}
+              edits={editor.edits}
+              playback={playback}
+            />
             <Toolbar
               hasSelection={selected !== null}
-              canUndo={editor.past.length > 0}
+              canUndo={editor.undoable !== null}
+              canRedo={editor.redoable !== null}
+              readOnly={!canEdit}
               fillerCount={fillers.length}
               pauseCount={pauses.length}
               twoWordFillers={twoWordFillers}
               showCuts={showCuts}
               exportState={exportState}
-              onDelete={() => dispatch({ type: 'deleteSelection' })}
-              onRemoveFillers={() => dispatch({ type: 'applyCuts', cuts: fillers })}
-              onTightenPauses={() => dispatch({ type: 'applyCuts', cuts: pauses })}
+              onDelete={() => edit({ type: 'deleteSelection' })}
+              onRemoveFillers={() => edit({ type: 'applyCuts', cuts: fillers })}
+              onTightenPauses={() => edit({ type: 'applyCuts', cuts: pauses })}
               onTwoWordFillers={setTwoWordFillers}
               onShowCuts={setShowCuts}
               onOverdub={() => setOverdubOpen(true)}
-              onUndo={() => dispatch({ type: 'undo' })}
+              onUndo={() => undoRedo('undo')}
+              onRedo={() => undoRedo('redo')}
               onExport={onExport}
             />
           </section>
@@ -305,7 +415,7 @@ export function App() {
               onWordDrag={onWordDrag}
               onOverdubClick={(od) => playback.seek(od.start)}
               speakers={speakers}
-              speakerNames={speakerNames}
+              speakerNames={editor.speakerNames}
               onRenameSpeaker={onRenameSpeaker}
             />
           </section>
@@ -321,22 +431,4 @@ export function App() {
       )}
     </div>
   );
-}
-
-// Speaker names are a per-browser convenience, keyed by media id.
-function readSpeakerNames(id: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(`speakers:${id}`) ?? '[]');
-    return Array.isArray(parsed) ? parsed.map((n) => (typeof n === 'string' ? n : '')) : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeSpeakerNames(id: string, names: string[]) {
-  try {
-    localStorage.setItem(`speakers:${id}`, JSON.stringify(names));
-  } catch {
-    // Storage unavailable; names last for this session only.
-  }
 }

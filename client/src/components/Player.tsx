@@ -9,24 +9,26 @@ import {
   overdubs,
   skipTarget,
 } from '../editlist';
-import type { Edit, Media } from '../types';
+import type { Edit, Media, MediaKind } from '../types';
 import type { Playback } from '../usePlayback';
 
 interface Props {
   media: Media;
+  /** Thumbnails are served per project, not per media. */
+  projectId: string;
   mediaRef: RefObject<HTMLVideoElement | null>;
   edits: Edit[];
   playback: Playback;
 }
 
-export function Player({ media, mediaRef, edits, playback }: Props) {
+export function Player({ media, projectId, mediaRef, edits, playback }: Props) {
   const { duration } = media;
   const cutCount = cutRanges(edits).length;
   const overdubCount = overdubs(edits).length;
   const removed = duration - outputDuration(duration, edits);
   const pct = (t: number) => `${(Math.min(Math.max(t, 0), duration) / duration) * 100}%`;
 
-  const thumbs = useThumbnails(media);
+  const thumbs = useThumbnails(projectId, media.kind);
   const [hover, setHover] = useState<{ ratio: number; width: number } | null>(null);
   const dragging = useRef(false);
 
@@ -155,13 +157,13 @@ export function Player({ media, mediaRef, edits, playback }: Props) {
 }
 
 /** Sprite sheet for the scrubber preview; null for audio or until it loads. */
-function useThumbnails(media: Media): Thumbnails | null {
+function useThumbnails(projectId: string, kind: MediaKind): Thumbnails | null {
   const [thumbs, setThumbs] = useState<Thumbnails | null>(null);
   useEffect(() => {
     setThumbs(null);
-    if (media.kind !== 'video') return;
+    if (kind !== 'video') return;
     let cancelled = false;
-    fetchThumbnails(media.id)
+    fetchThumbnails(projectId)
       .then((t) => {
         if (!cancelled) setThumbs(t);
       })
@@ -171,7 +173,7 @@ function useThumbnails(media: Media): Thumbnails | null {
     return () => {
       cancelled = true;
     };
-  }, [media.id, media.kind]);
+  }, [projectId, kind]);
   return thumbs;
 }
 

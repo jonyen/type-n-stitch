@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useState, type SubmitEvent } from 'react';
 
 import { login, register } from '../api';
 import type { User } from '../types';
@@ -17,7 +17,7 @@ export function Login({ needsSetup, onSignedIn }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const onSubmit = async (e: FormEvent) => {
+  const onSubmit = async (e: SubmitEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError(null);
     setBusy(true);
@@ -46,7 +46,12 @@ export function Login({ needsSetup, onSignedIn }: Props) {
       {mode === 'register' && (
         <label>
           Name
-          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} autoFocus />
+          <input
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            disabled={busy}
+            autoFocus
+          />
         </label>
       )}
       <label>
@@ -55,6 +60,7 @@ export function Login({ needsSetup, onSignedIn }: Props) {
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
+          disabled={busy}
           autoFocus={mode === 'login'}
           required
         />
@@ -65,6 +71,7 @@ export function Login({ needsSetup, onSignedIn }: Props) {
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          disabled={busy}
           minLength={8}
           required
         />
@@ -77,7 +84,11 @@ export function Login({ needsSetup, onSignedIn }: Props) {
         <button
           type="button"
           className="ghost"
-          onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
+          disabled={busy}
+          onClick={() => {
+            setError(null);
+            setMode(mode === 'login' ? 'register' : 'login');
+          }}
         >
           {mode === 'login' ? 'Need an account?' : 'Have an account? Sign in'}
         </button>

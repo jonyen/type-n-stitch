@@ -9,6 +9,9 @@ export type ExportState =
 interface Props {
   hasSelection: boolean;
   canUndo: boolean;
+  canRedo: boolean;
+  /** Viewers and commenters see the editor, but cannot change it. */
+  readOnly: boolean;
   /** Filler words and long pauses not yet cut. */
   fillerCount: number;
   pauseCount: number;
@@ -18,6 +21,7 @@ interface Props {
   onDelete: () => void;
   onOverdub: () => void;
   onUndo: () => void;
+  onRedo: () => void;
   onRemoveFillers: () => void;
   onTightenPauses: () => void;
   onTwoWordFillers: (on: boolean) => void;
@@ -38,6 +42,8 @@ function plural(n: number, noun: string): string {
 export function Toolbar({
   hasSelection,
   canUndo,
+  canRedo,
+  readOnly,
   fillerCount,
   pauseCount,
   twoWordFillers,
@@ -46,6 +52,7 @@ export function Toolbar({
   onDelete,
   onOverdub,
   onUndo,
+  onRedo,
   onRemoveFillers,
   onTightenPauses,
   onTwoWordFillers,
@@ -59,7 +66,7 @@ export function Toolbar({
         <button
           type="button"
           onClick={onDelete}
-          disabled={!hasSelection}
+          disabled={readOnly || !hasSelection}
           title="Delete / Backspace"
         >
           Delete
@@ -68,16 +75,29 @@ export function Toolbar({
           type="button"
           className="accent"
           onClick={onOverdub}
-          disabled={!hasSelection}
+          disabled={readOnly || !hasSelection}
           title="Replace the selected words with synthesized speech"
         >
           Overdub
         </button>
-        <button type="button" onClick={onUndo} disabled={!canUndo} title="⌘Z / Ctrl-Z">
+        <button type="button" onClick={onUndo} disabled={readOnly || !canUndo} title="⌘Z / Ctrl-Z">
           Undo
         </button>
+        <button
+          type="button"
+          onClick={onRedo}
+          disabled={readOnly || !canRedo}
+          title="⇧⌘Z / Ctrl-Shift-Z"
+        >
+          Redo
+        </button>
         <span className="spacer" />
-        <button type="button" className="primary" onClick={onExport} disabled={rendering}>
+        <button
+          type="button"
+          className="primary"
+          onClick={onExport}
+          disabled={readOnly || rendering}
+        >
           {rendering ? (
             <>
               <span className="spinner small" aria-hidden /> Rendering…
@@ -92,7 +112,7 @@ export function Toolbar({
         <button
           type="button"
           onClick={onRemoveFillers}
-          disabled={fillerCount === 0}
+          disabled={readOnly || fillerCount === 0}
           title="Cut every um, uh, hmm… in one step"
         >
           Remove {plural(fillerCount, 'filler')}
@@ -100,7 +120,7 @@ export function Toolbar({
         <button
           type="button"
           onClick={onTightenPauses}
-          disabled={pauseCount === 0}
+          disabled={readOnly || pauseCount === 0}
           title="Shorten every pause over 0.6 s to 0.25 s"
         >
           Tighten {plural(pauseCount, 'pause')}

@@ -964,3 +964,24 @@ input.speaker-tag {
   color: var(--danger);
   margin: 0;
 }
+
+.projects {
+  max-width: 40rem;
+  margin: 2rem auto 0;
+}
+.projects ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.projects li button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  text-align: left;
+  font: inherit;
+  padding: 0.6rem 0.8rem;
+}
