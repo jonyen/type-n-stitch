@@ -13,7 +13,18 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+/**
+ * Called when the server answers 401 outside the auth routes, i.e. the session
+ * expired mid-use. `useSession` registers a handler that drops the user so the
+ * app routes back to the login screen instead of showing "sign in first".
+ */
+let onUnauthorized: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  onUnauthorized = fn;
+}
+
+export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(url, init);
@@ -22,6 +33,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   }
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
+    // A failed sign-in is also a 401; it must not wipe an existing session.
+    if (response.status === 401 && !url.startsWith('/api/auth/')) onUnauthorized?.();
     const message =
       body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
         ? body.error

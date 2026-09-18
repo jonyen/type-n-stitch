@@ -34,7 +34,6 @@ export function App() {
   const [needsSetup, setNeedsSetup] = useState(false);
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const media = project?.media ?? null;
   const canEdit = project?.role === 'owner' || project?.role === 'editor';
 
   const [busy, setBusy] = useState<string | null>(null);
@@ -49,10 +48,23 @@ export function App() {
   const [speakers, setSpeakers] = useState<(number | null)[] | null>(null);
 
   const mediaRef = useRef<HTMLVideoElement>(null);
-  const playback = usePlayback(mediaRef, editor.words, editor.edits, editor.duration, media?.url);
+  const playback = usePlayback(
+    mediaRef,
+    editor.words,
+    editor.edits,
+    editor.duration,
+    project?.media.url,
+  );
 
   // The server's last confirmed document, for rolling back a rejected op.
   const confirmed = useRef<DocState | null>(null);
+
+  /** Accept the server's fold as the truth: remember it and show it. */
+  const settle = useCallback((doc: DocState) => {
+    confirmed.current = doc;
+    setLoadError(null);
+    dispatch({ type: 'sync', doc });
+  }, []);
 
   /**
    * Apply an editing action locally, send its operation, and settle on the
@@ -66,17 +78,13 @@ export function App() {
       if (!op) return;
       const clientOp: ClientOp = { ...op, opId: newOpId() };
       submitOps(project.id, [clientOp])
-        .then((doc) => {
-          confirmed.current = doc;
-          setLoadError(null);
-          dispatch({ type: 'sync', doc });
-        })
+        .then(settle)
         .catch((err: unknown) => {
           setLoadError(err instanceof Error ? err.message : String(err));
           if (confirmed.current) dispatch({ type: 'sync', doc: confirmed.current });
         });
     },
-    [project, editor, canEdit],
+    [project, editor, canEdit, settle],
   );
 
   // Undo and redo are server round-trips: the fold decides what they mean.
@@ -86,14 +94,10 @@ export function App() {
       const targetSeq = kind === 'undo' ? editor.undoable : editor.redoable;
       if (targetSeq === null) return;
       submitOps(project.id, [{ kind, targetSeq, opId: newOpId() }])
-        .then((doc) => {
-          confirmed.current = doc;
-          setLoadError(null);
-          dispatch({ type: 'sync', doc });
-        })
+        .then(settle)
         .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
     },
-    [project, canEdit, editor.undoable, editor.redoable],
+    [project, canEdit, editor.undoable, editor.redoable, settle],
   );
 
   const selected = selectedRange(editor.selection);
@@ -103,7 +107,7 @@ export function App() {
   useEffect(() => {
     fetchSetup()
       .then((s) => setNeedsSetup(s.needsSetup))
-      .catch(() => undefined);
+      .catch((err: unknown) => console.error(err));
   }, []);
 
   useEffect(() => {
@@ -116,7 +120,7 @@ export function App() {
       .then((list) => {
         if (!cancelled) setProjects(list);
       })
-      .catch(() => undefined);
+      .catch((err: unknown) => console.error(err));
     return () => {
       cancelled = true;
     };
@@ -371,14 +375,14 @@ export function App() {
         </h1>
         <span className="tagline muted">edit media by editing its words</span>
         <span className="spacer" />
-        {media && <span className="header-file muted">{media.filename}</span>}
+        {project && <span className="header-file muted">{project.media.filename}</span>}
         <span className="muted">{user.displayName}</span>
         <button type="button" className="ghost" onClick={signOut}>
           Sign out
         </button>
       </header>
 
-      {!project || !media ? (
+      {!project ? (
         <>
           <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError} />
           <Projects items={projects} onOpen={onOpenProject} />
@@ -401,7 +405,7 @@ export function App() {
           )}
           <section className="stage">
             <Player
-              media={media}
+              media={project.media}
               projectId={project.id}
               mediaRef={mediaRef}
               edits={editor.edits}

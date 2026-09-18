@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-import { ApiError, fetchMe, logout } from './api';
+import { ApiError, fetchMe, logout, setUnauthorizedHandler } from './api';
 import type { User } from './types';
 
 export function useSession() {
@@ -23,6 +23,14 @@ export function useSession() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // A 401 on any later request means the session went away (expired, or the
+  // database was reset): fall back to the login screen rather than leaving
+  // every panel complaining that you must sign in first.
+  useEffect(() => {
+    setUnauthorizedHandler(() => setUser(null));
+    return () => setUnauthorizedHandler(null);
   }, []);
 
   const signOut = useCallback(async () => {
