@@ -364,6 +364,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_with_unknown_email_is_401() {
+        let (state, _dir) = state().await;
+        let (status, body, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                "/api/auth/login",
+                None,
+                Some(json!({ "email": "nobody@example.com", "password": "pw-secret" })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, json!({ "error": "sign in first" }));
+    }
+
+    #[tokio::test]
     async fn logout_invalidates_the_session() {
         let (state, _dir) = state().await;
         let cookie = register(&state, "ada@example.com").await;
