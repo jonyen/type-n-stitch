@@ -3,6 +3,7 @@
 //! serves `data/` back to the client.
 
 mod config;
+mod db;
 mod error;
 mod library;
 mod media;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub config: Config,
     pub http: reqwest::Client,
     pub jobs: Mutex<HashMap<String, routes::ExportJob>>,
+    pub db: sqlx::SqlitePool,
 }
 
 #[tokio::main]
@@ -37,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env();
     tokio::fs::create_dir_all(&config.data_dir).await?;
+    let db = db::open(&config.database_url).await?;
     tracing::info!(
         data_dir = %config.data_dir.display(),
         model = %config.whisper_model.display(),
@@ -48,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         http: reqwest::Client::new(),
         config,
         jobs: Mutex::new(HashMap::new()),
+        db,
     });
 
     let app = Router::new()
