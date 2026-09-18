@@ -72,6 +72,7 @@ pub fn filler_cuts(words: &[Word], duration: f64, opts: &SuggestOptions) -> Vec<
             cuts.push(Edit::Cut {
                 start: words[i].start,
                 end: owned_end(words, i + 1, duration),
+                transition: None,
             });
             i += 2;
             continue;
@@ -80,6 +81,7 @@ pub fn filler_cuts(words: &[Word], duration: f64, opts: &SuggestOptions) -> Vec<
             cuts.push(Edit::Cut {
                 start: words[i].start,
                 end: owned_end(words, i, duration),
+                transition: None,
             });
         }
         i += 1;
@@ -97,6 +99,7 @@ pub fn pause_cuts(words: &[Word], opts: &SuggestOptions) -> Vec<Edit> {
             cuts.push(Edit::Cut {
                 start: 0.0,
                 end: first.start - opts.pause_keep,
+                transition: None,
             });
         }
     }
@@ -106,6 +109,7 @@ pub fn pause_cuts(words: &[Word], opts: &SuggestOptions) -> Vec<Edit> {
             cuts.push(Edit::Cut {
                 start: prev.end + opts.pause_keep,
                 end: next.start,
+                transition: None,
             });
         }
     }
@@ -175,6 +179,7 @@ pub fn silence_pause_cuts(silences: &[Range], duration: f64, opts: &SuggestOptio
                 cuts.push(Edit::Cut {
                     start: 0.0,
                     end: s.end - opts.pause_keep,
+                    transition: None,
                 });
             }
         } else if s.end >= duration - EDGE {
@@ -182,6 +187,7 @@ pub fn silence_pause_cuts(silences: &[Range], duration: f64, opts: &SuggestOptio
                 cuts.push(Edit::Cut {
                     start: s.start + opts.pause_keep,
                     end: duration,
+                    transition: None,
                 });
             }
         } else if len > opts.pause_threshold + EPS {
@@ -189,6 +195,7 @@ pub fn silence_pause_cuts(silences: &[Range], duration: f64, opts: &SuggestOptio
             cuts.push(Edit::Cut {
                 start: s.start + half,
                 end: s.end - half,
+                transition: None,
             });
         }
     }
@@ -209,7 +216,11 @@ mod tests {
     }
 
     fn cut(start: f64, end: f64) -> Edit {
-        Edit::Cut { start, end }
+        Edit::Cut {
+            start,
+            end,
+            transition: None,
+        }
     }
 
     fn sentence() -> Vec<Word> {
@@ -342,7 +353,7 @@ size=N/A time=00:00:05.00 bitrate=N/A speed= 900x
         let s = parse_silencedetect(SILENCEDETECT, 15.0);
         let cuts = silence_pause_cuts(&s, 15.0, &SuggestOptions::default());
         let r = |e: &Edit| match e {
-            Edit::Cut { start, end } => (
+            Edit::Cut { start, end, .. } => (
                 (start * 1000.0).round() / 1000.0,
                 (end * 1000.0).round() / 1000.0,
             ),

@@ -105,6 +105,7 @@ fn renders_cuts_and_an_overdub_to_the_expected_length() {
         Edit::Cut {
             start: 1.0,
             end: 3.0,
+            transition: None,
         },
         Edit::Overdub {
             start: 5.0,
@@ -116,6 +117,7 @@ fn renders_cuts_and_an_overdub_to_the_expected_length() {
         Edit::Cut {
             start: 10.0,
             end: 13.0,
+            transition: None,
         },
     ];
 
@@ -152,6 +154,7 @@ fn renders_audio_only_export_from_a_video_source() {
     let edits = [Edit::Cut {
         start: 0.0,
         end: 10.0,
+        transition: None,
     }];
     let output = dir.join("out.mp3");
     let none = HashMap::new();

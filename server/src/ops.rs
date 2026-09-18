@@ -244,6 +244,16 @@ async fn validate(
             }
             Ok(())
         }
+        // Title, caption and transition ops carry no server-side invariants
+        // yet (bounds/text-length checks land with the routes that expose
+        // them); nothing here can make the fold unrepresentable.
+        Op::AddTitle { .. }
+        | Op::EditTitle { .. }
+        | Op::RemoveTitle { .. }
+        | Op::AddCaption { .. }
+        | Op::RemoveCaption { .. }
+        | Op::SetTransition { .. }
+        | Op::SetCutTransition { .. } => Ok(()),
     }
 }
 

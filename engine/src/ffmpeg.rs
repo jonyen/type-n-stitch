@@ -239,6 +239,7 @@ mod tests {
         let edits = [Edit::Cut {
             start: 2.0,
             end: 4.0,
+            transition: None,
         }];
         let args = build_ffmpeg_args(
             Path::new("in.mp4"),
@@ -300,6 +301,7 @@ mod tests {
         let edits = [Edit::Cut {
             start: 0.0,
             end: 1.0,
+            transition: None,
         }];
         let args = build_ffmpeg_args(
             Path::new("in.mp3"),
@@ -335,6 +337,7 @@ mod tests {
         let edits = [Edit::Cut {
             start: 0.0,
             end: 10.0,
+            transition: None,
         }];
         let err = build_ffmpeg_args(
             Path::new("in.mp4"),

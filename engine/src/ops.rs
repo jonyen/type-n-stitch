@@ -4,7 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Edit, Range};
+use crate::editlist::EPS;
+use crate::types::{CaptionPos, Edit, Range, TitleStyle, Transition};
 
 /// Upper bound on speaker indices. Diarization never finds this many voices;
 /// the cap exists so a stored `RenameSpeaker` cannot ask the fold for an
@@ -45,6 +46,41 @@ pub enum Op {
     Redo {
         target_seq: i64,
     },
+    #[serde(rename_all = "camelCase")]
+    AddTitle {
+        at: f64,
+        duration: f64,
+        text: String,
+        subtitle: Option<String>,
+        style: TitleStyle,
+    },
+    #[serde(rename_all = "camelCase")]
+    EditTitle {
+        at: f64,
+        duration: f64,
+        text: String,
+        subtitle: Option<String>,
+        style: TitleStyle,
+    },
+    RemoveTitle {
+        at: f64,
+    },
+    AddCaption {
+        start: f64,
+        end: f64,
+        text: String,
+        position: CaptionPos,
+    },
+    RemoveCaption {
+        start: f64,
+    },
+    SetTransition {
+        transition: Transition,
+    },
+    SetCutTransition {
+        start: f64,
+        transition: Option<Transition>,
+    },
 }
 
 /// An operation as stored: its position in the log, who sent it, and
@@ -65,6 +101,8 @@ pub struct ProjectDoc {
     pub edits: Vec<Edit>,
     /// Display names by speaker index; empty strings mean "unnamed".
     pub speaker_names: Vec<String>,
+    #[serde(default)]
+    pub transition: Transition,
 }
 
 /// Replay the log in order, skipping undone operations.
@@ -94,6 +132,7 @@ fn apply(doc: &mut ProjectDoc, op: &Op) {
             doc.edits.push(Edit::Cut {
                 start: *start,
                 end: *end,
+                transition: None,
             });
         }
         Op::Overdub {
@@ -118,6 +157,7 @@ fn apply(doc: &mut ProjectDoc, op: &Op) {
         Op::ApplyCuts { cuts } => doc.edits.extend(cuts.iter().map(|r| Edit::Cut {
             start: r.start,
             end: r.end,
+            transition: None,
         })),
         Op::RenameSpeaker { speaker, name } => {
             let i = *speaker as usize;
@@ -134,12 +174,88 @@ fn apply(doc: &mut ProjectDoc, op: &Op) {
         // Undo and redo only flip `undone` flags; the server does that when
         // it appends them, so here they are no-ops.
         Op::Undo { .. } | Op::Redo { .. } => {}
+        Op::AddTitle {
+            at,
+            duration,
+            text,
+            subtitle,
+            style,
+        } => doc.edits.push(Edit::Title {
+            at: *at,
+            duration: *duration,
+            text: text.clone(),
+            subtitle: subtitle.clone(),
+            style: *style,
+        }),
+        Op::EditTitle {
+            at,
+            duration,
+            text,
+            subtitle,
+            style,
+        } => {
+            if let Some(Edit::Title {
+                duration: d,
+                text: t,
+                subtitle: s,
+                style: st,
+                ..
+            }) = doc
+                .edits
+                .iter_mut()
+                .find(|e| matches!(e, Edit::Title { at: a, .. } if (a - at).abs() < EPS))
+            {
+                *d = *duration;
+                *t = text.clone();
+                *s = subtitle.clone();
+                *st = *style;
+            }
+        }
+        Op::RemoveTitle { at } => doc
+            .edits
+            .retain(|e| !matches!(e, Edit::Title { at: a, .. } if (a - at).abs() < EPS)),
+        Op::AddCaption {
+            start,
+            end,
+            text,
+            position,
+        } => {
+            let span = Range::new(*start, *end);
+            // A new caption replaces any it overlaps, like an overdub.
+            doc.edits
+                .retain(|e| !matches!(e, Edit::Caption { .. } if overlaps(e.range(), span)));
+            doc.edits.push(Edit::Caption {
+                start: *start,
+                end: *end,
+                text: text.clone(),
+                position: *position,
+            });
+        }
+        Op::RemoveCaption { start } => doc
+            .edits
+            .retain(|e| !matches!(e, Edit::Caption { start: s, .. } if (s - start).abs() < EPS)),
+        Op::SetTransition { transition } => doc.transition = *transition,
+        Op::SetCutTransition { start, transition } => {
+            for e in &mut doc.edits {
+                if let Edit::Cut {
+                    start: s,
+                    transition: t,
+                    ..
+                } = e
+                {
+                    if (*s - start).abs() < EPS {
+                        *t = *transition;
+                    }
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{CaptionPos, TitleStyle, Transition};
 
     fn op(seq: i64, op: Op) -> SeqOp {
         SeqOp {
@@ -184,11 +300,13 @@ mod tests {
             vec![
                 Edit::Cut {
                     start: 1.0,
-                    end: 2.0
+                    end: 2.0,
+                    transition: None
                 },
                 Edit::Cut {
                     start: 5.0,
-                    end: 6.0
+                    end: 6.0,
+                    transition: None
                 }
             ]
         );
@@ -201,7 +319,8 @@ mod tests {
             doc.edits,
             vec![Edit::Cut {
                 start: 5.0,
-                end: 6.0
+                end: 6.0,
+                transition: None
             }]
         );
     }
@@ -218,7 +337,8 @@ mod tests {
             doc.edits,
             vec![Edit::Cut {
                 start: 1.0,
-                end: 2.0
+                end: 2.0,
+                transition: None
             }]
         );
     }
@@ -230,7 +350,8 @@ mod tests {
             doc.edits,
             vec![Edit::Cut {
                 start: 1.0,
-                end: 4.0
+                end: 4.0,
+                transition: None
             }]
         );
     }
@@ -345,5 +466,205 @@ mod tests {
         let cuts: Op =
             serde_json::from_str(r#"{"kind":"applycuts","cuts":[{"start":1,"end":2}]}"#).unwrap();
         assert!(matches!(cuts, Op::ApplyCuts { .. }));
+    }
+
+    fn title(at: f64) -> Op {
+        Op::AddTitle {
+            at,
+            duration: 3.0,
+            text: "Chapter".into(),
+            subtitle: None,
+            style: TitleStyle::Dark,
+        }
+    }
+
+    #[test]
+    fn add_edit_remove_title() {
+        let doc = fold(&[op(1, title(5.0))]);
+        assert!(
+            matches!(doc.edits[0], Edit::Title { at, duration, .. } if at == 5.0 && duration == 3.0)
+        );
+
+        let doc = fold(&[
+            op(1, title(5.0)),
+            op(
+                2,
+                Op::EditTitle {
+                    at: 5.0,
+                    duration: 2.0,
+                    text: "Part two".into(),
+                    subtitle: Some("sub".into()),
+                    style: TitleStyle::Accent,
+                },
+            ),
+        ]);
+        assert_eq!(doc.edits.len(), 1);
+        assert!(
+            matches!(&doc.edits[0], Edit::Title { duration, text, subtitle: Some(s), style: TitleStyle::Accent, .. }
+            if *duration == 2.0 && text == "Part two" && s == "sub")
+        );
+
+        let doc = fold(&[
+            op(1, title(5.0)),
+            op(2, title(5.0)),
+            op(3, Op::RemoveTitle { at: 5.0 }),
+        ]);
+        assert!(
+            doc.edits.is_empty(),
+            "remove drops every title at that instant"
+        );
+        let doc = fold(&[
+            op(1, title(5.0)),
+            op(
+                2,
+                Op::EditTitle {
+                    at: 9.0,
+                    duration: 1.0,
+                    text: "x".into(),
+                    subtitle: None,
+                    style: TitleStyle::Dark,
+                },
+            ),
+        ]);
+        assert_eq!(doc.edits.len(), 1, "editing a missing title is a no-op");
+    }
+
+    #[test]
+    fn captions_replace_overlapping_ones_and_remove_by_start() {
+        let cap = |start: f64, end: f64| Op::AddCaption {
+            start,
+            end,
+            text: "name".into(),
+            position: CaptionPos::BottomLeft,
+        };
+        let doc = fold(&[op(1, cap(1.0, 3.0)), op(2, cap(2.0, 4.0))]);
+        assert_eq!(doc.edits.len(), 1);
+        assert!(matches!(doc.edits[0], Edit::Caption { start, .. } if start == 2.0));
+        let doc = fold(&[
+            op(1, cap(1.0, 3.0)),
+            op(2, cap(5.0, 6.0)),
+            op(3, Op::RemoveCaption { start: 1.0 }),
+        ]);
+        assert_eq!(doc.edits.len(), 1);
+        assert!(matches!(doc.edits[0], Edit::Caption { start, .. } if start == 5.0));
+    }
+
+    #[test]
+    fn cuts_keep_titles_and_captions_inside_them() {
+        let cap = Op::AddCaption {
+            start: 2.0,
+            end: 3.0,
+            text: "n".into(),
+            position: CaptionPos::TopLeft,
+        };
+        let doc = fold(&[op(1, title(2.5)), op(2, cap), op(3, cut(1.0, 4.0))]);
+        assert_eq!(doc.edits.len(), 3);
+    }
+
+    #[test]
+    fn transitions_project_wide_and_per_cut() {
+        let doc = fold(&[
+            op(1, cut(1.0, 2.0)),
+            op(
+                2,
+                Op::SetTransition {
+                    transition: Transition::Dip,
+                },
+            ),
+        ]);
+        assert_eq!(doc.transition, Transition::Dip);
+        assert!(matches!(
+            doc.edits[0],
+            Edit::Cut {
+                transition: None,
+                ..
+            }
+        ));
+        let doc = fold(&[
+            op(1, cut(1.0, 2.0)),
+            op(
+                2,
+                Op::SetCutTransition {
+                    start: 1.0,
+                    transition: Some(Transition::None),
+                },
+            ),
+        ]);
+        assert!(matches!(
+            doc.edits[0],
+            Edit::Cut {
+                transition: Some(Transition::None),
+                ..
+            }
+        ));
+        let doc = fold(&[op(
+            1,
+            Op::SetCutTransition {
+                start: 9.0,
+                transition: Some(Transition::Dip),
+            },
+        )]);
+        assert!(doc.edits.is_empty(), "no cut at that start: no-op");
+    }
+
+    #[test]
+    fn new_ops_and_edits_serialise_with_expected_tags() {
+        let json = serde_json::to_value(Op::RemoveTitle { at: 2.0 }).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "removetitle", "at": 2.0 })
+        );
+        let json = serde_json::to_value(Op::SetCutTransition {
+            start: 1.0,
+            transition: Some(Transition::Dip),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "setcuttransition", "start": 1.0, "transition": "dip" })
+        );
+        let json = serde_json::to_value(Edit::Cut {
+            start: 1.0,
+            end: 2.0,
+            transition: None,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "kind": "cut", "start": 1.0, "end": 2.0 }),
+            "None is omitted"
+        );
+        let old: Edit = serde_json::from_str(r#"{"kind":"cut","start":1,"end":2}"#).unwrap();
+        assert!(matches!(
+            old,
+            Edit::Cut {
+                transition: None,
+                ..
+            }
+        ));
+        let t: Edit = serde_json::from_str(
+            r#"{"kind":"title","at":1,"duration":2,"text":"T","subtitle":null,"style":"light"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            t,
+            Edit::Title {
+                style: TitleStyle::Light,
+                ..
+            }
+        ));
+        let c: Edit = serde_json::from_str(
+            r#"{"kind":"caption","start":1,"end":2,"text":"T","position":"bottomCenter"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            c,
+            Edit::Caption {
+                position: CaptionPos::BottomCenter,
+                ..
+            }
+        ));
+        let doc: ProjectDoc = serde_json::from_str(r#"{"edits":[],"speakerNames":[]}"#).unwrap();
+        assert_eq!(doc.transition, Transition::None);
     }
 }

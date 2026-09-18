@@ -4,7 +4,7 @@
 use crate::types::{Edit, Range};
 
 /// Two ranges closer than this are treated as touching.
-const EPS: f64 = 1e-6;
+pub const EPS: f64 = 1e-6;
 
 /// One piece of the rendered output, in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +44,7 @@ fn cut_ranges(edits: &[Edit]) -> Vec<Range> {
         .iter()
         .filter_map(|e| match e {
             Edit::Cut { .. } => Some(e.range()),
-            Edit::Overdub { .. } => None,
+            _ => None,
         })
         .collect()
 }
@@ -82,7 +82,7 @@ pub fn timeline(duration: f64, edits: &[Edit]) -> Vec<Segment> {
         .enumerate()
         .filter_map(|(i, e)| match e {
             Edit::Overdub { audio_duration, .. } => Some((i, e.range(), *audio_duration)),
-            Edit::Cut { .. } => None,
+            _ => None,
         })
         .filter(|(_, r, _)| !r.is_empty())
         .collect();
@@ -125,7 +125,7 @@ pub fn timeline(duration: f64, edits: &[Edit]) -> Vec<Segment> {
                 SegmentKind::Source => source.len(),
                 SegmentKind::Overdub { index } => match &edits[index] {
                     Edit::Overdub { audio_duration, .. } => *audio_duration,
-                    Edit::Cut { .. } => unreachable!("overdub index points at a cut"),
+                    _ => unreachable!("overdub index points at a cut"),
                 },
             };
             let output = Range::new(out_cursor, out_cursor + out_len);
@@ -180,7 +180,11 @@ mod tests {
     use super::*;
 
     fn cut(start: f64, end: f64) -> Edit {
-        Edit::Cut { start, end }
+        Edit::Cut {
+            start,
+            end,
+            transition: None,
+        }
     }
 
     fn overdub(start: f64, end: f64, audio_duration: f64) -> Edit {
