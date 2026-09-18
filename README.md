@@ -98,7 +98,9 @@ starting the server. `ADMIN_PASSWORD` is only used when the admin account is fir
 changing it later has no effect (there is no password-reset flow yet; edit the `users` row if
 you must). The database lives at `$DATA_DIR/type-n-stitch.db`; override with `DATABASE_URL`.
 Registration is open to anyone who can reach the server — put it behind your own network or
-proxy. The client mirrors the engine's edit rules for the live preview, but the server's fold
+proxy. The live socket refuses a handshake whose `Origin` does not match the request's `Host`
+(an absent `Origin`, as non-browser clients send, is allowed), so a reverse proxy in front of
+it must preserve `Host`. The client mirrors the engine's edit rules for the live preview, but the server's fold
 of the operation log is what export renders.
 
 **Overdub** needs a local OpenAI-compatible speech endpoint. I use VoiceStudio with a cloned

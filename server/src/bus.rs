@@ -193,14 +193,15 @@ impl Bus for LocalBus {
             user,
             state: PresenceState::default(),
         };
+        // Take the receiver before announcing, so nothing published between
+        // the two is lost. The echo of our own join is the price: subscribers
+        // filter presence by `connId`, and the hello's `peers` already has us.
+        let rx = hub.tx.subscribe();
         hub.peers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(conn_id.to_owned(), peer.clone());
-        // Announce before subscribing our own rx, so a joiner never sees its
-        // own Presence frame echoed back — only peers already subscribed do.
         let _ = hub.tx.send(ServerMsg::Presence(peer));
-        let rx = hub.tx.subscribe();
         Subscription {
             rx,
             hub,
@@ -265,8 +266,11 @@ mod tests {
         let mut a = bus.subscribe("p1", "c1", who("a"));
         let mut b = bus.subscribe("p1", "c2", who("b"));
         let mut other = bus.subscribe("p2", "c3", who("c"));
-        // Each subscriber first sees the Presence frames sent after it joined.
+        // A subscriber sees its own join first, then every later one.
+        let _ = a.rx.try_recv(); // a joined
         let _ = a.rx.try_recv(); // b joined
+        let _ = b.rx.try_recv(); // b joined
+        let _ = other.rx.try_recv(); // c joined
         bus.publish("p1", doc(7));
         assert_eq!(a.rx.recv().await.unwrap(), doc(7));
         assert_eq!(b.rx.recv().await.unwrap(), doc(7));
@@ -278,6 +282,11 @@ mod tests {
         let bus = LocalBus::new();
         let mut a = bus.subscribe("p1", "c1", who("a"));
         let b = bus.subscribe("p1", "c2", who("b"));
+        // Our own join echoes back first, then the one that followed it.
+        match a.rx.try_recv().unwrap() {
+            ServerMsg::Presence(p) => assert_eq!(p.conn_id, "c1"),
+            other => panic!("expected presence, got {other:?}"),
+        }
         match a.rx.try_recv().unwrap() {
             ServerMsg::Presence(p) => assert_eq!(p.conn_id, "c2"),
             other => panic!("expected presence, got {other:?}"),

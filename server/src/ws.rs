@@ -3,10 +3,12 @@
 //! is what keeps one write path. Authorization is the HTTP upgrade itself.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::header::{HOST, ORIGIN};
+use axum::http::{HeaderMap, Uri};
 use axum::response::Response;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
@@ -15,14 +17,17 @@ use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
 use crate::bus::{PeerInfo, PresenceState, ServerMsg};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::ops::load_doc;
 use crate::projects::ProjectAccess;
 use crate::AppState;
 
 const PING_EVERY: Duration = Duration::from_secs(30);
-/// Close after this many pings go unanswered.
+/// Close once this many pings in a row have gone unanswered.
 const MISSED_PINGS: u32 = 2;
+/// Presence is a courtesy signal: at most one frame per peer per this long
+/// reaches the hub, so a misbehaving client cannot flood everyone else.
+const PRESENCE_MIN_GAP: Duration = Duration::from_millis(50);
 /// Give up on a single frame after this long. A peer that stops reading its
 /// TCP socket would otherwise park the session task inside `sink.send`
 /// forever: no `select!` arm runs while one arm's body is awaiting, so the
@@ -41,13 +46,45 @@ pub enum ClientMsg {
     Ping,
 }
 
+/// The `host:port` an `Origin` header points at, with any scheme, path or
+/// userinfo dropped. `None` means it is not a URI we can compare.
+fn origin_authority(origin: &str) -> Option<String> {
+    let uri: Uri = origin.parse().ok()?;
+    let authority = uri.authority()?;
+    Some(match authority.port_u16() {
+        Some(port) => format!("{}:{port}", authority.host()),
+        None => authority.host().to_ascii_lowercase(),
+    })
+}
+
+/// A browser sends `Origin` on a WebSocket handshake but, unlike `fetch`, the
+/// handshake is not subject to CORS — so a page on another site could open a
+/// socket with the user's cookies. An `Origin` that does not match `Host` is
+/// refused; an absent one (non-browser clients) is allowed.
+fn same_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(ORIGIN) else {
+        return true;
+    };
+    let Some(origin) = origin.to_str().ok().and_then(origin_authority) else {
+        return false;
+    };
+    let Some(host) = headers.get(HOST).and_then(|h| h.to_str().ok()) else {
+        return false;
+    };
+    origin == host.to_ascii_lowercase()
+}
+
 /// `GET /api/projects/:id/ws`. The extractor has already answered 401/404/403;
 /// what reaches the socket is a member.
 pub async fn handler(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    if !same_origin(&headers) {
+        return Err(AppError::forbidden("cross-origin websocket"));
+    }
     Ok(upgrade.on_upgrade(move |socket| session(state, access, socket)))
 }
 
@@ -75,8 +112,8 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
     let (mut sink, mut stream) = socket.split();
 
     // Subscribe before reading the doc so nothing published in between is
-    // missed. `subscribe` announces our join before creating our receiver, so
-    // the queue holds only frames from others.
+    // missed. Our own join echoes back down the queue; the client drops it by
+    // `connId`, and the hello's `peers` already includes us.
     let mut sub = state.bus.subscribe(&project_id, &conn_id, me);
     let hello = match load_doc(&state, &project_id).await {
         Ok((head_seq, doc)) => {
@@ -111,6 +148,8 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await; // the first tick fires immediately; skip it
     let mut unanswered = 0u32;
+    // Far enough in the past that the first presence frame is always accepted.
+    let mut last_presence = Instant::now() - PRESENCE_MIN_GAP;
 
     loop {
         tokio::select! {
@@ -119,8 +158,13 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                     Some(Ok(Message::Text(body))) => {
                         match serde_json::from_str::<ClientMsg>(&body) {
                             Ok(ClientMsg::Presence(p)) => {
-                                if let Some(peer) = state.bus.update_presence(&project_id, &conn_id, p) {
-                                    state.bus.publish(&project_id, ServerMsg::Presence(peer));
+                                // The client coalesces presence already; this
+                                // bounds what one socket can cost the others.
+                                if last_presence.elapsed() >= PRESENCE_MIN_GAP {
+                                    if let Some(peer) = state.bus.update_presence(&project_id, &conn_id, p) {
+                                        last_presence = Instant::now();
+                                        state.bus.publish(&project_id, ServerMsg::Presence(peer));
+                                    }
                                 }
                             }
                             Ok(ClientMsg::Ping) => {
@@ -160,7 +204,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
             }
             _ = ping.tick() => {
                 unanswered += 1;
-                if unanswered > MISSED_PINGS { break; }
+                if unanswered >= MISSED_PINGS { break; }
                 if !send(&mut sink, Message::Ping(Vec::new().into())).await { break; }
             }
         }
@@ -190,12 +234,26 @@ mod tests {
     type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
     async fn connect(base: &str, project: &str, cookie: &str) -> Result<Socket, u16> {
+        connect_from(base, project, cookie, None).await
+    }
+
+    /// `origin` rides along as the `Origin` header when given, the way a
+    /// browser sends it; `None` is a plain non-browser client.
+    async fn connect_from(
+        base: &str,
+        project: &str,
+        cookie: &str,
+        origin: Option<&str>,
+    ) -> Result<Socket, u16> {
         let url = format!(
             "{}/api/projects/{project}/ws",
             base.replacen("http", "ws", 1)
         );
         let mut req = url.into_client_request().unwrap();
         req.headers_mut().insert(COOKIE, cookie.parse().unwrap());
+        if let Some(origin) = origin {
+            req.headers_mut().insert(ORIGIN, origin.parse().unwrap());
+        }
         match connect_async(req).await {
             Ok((socket, _)) => Ok(socket),
             Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => Err(resp.status().as_u16()),
@@ -276,11 +334,16 @@ mod tests {
         assert_eq!(hello["headSeq"], 0);
         assert_eq!(hello["you"]["user"]["displayName"], "ada@example.com");
         assert_eq!(hello["peers"].as_array().unwrap().len(), 1); // just ada
+                                                                 // Our own join echoes back down the socket; the client filters it.
+        let own = next_json(&mut a).await;
+        assert_eq!(own["t"], "presence");
+        assert_eq!(own["connId"], hello["you"]["connId"]);
 
         let mut b = connect(&base, &project, &bob).await.unwrap();
         let hello_b = next_json(&mut b).await;
         assert_eq!(hello_b["peers"].as_array().unwrap().len(), 2);
-        // Ada learns bob joined.
+        assert_eq!(next_json(&mut b).await["t"], "presence"); // bob's own echo
+                                                              // Ada learns bob joined.
         let joined = next_json(&mut a).await;
         assert_eq!(joined["t"], "presence");
         assert_eq!(joined["user"]["displayName"], "bob@example.com");
@@ -309,8 +372,10 @@ mod tests {
         let (state, _d, base, ada, bob, project) = setup(Some("editor")).await;
         let mut a = connect(&base, &project, &ada).await.unwrap();
         next_json(&mut a).await; // hello
+        next_json(&mut a).await; // ada's own presence echo
         let mut b = connect(&base, &project, &bob).await.unwrap();
         next_json(&mut b).await; // hello
+        next_json(&mut b).await; // bob's own presence echo
         next_json(&mut a).await; // bob's presence
 
         let (status, body, _) = call(
@@ -341,7 +406,8 @@ mod tests {
     async fn ping_is_answered_and_a_lagged_client_gets_a_resync() {
         let (state, _d, base, ada, _bob, project) = setup(None).await;
         let mut a = connect(&base, &project, &ada).await.unwrap();
-        next_json(&mut a).await;
+        next_json(&mut a).await; // hello
+        next_json(&mut a).await; // our own presence echo
         a.send(Message::Text(json!({ "t": "ping" }).to_string().into()))
             .await
             .unwrap();
@@ -406,5 +472,71 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("the wedged peer still holds its session");
+    }
+
+    /// A browser sends `Origin` on the handshake and CORS does not apply to
+    /// it, so the server does the check itself.
+    #[tokio::test]
+    async fn a_cross_origin_handshake_is_refused_and_a_matching_one_is_not() {
+        let (_s, _d, base, ada, _bob, project) = setup(None).await;
+        assert_eq!(
+            connect_from(&base, &project, &ada, Some("http://evil.test"))
+                .await
+                .err(),
+            Some(403)
+        );
+        assert!(connect_from(&base, &project, &ada, Some(&base))
+            .await
+            .is_ok());
+        // No Origin at all (a non-browser client) is still allowed.
+        assert!(connect(&base, &project, &ada).await.is_ok());
+    }
+
+    /// One socket cannot make the server fan out a frame per keystroke: the
+    /// session drops presence that arrives inside the minimum gap.
+    #[tokio::test]
+    async fn presence_is_rate_limited_per_socket() {
+        let (_s, _d, base, ada, bob, project) = setup(Some("viewer")).await;
+        let mut a = connect(&base, &project, &ada).await.unwrap();
+        next_json(&mut a).await; // hello
+        next_json(&mut a).await; // own echo
+        let mut b = connect(&base, &project, &bob).await.unwrap();
+        next_json(&mut b).await; // hello
+        next_json(&mut b).await; // own echo
+        assert_eq!(next_json(&mut a).await["t"], "presence"); // bob joined
+
+        for i in 0..50 {
+            b.send(Message::Text(
+                json!({ "t": "presence", "playhead": i as f64, "selection": null, "caret": null, "playing": false })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        }
+        // Bob's pong means the server has read all 50 frames; ada's own pong
+        // is then the barrier for what reached her.
+        b.send(Message::Text(json!({ "t": "ping" }).to_string().into()))
+            .await
+            .unwrap();
+        loop {
+            if next_json(&mut b).await["t"] == "pong" {
+                break;
+            }
+        }
+        a.send(Message::Text(json!({ "t": "ping" }).to_string().into()))
+            .await
+            .unwrap();
+        let mut seen = 0;
+        loop {
+            let msg = next_json(&mut a).await;
+            if msg["t"] == "pong" {
+                break;
+            }
+            if msg["t"] == "presence" {
+                seen += 1;
+            }
+        }
+        assert!(seen < 50, "fanned out {seen} presence frames of 50");
     }
 }
