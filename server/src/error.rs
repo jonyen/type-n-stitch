@@ -39,6 +39,16 @@ impl AppError {
         }
     }
 
+    /// The server got itself into an inconsistent state; the client cannot
+    /// fix it by sending something else.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+            index: None,
+        }
+    }
+
     pub fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,

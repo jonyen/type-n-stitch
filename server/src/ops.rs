@@ -169,6 +169,15 @@ async fn validate(
     counts: &mut Counts,
 ) -> AppResult<()> {
     let dir = state.config.data_dir.join(&project.media_id);
+    let check_transition = |transition: Transition| -> AppResult<()> {
+        if transition == Transition::Crossfade {
+            return Err(AppError::bad_request_at(
+                index,
+                "crossfade is not supported yet",
+            ));
+        }
+        Ok(())
+    };
     let check_range = |start: f64, end: f64| -> AppResult<()> {
         if !(0.0..=duration).contains(&start) || !(0.0..=duration).contains(&end) || end < start {
             return Err(AppError::bad_request_at(
@@ -315,18 +324,13 @@ async fn validate(
             Ok(())
         }
         Op::RemoveCaption { start } => check_range(*start, *start),
-        Op::SetTransition { transition }
-        | Op::SetCutTransition {
+        Op::SetTransition { transition } => check_transition(*transition),
+        Op::SetCutTransition {
+            start,
             transition: Some(transition),
-            ..
         } => {
-            if *transition == Transition::Crossfade {
-                return Err(AppError::bad_request_at(
-                    index,
-                    "crossfade is not supported yet",
-                ));
-            }
-            Ok(())
+            check_range(*start, *start)?;
+            check_transition(*transition)
         }
         Op::SetCutTransition {
             start,
@@ -353,10 +357,12 @@ pub async fn apply_ops(
 ) -> AppResult<DocState> {
     let dir = state.config.data_dir.join(&project.media_id);
     let duration = read_meta(&dir).await?.duration;
+    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // Title and caption caps count what the project already holds plus what
     // this batch adds, so a single batch cannot slip past them either. The
-    // fold is cached, so this read is cheap.
-    let (_, current) = load_doc(state, &project.id).await?;
+    // log is read *inside* the write transaction: counting before it would
+    // let two concurrent batches both see room for one more title.
+    let current = fold(&read_log(&mut *tx, &project.id).await?);
     let mut counts = Counts {
         titles: current
             .edits
@@ -369,7 +375,6 @@ pub async fn apply_ops(
             .filter(|e| matches!(e, Edit::Caption { .. }))
             .count(),
     };
-    let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // A batch of nothing but replayed op ids appends nothing; there is then
     // no new fold to announce.
     let mut appended = false;
@@ -454,6 +459,7 @@ pub async fn apply_ops(
                 head_seq,
                 edits: doc.edits,
                 speaker_names: doc.speaker_names,
+                transition: doc.transition,
             },
         );
     }
@@ -1026,6 +1032,54 @@ mod tests {
             post_ops(&state, &ada, &project, vec![title_op("t32", 1.0, 1.0)]).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["index"], 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_batches_cannot_both_pass_the_title_cap() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let ops: Vec<Value> = (0..MAX_TITLES - 1)
+            .map(|i| title_op(&format!("t{i}"), 1.0, 1.0))
+            .collect();
+        let (status, body) = post_ops(&state, &ada, &project, ops).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // One slot left: two batches racing for it must not both take it,
+        // which they could if the count were read before `BEGIN IMMEDIATE`.
+        let mut handles = Vec::new();
+        for i in 0..2 {
+            let state = state.clone();
+            let ada = ada.clone();
+            let project = project.clone();
+            handles.push(tokio::spawn(async move {
+                post_ops(
+                    &state,
+                    &ada,
+                    &project,
+                    vec![title_op(&format!("last{i}"), 1.0, 1.0)],
+                )
+                .await
+            }));
+        }
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(handle.await.unwrap().0);
+        }
+        statuses.sort_by_key(|s| s.as_u16());
+        assert_eq!(
+            statuses,
+            vec![StatusCode::OK, StatusCode::BAD_REQUEST],
+            "exactly one of the racing batches may take the last slot"
+        );
+        let (_, body, _) = call(
+            app(&state),
+            json_req(
+                Method::GET,
+                &format!("/api/projects/{project}"),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(body["doc"]["edits"].as_array().unwrap().len(), MAX_TITLES);
     }
 
     #[tokio::test]

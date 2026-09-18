@@ -13,9 +13,9 @@ use axum::extract::{Multipart, Path as UrlPath, State};
 use axum::Json;
 use engine::{
     assign_speakers, build_ffmpeg_args, filler_cuts, output_duration, pause_cuts,
-    silence_pause_cuts, text, thumbnail_args, thumbnail_sheet, timeline, Edit, ExportOptions,
-    MediaKind, OutputFormat, Range, SpeakerTurn, SuggestOptions, ThumbnailSheet, VideoInfo, Word,
-    DEFAULT_VIDEO,
+    silence_pause_cuts, text, thumbnail_args, thumbnail_sheet, timeline, Edit, ExportError,
+    ExportOptions, MediaKind, OutputFormat, Range, SpeakerTurn, SuggestOptions, ThumbnailSheet,
+    VideoInfo, Word, DEFAULT_VIDEO,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -507,6 +507,27 @@ fn image_hash(parts: &[&str], video: VideoInfo) -> String {
     format!("{:08x}", hasher.finish() as u32)
 }
 
+/// `write_atomic` for a file the handler rewrites off the async path.
+async fn write_json_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let partial = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    tokio::fs::write(&partial, bytes)
+        .await
+        .with_context(|| format!("writing {}", partial.display()))?;
+    tokio::fs::rename(&partial, path)
+        .await
+        .with_context(|| format!("renaming to {}", path.display()))?;
+    Ok(())
+}
+
+/// Write `bytes` to a temporary neighbour and rename it into place, so a
+/// concurrent export never hands ffmpeg a half-written image.
+fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let partial = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    std::fs::write(&partial, bytes).with_context(|| format!("writing {}", partial.display()))?;
+    std::fs::rename(&partial, path).with_context(|| format!("renaming to {}", path.display()))?;
+    Ok(())
+}
+
 /// Rendered title PNGs by edit index, and caption PNGs with their placement.
 type TextImages = (HashMap<usize, PathBuf>, HashMap<usize, (PathBuf, u32, u32)>);
 
@@ -531,8 +552,7 @@ fn render_text_images(dir: &Path, edits: &[Edit], video: VideoInfo) -> anyhow::R
                 let path = dir.join(format!("title-{index}-{hash}.png"));
                 if !path.is_file() {
                     let png = text::render_title(text, subtitle.as_deref(), *style, video).to_png();
-                    std::fs::write(&path, png)
-                        .with_context(|| format!("writing {}", path.display()))?;
+                    write_atomic(&path, &png)?;
                 }
                 titles.insert(index, path);
             }
@@ -544,8 +564,7 @@ fn render_text_images(dir: &Path, edits: &[Edit], video: VideoInfo) -> anyhow::R
                 // placement, which only the raster knows.
                 let drawn = text::render_caption(text, *position, video);
                 if !path.is_file() {
-                    std::fs::write(&path, drawn.raster.to_png())
-                        .with_context(|| format!("writing {}", path.display()))?;
+                    write_atomic(&path, &drawn.raster.to_png())?;
                 }
                 captions.insert(index, (path, drawn.x, drawn.y));
             }
@@ -577,11 +596,21 @@ pub async fn export(
     let mut meta = read_meta(&dir).await?;
     if meta.kind == MediaKind::Video && meta.video.is_none() {
         // Media probed before dimensions were recorded: probe once more and
-        // remember, so later exports skip the extra ffprobe.
-        if let Ok(probe) = media::probe(&dir.join(format!("source.{}", meta.ext))).await {
-            meta.video = probe.video;
-            let _ =
-                tokio::fs::write(dir.join("meta.json"), serde_json::to_vec_pretty(&meta)?).await;
+        // remember, so later exports skip the extra ffprobe. A failure is not
+        // fatal — the render falls back to `DEFAULT_VIDEO` — but it is worth
+        // saying out loud.
+        match media::probe(&dir.join(format!("source.{}", meta.ext))).await {
+            Ok(probe) => {
+                meta.video = probe.video;
+                let json = serde_json::to_vec_pretty(&meta)?;
+                if let Err(e) = write_json_atomic(&dir.join("meta.json"), &json).await {
+                    tracing::warn!(id, "could not record the frame size: {e:#}");
+                }
+            }
+            Err(e) => tracing::warn!(
+                id,
+                "could not re-probe the frame size, rendering at the default: {e:#}"
+            ),
         }
     }
     let (_, doc) = load_doc(&state, &access.project.id).await?;
@@ -603,13 +632,17 @@ pub async fn export(
     let (output, name) = next_numbered(&dir, "export", format.extension()).await?;
     let source = dir.join(format!("source.{}", meta.ext));
 
+    // An audio-only render draws no picture, so it needs no images at all.
+    let render_video = meta.kind == MediaKind::Video && format == OutputFormat::Mp4;
     let video = meta.video.unwrap_or(DEFAULT_VIDEO);
-    let (title_images, caption_images) = {
+    let (title_images, caption_images) = if render_video {
         let dir = dir.clone();
         let edits = edits.clone();
         tokio::task::spawn_blocking(move || render_text_images(&dir, &edits, video))
             .await
-            .context("rendering title images")??
+            .context("rendering title and caption images")??
+    } else {
+        (HashMap::new(), HashMap::new())
     };
 
     let args = build_ffmpeg_args(
@@ -627,7 +660,14 @@ pub async fn export(
             transition: doc.transition,
         },
     )
-    .map_err(|e| AppError::bad_request(e.to_string()))?;
+    .map_err(|e| match e {
+        // The planner and the renderer disagreed about the edit indices:
+        // nothing the client sent can fix that.
+        ExportError::MissingTitleImage(_) | ExportError::MissingCaptionImage(_) => {
+            AppError::internal(e.to_string())
+        }
+        other => AppError::bad_request(other.to_string()),
+    })?;
     let planned = output_duration(&timeline(meta.duration, &edits));
 
     let job_id = Uuid::new_v4().to_string();

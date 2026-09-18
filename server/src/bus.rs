@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use engine::Edit;
+use engine::{Edit, Transition};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -58,6 +58,7 @@ pub enum ServerMsg {
         head_seq: i64,
         edits: Vec<Edit>,
         speaker_names: Vec<String>,
+        transition: Transition,
         peers: Vec<Peer>,
         you: Peer,
     },
@@ -69,6 +70,7 @@ pub enum ServerMsg {
         head_seq: i64,
         edits: Vec<Edit>,
         speaker_names: Vec<String>,
+        transition: Transition,
     },
     Presence(Peer),
     #[serde(rename_all = "camelCase")]
@@ -80,6 +82,7 @@ pub enum ServerMsg {
         head_seq: i64,
         edits: Vec<Edit>,
         speaker_names: Vec<String>,
+        transition: Transition,
     },
     Error {
         code: String,
@@ -257,6 +260,7 @@ mod tests {
             head_seq: seq,
             edits: vec![],
             speaker_names: vec![],
+            transition: Transition::None,
         }
     }
 
@@ -346,5 +350,25 @@ mod tests {
         assert_eq!(json["t"], "presence");
         assert_eq!(json["user"]["displayName"], "a");
         assert_eq!(json["state"]["playhead"], 0.0);
+        // A doc frame carries the project transition so peers see a change to it.
+        let json = serde_json::to_value(ServerMsg::Doc {
+            seq: 4,
+            author_id: "u-a".into(),
+            head_seq: 4,
+            edits: vec![],
+            speaker_names: vec![],
+            transition: Transition::Dip,
+        })
+        .unwrap();
+        assert_eq!(json["t"], "doc");
+        assert_eq!(json["transition"], "dip");
+        let json = serde_json::to_value(ServerMsg::Resync {
+            head_seq: 4,
+            edits: vec![],
+            speaker_names: vec![],
+            transition: Transition::None,
+        })
+        .unwrap();
+        assert_eq!(json["transition"], "none");
     }
 }
