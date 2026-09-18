@@ -8,6 +8,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
@@ -22,6 +23,16 @@ use crate::AppState;
 const PING_EVERY: Duration = Duration::from_secs(30);
 /// Close after this many pings go unanswered.
 const MISSED_PINGS: u32 = 2;
+/// Give up on a single frame after this long. A peer that stops reading its
+/// TCP socket would otherwise park the session task inside `sink.send`
+/// forever: no `select!` arm runs while one arm's body is awaiting, so the
+/// ping timer could never fire and the connection would never be reclaimed.
+#[cfg(not(test))]
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// The wedged-peer test floods a socket nobody reads; a short deadline keeps
+/// it to well under a second of real time.
+#[cfg(test)]
+const SEND_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
@@ -38,6 +49,15 @@ pub async fn handler(
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
     Ok(upgrade.on_upgrade(move |socket| session(state, access, socket)))
+}
+
+/// Write one frame, abandoning the socket if the peer stops reading. `false`
+/// means the session must end.
+async fn send(sink: &mut SplitSink<WebSocket, Message>, msg: Message) -> bool {
+    matches!(
+        tokio::time::timeout(SEND_TIMEOUT, sink.send(msg)).await,
+        Ok(Ok(()))
+    )
 }
 
 fn text(msg: &ServerMsg) -> Message {
@@ -57,7 +77,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
     // Subscribe before reading the doc so nothing published in between is
     // missed. `subscribe` announces our join before creating our receiver, so
     // the queue holds only frames from others.
-    let mut sub = state.bus.subscribe(&project_id, &conn_id, me.clone());
+    let mut sub = state.bus.subscribe(&project_id, &conn_id, me);
     let hello = match load_doc(&state, &project_id).await {
         Ok((head_seq, doc)) => {
             let peers = state.bus.peers(&project_id);
@@ -79,7 +99,12 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
             detail: format!("{e:?}"),
         },
     };
-    if sink.send(text(&hello)).await.is_err() {
+    // A peer that never received a document has nothing to apply later
+    // frames to, so a failed load ends the session and the client reconnects.
+    let load_failed = matches!(hello, ServerMsg::Error { .. });
+    if !send(&mut sink, text(&hello)).await || load_failed {
+        drop(sub);
+        let _ = tokio::time::timeout(SEND_TIMEOUT, sink.close()).await;
         return;
     }
 
@@ -99,11 +124,11 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                                 }
                             }
                             Ok(ClientMsg::Ping) => {
-                                if sink.send(text(&ServerMsg::Pong)).await.is_err() { break; }
+                                if !send(&mut sink, text(&ServerMsg::Pong)).await { break; }
                             }
                             Err(e) => {
                                 let err = ServerMsg::Error { code: "bad_frame".into(), detail: e.to_string() };
-                                if sink.send(text(&err)).await.is_err() { break; }
+                                if !send(&mut sink, text(&err)).await { break; }
                             }
                         }
                     }
@@ -115,7 +140,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
             outgoing = sub.rx.recv() => {
                 match outgoing {
                     Ok(msg) => {
-                        if sink.send(text(&msg)).await.is_err() { break; }
+                        if !send(&mut sink, text(&msg)).await { break; }
                     }
                     Err(RecvError::Lagged(_)) => {
                         // Drain whatever is left; the resync supersedes it all.
@@ -128,7 +153,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                             },
                             Err(e) => ServerMsg::Error { code: "load".into(), detail: format!("{e:?}") },
                         };
-                        if sink.send(text(&resync)).await.is_err() { break; }
+                        if !send(&mut sink, text(&resync)).await { break; }
                     }
                     Err(RecvError::Closed) => break,
                 }
@@ -136,13 +161,15 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
             _ = ping.tick() => {
                 unanswered += 1;
                 if unanswered > MISSED_PINGS { break; }
-                if sink.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
+                if !send(&mut sink, Message::Ping(Vec::new().into())).await { break; }
             }
         }
     }
     // Dropping `sub` removes our presence and announces `left`.
     drop(sub);
-    let _ = sink.close().await;
+    // Bounded for the same reason as `send`: a wedged peer must not keep
+    // this task alive after its presence is already released.
+    let _ = tokio::time::timeout(SEND_TIMEOUT, sink.close()).await;
 }
 
 #[cfg(test)]
@@ -343,5 +370,41 @@ mod tests {
             }
         }
         assert!(saw_resync);
+    }
+
+    /// A peer whose TCP receive buffer fills and never drains must not pin its
+    /// session: the send deadline fires, the loop ends, and the subscription
+    /// drop takes it out of the hub.
+    #[tokio::test]
+    async fn a_peer_that_stops_reading_is_dropped_instead_of_pinning_its_session() {
+        let (state, _d, base, ada, _bob, project) = setup(None).await;
+        // Connected but never polled, so nothing is ever read off the socket.
+        let _wedged = connect(&base, &project, &ada).await.unwrap();
+        for _ in 0..300 {
+            if !state.bus.peers(&project).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(state.bus.peers(&project).len(), 1, "the session subscribed");
+
+        // Far more than any socket buffer holds, so the server parks in `send`.
+        let big = "x".repeat(512 * 1024);
+        for _ in 0..16 {
+            state.bus.publish(
+                &project,
+                ServerMsg::Error {
+                    code: "flood".into(),
+                    detail: big.clone(),
+                },
+            );
+        }
+        for _ in 0..500 {
+            if state.bus.peers(&project).is_empty() {
+                return; // reclaimed
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the wedged peer still holds its session");
     }
 }
