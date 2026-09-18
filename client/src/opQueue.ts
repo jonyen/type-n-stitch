@@ -40,7 +40,10 @@ export function createOpQueue(submit: Submit, opts: Options = {}): OpQueue {
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   const run = async () => {
-    if (inFlight) return;
+    // A pending retry timer owns the next attempt; a `push()` arriving while
+    // we wait must not resubmit the head op early and bypass retryDelayMs.
+    // `flush()` clears the timer first, so it still retries immediately.
+    if (inFlight || retryTimer !== null) return;
     const entry = entries[0];
     if (!entry) return;
     inFlight = true;

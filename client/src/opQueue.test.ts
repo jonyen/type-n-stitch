@@ -64,6 +64,33 @@ describe('createOpQueue', () => {
     vi.useRealTimers();
   });
 
+  it('does not let a push arriving mid-wait bypass the retry delay', async () => {
+    vi.useFakeTimers();
+    const { submit, calls } = manualSubmit();
+    const q = createOpQueue(submit, { retryDelayMs: 500 });
+    const p1 = q.push(cut('a'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
+    calls[0]?.reject(new ApiError('offline', 0));
+    await vi.advanceTimersByTimeAsync(100);
+    const p2 = q.push(cut('b'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1); // still waiting out retryDelayMs, not resubmitted early
+    await vi.advanceTimersByTimeAsync(399);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1); // 500 ms since the failure
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.ops[0]?.opId).toBe('a');
+    calls[1]?.resolve(doc(1));
+    await expect(p1).resolves.toEqual(doc(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(3);
+    expect(calls[2]?.ops[0]?.opId).toBe('b');
+    calls[2]?.resolve(doc(2));
+    await expect(p2).resolves.toEqual(doc(2));
+    vi.useRealTimers();
+  });
+
   it('drops an op the server rejected and moves on', async () => {
     const { submit, calls } = manualSubmit();
     const q = createOpQueue(submit);
