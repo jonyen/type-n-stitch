@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context};
 use engine::{
     diarize_args, parse_diarization, parse_progress_line, parse_silencedetect, parse_whisper_json,
     progress_fraction, silencedetect_args, whisper_args, DiarizeOptions, MediaKind, ProgressEvent,
-    Range, SpeakerTurn, Word, PROGRESS_ARGS,
+    Range, SpeakerTurn, VideoInfo, Word, PROGRESS_ARGS,
 };
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -51,6 +51,8 @@ async fn run(program: &str, args: &[String]) -> anyhow::Result<String> {
 pub struct Probe {
     pub duration: f64,
     pub kind: MediaKind,
+    /// Frame size and rate of the picture track, when there is one.
+    pub video: Option<VideoInfo>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +72,24 @@ struct ProbeStream {
     codec_type: String,
     #[serde(default)]
     disposition: ProbeDisposition,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+    #[serde(default)]
+    r_frame_rate: Option<String>,
+}
+
+/// ffprobe reports the frame rate as a rational, e.g. `"30000/1001"`.
+fn parse_frame_rate(rate: Option<&str>) -> f64 {
+    let fallback = 30.0;
+    let Some((num, den)) = rate.and_then(|r| r.split_once('/')) else {
+        return rate.and_then(|r| r.parse().ok()).unwrap_or(fallback);
+    };
+    match (num.parse::<f64>(), den.parse::<f64>()) {
+        (Ok(num), Ok(den)) if den > 0.0 && num > 0.0 => num / den,
+        _ => fallback,
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -84,7 +104,7 @@ pub async fn probe(path: &Path) -> anyhow::Result<Probe> {
         "-v",
         "error",
         "-show_entries",
-        "format=duration:stream=codec_type:stream_disposition=attached_pic",
+        "format=duration:stream=codec_type,width,height,r_frame_rate:stream_disposition=attached_pic",
         "-of",
         "json",
     ]
@@ -95,21 +115,29 @@ pub async fn probe(path: &Path) -> anyhow::Result<Probe> {
     let json = run("ffprobe", &args).await?;
     let out: ProbeOutput = serde_json::from_str(&json).context("unexpected ffprobe output")?;
     let duration: f64 = out.format.duration.parse().context("ffprobe duration")?;
-    let has_video = out
+    let picture = out
         .streams
         .iter()
-        .any(|s| s.codec_type == "video" && s.disposition.attached_pic == 0);
+        .find(|s| s.codec_type == "video" && s.disposition.attached_pic == 0);
     let has_audio = out.streams.iter().any(|s| s.codec_type == "audio");
     if !has_audio {
         return Err(anyhow!("the file has no audio track to transcribe"));
     }
+    let video = picture.and_then(|s| {
+        Some(VideoInfo {
+            width: s.width?,
+            height: s.height?,
+            fps: parse_frame_rate(s.r_frame_rate.as_deref()),
+        })
+    });
     Ok(Probe {
         duration,
-        kind: if has_video {
+        kind: if picture.is_some() {
             MediaKind::Video
         } else {
             MediaKind::Audio
         },
+        video,
     })
 }
 

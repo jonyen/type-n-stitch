@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
-use engine::{fold, Edit, Op, ProjectDoc, SeqOp, MAX_SPEAKERS};
+use engine::{
+    fold, Edit, Op, ProjectDoc, SeqOp, Transition, MAX_CAPTIONS, MAX_SPEAKERS, MAX_TITLES,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{Sqlite, Transaction};
@@ -36,6 +38,8 @@ pub struct DocState {
     pub undoable: Option<i64>,
     /// Seq of this user's most recent undo that has not been redone, if any.
     pub redoable: Option<i64>,
+    /// The project-wide transition used at joins that do not override it.
+    pub transition: Transition,
 }
 
 /// Every stored operation for a project, in order. Takes any executor so the
@@ -139,12 +143,21 @@ pub async fn doc_state(state: &AppState, project: &Project, user: &User) -> AppR
         speaker_names: doc.speaker_names,
         undoable,
         redoable,
+        transition: doc.transition,
     })
+}
+
+/// How much inserted text the project holds so far, batch included: the
+/// caps are per project, so validation counts across the whole batch.
+struct Counts {
+    titles: usize,
+    captions: usize,
 }
 
 /// Reject operations that cannot apply to this media: ranges outside the
 /// duration, overdub audio that is not this media's, undo of someone else's.
 /// `duration` is read once by the caller and shared across the whole batch.
+#[allow(clippy::too_many_arguments)]
 async fn validate(
     tx: &mut Transaction<'_, Sqlite>,
     state: &AppState,
@@ -153,6 +166,7 @@ async fn validate(
     index: usize,
     op: &Op,
     duration: f64,
+    counts: &mut Counts,
 ) -> AppResult<()> {
     let dir = state.config.data_dir.join(&project.media_id);
     let check_range = |start: f64, end: f64| -> AppResult<()> {
@@ -244,16 +258,80 @@ async fn validate(
             }
             Ok(())
         }
-        // Title, caption and transition ops carry no server-side invariants
-        // yet (bounds/text-length checks land with the routes that expose
-        // them); nothing here can make the fold unrepresentable.
-        Op::AddTitle { .. }
-        | Op::EditTitle { .. }
-        | Op::RemoveTitle { .. }
-        | Op::AddCaption { .. }
-        | Op::RemoveCaption { .. }
-        | Op::SetTransition { .. }
-        | Op::SetCutTransition { .. } => Ok(()),
+        Op::AddTitle {
+            at,
+            duration: d,
+            text,
+            subtitle,
+            ..
+        }
+        | Op::EditTitle {
+            at,
+            duration: d,
+            text,
+            subtitle,
+            ..
+        } => {
+            if !(0.0..=duration).contains(at) {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "title is outside the media",
+                ));
+            }
+            if !(0.5..=30.0).contains(d) {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "title duration must be between 0.5 and 30 seconds",
+                ));
+            }
+            if text.chars().count() > 200
+                || subtitle.as_deref().is_some_and(|s| s.chars().count() > 200)
+            {
+                return Err(AppError::bad_request_at(index, "title text is too long"));
+            }
+            if matches!(op, Op::AddTitle { .. }) {
+                if counts.titles >= MAX_TITLES {
+                    return Err(AppError::bad_request_at(index, "too many titles"));
+                }
+                counts.titles += 1;
+            }
+            Ok(())
+        }
+        Op::RemoveTitle { at } => check_range(*at, *at),
+        Op::AddCaption {
+            start, end, text, ..
+        } => {
+            check_range(*start, *end)?;
+            if *end <= *start {
+                return Err(AppError::bad_request_at(index, "caption range is empty"));
+            }
+            if text.chars().count() > 200 {
+                return Err(AppError::bad_request_at(index, "caption text is too long"));
+            }
+            if counts.captions >= MAX_CAPTIONS {
+                return Err(AppError::bad_request_at(index, "too many captions"));
+            }
+            counts.captions += 1;
+            Ok(())
+        }
+        Op::RemoveCaption { start } => check_range(*start, *start),
+        Op::SetTransition { transition }
+        | Op::SetCutTransition {
+            transition: Some(transition),
+            ..
+        } => {
+            if *transition == Transition::Crossfade {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "crossfade is not supported yet",
+                ));
+            }
+            Ok(())
+        }
+        Op::SetCutTransition {
+            start,
+            transition: None,
+        } => check_range(*start, *start),
     }
 }
 
@@ -275,6 +353,22 @@ pub async fn apply_ops(
 ) -> AppResult<DocState> {
     let dir = state.config.data_dir.join(&project.media_id);
     let duration = read_meta(&dir).await?.duration;
+    // Title and caption caps count what the project already holds plus what
+    // this batch adds, so a single batch cannot slip past them either. The
+    // fold is cached, so this read is cheap.
+    let (_, current) = load_doc(state, &project.id).await?;
+    let mut counts = Counts {
+        titles: current
+            .edits
+            .iter()
+            .filter(|e| matches!(e, Edit::Title { .. }))
+            .count(),
+        captions: current
+            .edits
+            .iter()
+            .filter(|e| matches!(e, Edit::Caption { .. }))
+            .count(),
+    };
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // A batch of nothing but replayed op ids appends nothing; there is then
     // no new fold to announce.
@@ -297,6 +391,7 @@ pub async fn apply_ops(
             index,
             &client_op.op,
             duration,
+            &mut counts,
         )
         .await?;
         let (head,): (Option<i64>,) =
@@ -836,5 +931,154 @@ mod tests {
         )
         .await;
         assert_eq!(body["doc"]["headSeq"], n as i64);
+    }
+
+    /// The media id behind a project, for poking at its directory.
+    async fn media_id(state: &Arc<AppState>, project: &str) -> String {
+        let (id,): (String,) = sqlx::query_as("SELECT media_id FROM projects WHERE id = ?")
+            .bind(project)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        id
+    }
+
+    fn title_op(op_id: &str, at: f64, duration: f64) -> Value {
+        json!({ "opId": op_id, "kind": "addtitle", "at": at, "duration": duration,
+                "text": "Intro", "subtitle": null, "style": "dark" })
+    }
+
+    #[tokio::test]
+    async fn titles_captions_and_transitions_round_trip_through_the_doc() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![
+                title_op("t", 2.0, 3.0),
+                json!({ "opId": "c", "kind": "addcaption", "start": 1.0, "end": 4.0,
+                        "text": "Ada", "position": "bottomLeft" }),
+                json!({ "opId": "s", "kind": "settransition", "transition": "dip" }),
+                cut("k", 5.0, 6.0),
+                json!({ "opId": "o", "kind": "setcuttransition", "start": 5.0, "transition": "none" }),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["transition"], "dip");
+        assert_eq!(body["edits"][0]["kind"], "title");
+        assert_eq!(body["edits"][1]["kind"], "caption");
+        assert_eq!(body["edits"][2]["transition"], "none");
+        let (_, got, _) = call(
+            app(&state),
+            json_req(
+                Method::GET,
+                &format!("/api/projects/{project}"),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(got["doc"]["transition"], "dip");
+    }
+
+    #[tokio::test]
+    async fn title_and_caption_validation() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        for (i, bad) in [
+            title_op("a", 11.0, 3.0),
+            title_op("b", 2.0, 0.2),
+            title_op("c", 2.0, 31.0),
+            json!({ "opId": "d", "kind": "addtitle", "at": 1.0, "duration": 2.0,
+                    "text": "x".repeat(201), "subtitle": null, "style": "dark" }),
+            json!({ "opId": "e", "kind": "addcaption", "start": 3.0, "end": 2.0,
+                    "text": "x", "position": "topLeft" }),
+            json!({ "opId": "f", "kind": "settransition", "transition": "crossfade" }),
+            json!({ "opId": "g", "kind": "setcuttransition", "start": 1.0, "transition": "crossfade" }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (status, body) = post_ops(&state, &ada, &project, vec![bad]).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "case {i}: {body}");
+            assert_eq!(body["index"], 0, "case {i}: {body}");
+        }
+        let (_, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "z", "kind": "settransition", "transition": "crossfade" })],
+        )
+        .await;
+        assert_eq!(body["error"], "crossfade is not supported yet");
+    }
+
+    #[tokio::test]
+    async fn at_most_32_titles_per_project() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let ops: Vec<Value> = (0..32)
+            .map(|i| title_op(&format!("t{i}"), 1.0, 1.0))
+            .collect();
+        let (status, body) = post_ops(&state, &ada, &project, ops).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) =
+            post_ops(&state, &ada, &project, vec![title_op("t32", 1.0, 1.0)]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["index"], 0);
+    }
+
+    #[tokio::test]
+    async fn too_many_titles_in_one_batch_is_rejected() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let ops: Vec<Value> = (0..33)
+            .map(|i| title_op(&format!("t{i}"), 1.0, 1.0))
+            .collect();
+        let (status, body) = post_ops(&state, &ada, &project, ops).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["index"], 32);
+    }
+
+    #[tokio::test]
+    async fn export_renders_title_images_before_ffmpeg() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let (status, body) = post_ops(&state, &ada, &project, vec![title_op("t", 2.0, 1.0)]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{project}/export"),
+                Some(&ada),
+                Some(json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The title adds its duration to the planned output.
+        assert_eq!(body["planned"], 11.0);
+        let media_dir = state.config.data_dir.join(media_id(&state, &project).await);
+        let mut names: Vec<String> = Vec::new();
+        let mut entries = tokio::fs::read_dir(&media_dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("title-0-") && n.ends_with(".png")),
+            "no rendered title in {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bundled_font_is_served() {
+        let (state, _d, _ada, _bob, _project) = setup(None).await;
+        let (status, _, _) = call(
+            app(&state),
+            json_req(Method::GET, "/fonts/Inter-Regular.ttf", None, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 }
