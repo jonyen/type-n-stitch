@@ -1,6 +1,7 @@
 // Thin fetch wrappers over the Rust server. Errors carry the server's message.
 
-import type { CutEdit, Edit, LibraryItem, Media, User, Word } from './types';
+import type { ClientOp, DocState } from './ops';
+import type { CutEdit, LibraryItem, ProjectSummary, User, Word } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -38,22 +39,34 @@ function postJson<T>(url: string, payload: unknown): Promise<T> {
   });
 }
 
-export function uploadMedia(file: File): Promise<Media> {
+export function uploadMedia(file: File): Promise<ProjectSummary> {
   const form = new FormData();
   form.append('file', file, file.name);
-  return request<Media>('/api/media', { method: 'POST', body: form });
+  return request<ProjectSummary>('/api/projects', { method: 'POST', body: form });
 }
 
 export function listLibrary(): Promise<LibraryItem[]> {
   return request<LibraryItem[]>('/api/library');
 }
 
-export function openLibraryClip(slug: string): Promise<Media> {
-  return request<Media>(`/api/library/${encodeURIComponent(slug)}`, { method: 'POST' });
+export function openLibraryClip(slug: string): Promise<ProjectSummary> {
+  return request<ProjectSummary>(`/api/library/${encodeURIComponent(slug)}`, { method: 'POST' });
+}
+
+export function listProjects(): Promise<ProjectSummary[]> {
+  return request<ProjectSummary[]>('/api/projects');
+}
+
+export function fetchProject(id: string): Promise<{ project: ProjectSummary; doc: DocState }> {
+  return request(`/api/projects/${id}`);
+}
+
+export function submitOps(id: string, ops: ClientOp[]): Promise<DocState> {
+  return postJson(`/api/projects/${id}/ops`, { ops });
 }
 
 export async function transcribeMedia(id: string): Promise<Word[]> {
-  const { words } = await request<{ words: Word[] }>(`/api/media/${id}/transcribe`, {
+  const { words } = await request<{ words: Word[] }>(`/api/projects/${id}/transcribe`, {
     method: 'POST',
   });
   return words;
@@ -65,14 +78,14 @@ export interface Suggestions {
 }
 
 export function suggestEdits(id: string, twoWordFillers: boolean): Promise<Suggestions> {
-  return postJson(`/api/media/${id}/suggest`, { twoWordFillers });
+  return postJson(`/api/projects/${id}/suggest`, { twoWordFillers });
 }
 
 export function synthesizeOverdub(
   id: string,
   text: string,
 ): Promise<{ audioUrl: string; duration: number }> {
-  return postJson(`/api/media/${id}/overdub`, { text });
+  return postJson(`/api/projects/${id}/overdub`, { text });
 }
 
 export interface Speakers {
@@ -83,7 +96,7 @@ export interface Speakers {
 }
 
 export function fetchSpeakers(id: string): Promise<Speakers> {
-  return request<Speakers>(`/api/media/${id}/speakers`, { method: 'POST' });
+  return request<Speakers>(`/api/projects/${id}/speakers`, { method: 'POST' });
 }
 
 export interface Thumbnails {
@@ -98,7 +111,7 @@ export interface Thumbnails {
 }
 
 export function fetchThumbnails(id: string): Promise<Thumbnails> {
-  return request<Thumbnails>(`/api/media/${id}/thumbnails`, { method: 'POST' });
+  return request<Thumbnails>(`/api/projects/${id}/thumbnails`, { method: 'POST' });
 }
 
 export interface ExportStarted {
@@ -111,12 +124,12 @@ export type ExportJob =
   | { status: 'done'; progress: number; url: string; duration: number; bytes: number }
   | { status: 'error'; message: string };
 
-export function exportMedia(id: string, edits: Edit[]): Promise<ExportStarted> {
-  return postJson(`/api/media/${id}/export`, { edits });
+export function exportMedia(id: string): Promise<ExportStarted> {
+  return postJson(`/api/projects/${id}/export`, {});
 }
 
 export function exportProgress(id: string, jobId: string): Promise<ExportJob> {
-  return request<ExportJob>(`/api/media/${id}/export/${jobId}/progress`);
+  return request<ExportJob>(`/api/projects/${id}/export/${jobId}/progress`);
 }
 
 export function fetchMe(): Promise<User> {
