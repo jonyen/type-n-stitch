@@ -223,8 +223,15 @@ pub async fn list(
         };
         let role = Role::parse(&role).unwrap_or(Role::Viewer);
         // A project whose media directory vanished is skipped, not fatal.
-        if let Ok(s) = summary(&state, &project, role).await {
-            out.push(s);
+        match summary(&state, &project, role).await {
+            Ok(s) => out.push(s),
+            Err(e) => {
+                tracing::warn!(
+                    project = project.id,
+                    media = project.media_id,
+                    "skipping project: {e:?}"
+                );
+            }
         }
     }
     Ok(Json(out))
@@ -340,8 +347,12 @@ pub async fn adopt_orphans(state: &Arc<AppState>, owner_id: &str) -> AppResult<(
         if !dir.join("meta.json").is_file() {
             continue;
         }
-        let Ok(meta) = read_meta(&dir).await else {
-            continue;
+        let meta = match read_meta(&dir).await {
+            Ok(meta) => meta,
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), "skipping media dir: {e:?}");
+                continue;
+            }
         };
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM projects WHERE media_id = ?")
             .bind(&meta.id)
