@@ -246,7 +246,7 @@ frames already in the protocol, with no server change.
 Schema:
 
 - `comments(id, project_id, author_id, start, end, word_start_id, word_end_id,
-  body, at_seq, resolved_by, resolved_at, created_at)`
+body, at_seq, resolved_by, resolved_at, created_at)`
 - `comment_replies(id, comment_id, author_id, body, created_at)`
 - `annotations(id, comment_id, time, shapes json, created_at)`
 - `mentions(target_kind, target_id, user_id)`
