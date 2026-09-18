@@ -22,7 +22,7 @@ export function Presence({ peers, status }: Props) {
       className="presence"
       aria-label={`${peers.length} other ${peers.length === 1 ? 'person' : 'people'} here`}
     >
-      <span className={`status ${status}`} title={LABEL[status]}>
+      <span className={`status ${status}`}>
         <span className="dot" aria-hidden />
         {LABEL[status]}
       </span>
