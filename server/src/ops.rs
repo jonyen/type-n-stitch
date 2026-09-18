@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
-use engine::{fold, Edit, Op, ProjectDoc, SeqOp};
+use engine::{fold, Edit, Op, ProjectDoc, SeqOp, MAX_SPEAKERS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{Sqlite, Transaction};
@@ -194,7 +194,15 @@ async fn validate(
                 ))
             }
         }
-        Op::RenameSpeaker { name, .. } => {
+        Op::RenameSpeaker { speaker, name } => {
+            // An unbounded index would make the fold allocate a name list of
+            // that size for every later replay, so it is rejected here.
+            if *speaker >= MAX_SPEAKERS as u32 {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "speaker index out of range",
+                ));
+            }
             if name.chars().count() > 80 {
                 return Err(AppError::bad_request_at(index, "speaker name is too long"));
             }
@@ -597,6 +605,36 @@ mod tests {
         )
         .await;
         assert_eq!(body["speakerNames"], json!(["", "Ada"]));
+    }
+
+    #[tokio::test]
+    async fn out_of_range_speaker_index_is_rejected() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        for speaker in [u32::MAX, MAX_SPEAKERS as u32] {
+            let (status, body) = post_ops(
+                &state,
+                &ada,
+                &project,
+                vec![
+                    json!({ "opId": format!("s{speaker}"), "kind": "renamespeaker",
+                            "speaker": speaker, "name": "Nobody" }),
+                ],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["index"], 0);
+        }
+        // The last representable index is still accepted.
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "ok", "kind": "renamespeaker",
+                        "speaker": MAX_SPEAKERS as u32 - 1, "name": "Ada" })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["speakerNames"].as_array().unwrap().len(), MAX_SPEAKERS);
     }
 
     #[tokio::test]

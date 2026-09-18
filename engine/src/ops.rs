@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{Edit, Range};
 
+/// Upper bound on speaker indices. Diarization never finds this many voices;
+/// the cap exists so a stored `RenameSpeaker` cannot ask the fold for an
+/// arbitrarily large name list. The server rejects anything at or above it.
+pub const MAX_SPEAKERS: usize = 64;
+
 /// One change submitted by a client. `Undo` and `Redo` never appear in a
 /// fold's output; the server marks their targets so `fold` can skip them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,6 +121,11 @@ fn apply(doc: &mut ProjectDoc, op: &Op) {
         })),
         Op::RenameSpeaker { speaker, name } => {
             let i = *speaker as usize;
+            // Defensive: the server validates this before storing an op, but an
+            // already-stored op must never make the fold unrepresentable.
+            if i >= MAX_SPEAKERS {
+                return;
+            }
             if doc.speaker_names.len() <= i {
                 doc.speaker_names.resize(i + 1, String::new());
             }
@@ -278,6 +288,34 @@ mod tests {
             ),
         ]);
         assert_eq!(doc.speaker_names, vec!["Bob", "", "Ada"]);
+    }
+
+    #[test]
+    fn rename_speaker_out_of_range_is_ignored() {
+        let doc = fold(&[
+            op(
+                1,
+                Op::RenameSpeaker {
+                    speaker: 0,
+                    name: "Ada".into(),
+                },
+            ),
+            op(
+                2,
+                Op::RenameSpeaker {
+                    speaker: u32::MAX,
+                    name: "Nobody".into(),
+                },
+            ),
+            op(
+                3,
+                Op::RenameSpeaker {
+                    speaker: MAX_SPEAKERS as u32,
+                    name: "Nobody".into(),
+                },
+            ),
+        ]);
+        assert_eq!(doc.speaker_names, vec!["Ada"]);
     }
 
     #[test]
