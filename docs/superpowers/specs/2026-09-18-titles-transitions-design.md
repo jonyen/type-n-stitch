@@ -84,36 +84,45 @@ setting; both sides of a title are always `Dip`.
 overdub freeze: a source time at `at` maps to the title's output start, and
 output times inside the title map back to `at`.
 
+## Rendering text
+
+ffmpeg's `drawtext` filter needs libfreetype, and the Homebrew ffmpeg builds
+(7 and 8) ship without it, so the engine rasterises text itself. A pure-Rust
+`engine::text` module (`ab_glyph` + `png`) draws a title card at the source
+frame size and a caption box as an RGBA image, using Inter (SIL OFL, bundled
+under `engine/assets/inter/`). The server writes those PNGs into the media
+directory before an export and the same font files are served to the browser
+at `/fonts/`, so the preview and the render use one typeface.
+
 ## ffmpeg
 
-- Title piece: `color=c=<bg>:s=<W>x<H>:r=<fps>:d=<dur>` with `drawtext` for
-  the text (centred) and, when present, the subtitle beneath it; audio is
-  `anullsrc=r=48000:cl=stereo,atrim=end=<dur>` normalised like every other
-  piece. Background and text colours come from `TitleStyle`.
-- `W`, `H` and `fps` come from ffprobe. `Probe` and `Meta` gain `width`,
-  `height` and `fps` (video only); media probed before this change is
-  re-probed the first time an export needs them and its `meta.json` rewritten.
-- Caption: appended to the containing segment's video chain as
-  `drawtext=…:enable='between(t,a,b)'` with a translucent box for legibility;
-  position from `CaptionPos`.
+- Title piece: the card PNG as an extra input, `-loop 1 -framerate <fps>
+-t <dur> -i card.png`, then `format=yuv420p,setsar=1,trim=end=<dur>,
+setpts=PTS-STARTPTS`; audio is `anullsrc=r=48000:cl=stereo,atrim=end=<dur>`
+  normalised like every other piece. Background and text colours come from
+  `TitleStyle`.
+- `W`, `H` and `fps` come from ffprobe. `Probe` and `Meta` gain `video:
+{width, height, fps}` (video only); media probed before this change is
+  re-probed the first time an export needs it and its `meta.json` rewritten.
+- Caption: the box PNG as an extra input, composited onto the containing
+  segment with `overlay=x=<x>:y=<y>:enable='between(t,a,b)'`; position from
+  `CaptionPos`.
 - Dip: for every join with `Dip`, `fade=t=out:st=<len-0.25>:d=0.25` on the
   piece before and `fade=t=in:d=0.25` on the piece after, with `afade`
   equivalents. Crossfade is out of scope for this work.
 - Audio-only exports keep a title's silence so durations match the video
   export, and ignore captions.
-- `drawtext` needs a font file. `TITLE_FONT` in config, defaulting to
-  `/System/Library/Fonts/Helvetica.ttc` on macOS and
-  `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` elsewhere; export returns
-  400 naming the path when the file is missing. Text is escaped for
-  `drawtext` (colons, quotes, backslashes, percent signs).
+- No font configuration: the bundled font is the only font. Media without
+  dimensions (audio, or video whose probe failed) renders titles at 1280x720
+  at 30 fps rather than failing.
 
 ## Browser preview
 
 `usePlayback` gains a third pause state beside overdub: reaching `at` pauses
 the video and starts a `duration` timer, after which playback resumes at `at`.
 `playback.titling` exposes the active title. `Player` renders a `TitleCard`
-over the frame while titling, styled with the same family the CSS already
-uses so the preview matches the export closely (not pixel-identically).
+over the frame while titling, in Inter served from `/fonts/`, so the preview
+matches the export closely (not pixel-identically).
 
 `Player` renders `Caption` overlays for every caption whose source range
 contains `currentTime`. For `Dip` joins it toggles a `fading` class on the
@@ -140,8 +149,7 @@ correct.
 ## Error handling
 
 A rejected operation returns 400 with the operation index as today and the
-client rolls back that step. A missing font fails only export, with the path
-in the message. Media without dimensions (audio, or video whose probe failed)
+client rolls back that step. Media without dimensions (audio, or video whose probe failed)
 exports titles as 1280×720 at 30 fps rather than failing.
 
 ## Testing
