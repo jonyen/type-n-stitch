@@ -63,6 +63,24 @@ pub const DEFAULT_VIDEO: VideoInfo = VideoInfo {
     fps: 30.0,
 };
 
+/// The frame size ffmpeg actually decodes, given a display-matrix `rotation`
+/// (degrees, as ffprobe reports it — possibly negative).
+///
+/// ffmpeg autorotates the picture inside the filtergraph, so a quarter-turn
+/// source decodes transposed: title cards and caption placements have to be
+/// rasterised at the swapped size or `concat` rejects them.
+pub fn oriented(video: VideoInfo, rotation: i32) -> VideoInfo {
+    if rotation.rem_euclid(180) == 90 {
+        VideoInfo {
+            width: video.height,
+            height: video.width,
+            ..video
+        }
+    } else {
+        video
+    }
+}
+
 #[derive(Debug)]
 pub struct ExportOptions<'a> {
     pub duration: f64,
@@ -451,6 +469,28 @@ mod tests {
     }
 
     #[test]
+    fn oriented_swaps_only_on_a_quarter_turn() {
+        let v = VideoInfo {
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+        };
+        let swapped = VideoInfo {
+            width: 1080,
+            height: 1920,
+            fps: 30.0,
+        };
+        assert_eq!(oriented(v, 0), v);
+        assert_eq!(oriented(v, 180), v);
+        assert_eq!(oriented(v, -180), v);
+        assert_eq!(oriented(v, 360), v);
+        assert_eq!(oriented(v, 90), swapped);
+        assert_eq!(oriented(v, -90), swapped);
+        assert_eq!(oriented(v, 270), swapped);
+        assert_eq!(oriented(v, -270), swapped);
+    }
+
+    #[test]
     fn video_with_one_cut_trims_and_concats_two_pieces() {
         let none = HashMap::new();
         let out = Path::new("out.mp4");
@@ -761,6 +801,91 @@ mod tests {
         ];
         let err = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap_err();
         assert_eq!(err, ExportError::MissingCaptionImage(1));
+    }
+
+    /// A title, an overdub and a caption together: the inputs are numbered in
+    /// the order the planner pushes them (overdubs and titles in timeline
+    /// order, then one input per caption), and every `[N:v]`/`[N:a]` label in
+    /// the graph names the input at that position.
+    #[test]
+    fn title_overdub_and_caption_inputs_are_numbered_in_graph_order() {
+        let mut audio = HashMap::new();
+        audio.insert("/data/m/od.wav".to_owned(), PathBuf::from("/srv/od.wav"));
+        let edits = [
+            Edit::Title {
+                at: 1.0,
+                duration: 2.0,
+                text: "One".into(),
+                subtitle: None,
+                style: TitleStyle::Dark,
+            },
+            Edit::Overdub {
+                start: 4.0,
+                end: 5.0,
+                text: "hi".into(),
+                audio_url: "/data/m/od.wav".into(),
+                audio_duration: 1.5,
+            },
+            Edit::Caption {
+                start: 6.0,
+                end: 8.0,
+                text: "Ada".into(),
+                position: CaptionPos::BottomLeft,
+            },
+        ];
+        let out = PathBuf::from("out.mp4");
+        let mut options = opts(MediaKind::Video, OutputFormat::Mp4, &out, &audio);
+        options.title_images = titles(&[(0, "/imgs/title-0.png")]);
+        options.caption_images = captions(&[(2, "/imgs/cap-2.png", 64, 540)]);
+        let args = build_ffmpeg_args(Path::new("in.mp4"), &edits, &options).unwrap();
+
+        // The files given to `-i`, in argv order: source, title, overdub, caption.
+        let inputs: Vec<&str> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "-i" && *i + 1 < args.len())
+            .map(|(i, _)| args[i + 1].as_str())
+            .collect();
+        assert_eq!(
+            inputs,
+            [
+                "in.mp4",
+                "/imgs/title-0.png",
+                "/srv/od.wav",
+                "/imgs/cap-2.png"
+            ],
+            "{args:?}"
+        );
+        // The title's looped still is the input right before its PNG.
+        assert!(
+            has_run(
+                &args,
+                &[
+                    "-loop",
+                    "1",
+                    "-framerate",
+                    "30",
+                    "-t",
+                    "2",
+                    "-i",
+                    "/imgs/title-0.png"
+                ]
+            ),
+            "{args:?}"
+        );
+
+        let g = filter_complex(&args);
+        // Each label points at the input at that position: 1 is the title
+        // still, 2 the overdub WAV, 3 the caption overlay.
+        assert!(g.contains("[1:v]format=yuv420p"), "{g}");
+        assert!(g.contains("[2:a]aresample=48000"), "{g}");
+        assert!(g.contains("[3:v]overlay=x=64:y=540"), "{g}");
+        // Nothing refers to an input that was never opened, and no label
+        // reads the source's picture as audio or the still as a waveform.
+        assert!(!g.contains("[4:"), "{g}");
+        assert!(!g.contains("[1:a]"), "{g}");
+        assert!(!g.contains("[2:v]"), "{g}");
+        assert!(!g.contains("[3:a]"), "{g}");
     }
 
     #[test]
