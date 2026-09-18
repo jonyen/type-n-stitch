@@ -19,8 +19,9 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    deleted word goes with it and no half-gaps are left behind. Overdubbing a run sends new text
    to VoiceStudio and adds an `overdub` edit carrying the WAV and its duration. Every change is
    an operation appended to the project's log in SQLite; the edit list is the fold of that log,
-   and undo appends an `undo` targeting your own operation. Titles are cards inserted at a word
-   boundary, captions are text drawn over a word range, and a project-wide (or per-cut) transition
+   and undo appends an `undo` targeting your own operation. Titles are cards inserted at an instant —
+   the engine splits the timeline wherever one falls, and the UI places them at word
+   boundaries — captions are text drawn over a word range, and a project-wide (or per-cut) transition
    dips to black where pieces meet; all three are operations like any other. Everyone with the
    project open holds
    a WebSocket (`GET /api/projects/:id/ws`); after each append the server pushes its fold to all
@@ -200,6 +201,12 @@ seek to it · shift-click or drag to select a run.
 - Presence and the live channel are in-process; running two server instances would split them
   (the `Bus` trait is the seam for a shared implementation).
 - Crossfade transitions are not implemented yet (dip-to-black only).
+- Two title cards at the same instant are edited and removed together: the title operations
+  key on `at`, so they cannot be told apart. The export and the preview still play them in
+  edit order, one after the other.
+- Tightened pauses have no per-cut transition control: the transcript's transition toggle names a
+  cut by the start of the word it begins at, and a pause cut starts inside the silence between two
+  words, so only cuts that begin at a word (hand-made or filler) can be overridden.
 
 ## License
 
