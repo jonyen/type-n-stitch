@@ -3,6 +3,7 @@
 
 pub mod editlist;
 pub mod ffmpeg;
+pub mod ops;
 pub mod progress;
 pub mod speakers;
 pub mod suggest;
@@ -12,6 +13,7 @@ pub mod whisper;
 
 pub use editlist::*;
 pub use ffmpeg::*;
+pub use ops::*;
 pub use progress::*;
 pub use speakers::*;
 pub use suggest::*;
