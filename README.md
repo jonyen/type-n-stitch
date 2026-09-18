@@ -21,9 +21,9 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    an operation appended to the project's log in SQLite; the edit list is the fold of that log,
    and undo appends an `undo` targeting your own operation. Everyone with the project open holds
    a WebSocket (`GET /api/projects/:id/ws`); after each append the server pushes its fold to all
-   of them, and presence frames carry each person's playhead, selection and caret. Edits still go
-   over `POST …/ops`, one at a time from a queue that retries after a dropped connection — the
-   socket only fans out.
+   of them, and presence frames carry each person's playhead, selection, caret and whether they
+   are playing. Edits still go over `POST …/ops`, one at a time from a queue that retries after a
+   dropped connection — the socket only fans out.
 3. **Preview.** The browser plays the original file and honours the edit list live: an
    animation-frame loop seeks past cuts as the playhead reaches them, and for an overdub it
    pauses the picture on the first frame, plays the WAV through a second `Audio` element, then
