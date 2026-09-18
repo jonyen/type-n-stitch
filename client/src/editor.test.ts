@@ -166,3 +166,33 @@ describe('sync', () => {
     expect(state.speakerNames).toEqual(['', '', 'Bob']);
   });
 });
+
+describe('remote', () => {
+  // Selection is applied after the sync, because `sync` clears it: what this
+  // block is about is that a *remote* fold leaves the local selection alone.
+  const synced = editorReducer(loaded, {
+    type: 'sync',
+    doc: { headSeq: 3, edits: [], speakerNames: [], undoable: 3, redoable: null },
+  });
+  const remote = (headSeq: number) =>
+    editorReducer(select(synced, 1), {
+      type: 'remote',
+      headSeq,
+      edits: [{ kind: 'cut', start: 1, end: 2 }],
+      speakerNames: ['Ada'],
+    });
+
+  it('applies a newer fold, keeps the selection and the undo targets', () => {
+    const state = remote(4);
+    expect(state.headSeq).toBe(4);
+    expect(state.edits).toHaveLength(1);
+    expect(state.speakerNames).toEqual(['Ada']);
+    expect(state.undoable).toBe(3);
+    expect(state.selection).toEqual({ anchor: 1, focus: 1 });
+  });
+
+  it('ignores a fold that is not newer than what it has', () => {
+    expect(remote(3).edits).toEqual([]);
+    expect(remote(2).headSeq).toBe(3);
+  });
+});

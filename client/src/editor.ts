@@ -38,7 +38,9 @@ export type EditorAction =
   | { type: 'overdub'; text: string; audioUrl: string; audioDuration: number }
   /** Append a batch of cuts (filler removal, pause tightening) as one edit list. */
   | { type: 'applyCuts'; cuts: CutEdit[] }
-  | { type: 'renameSpeaker'; speaker: number; name: string };
+  | { type: 'renameSpeaker'; speaker: number; name: string }
+  /** Another collaborator's append, as the server's fold. Per-user fields stay. */
+  | { type: 'remote'; headSeq: number; edits: Edit[]; speakerNames: string[] };
 
 export const initialEditor: EditorState = {
   words: [],
@@ -152,6 +154,17 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         undoable: action.doc.undoable,
         redoable: action.doc.redoable,
         selection: null,
+      };
+
+    case 'remote':
+      // Out-of-order broadcasts, and our own append arriving before its POST
+      // reply, are both harmless as long as only newer folds win.
+      if (action.headSeq <= state.headSeq) return state;
+      return {
+        ...state,
+        edits: action.edits,
+        speakerNames: action.speakerNames,
+        headSeq: action.headSeq,
       };
 
     case 'renameSpeaker': {

@@ -24,11 +24,14 @@ import { Projects } from './components/Projects';
 import { Toolbar, type ExportState } from './components/Toolbar';
 import { Transcript } from './components/Transcript';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
+import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
+import { type PresenceState } from './realtime';
 import { useSession } from './session';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
 import type { LibraryItem, ProjectSummary } from './types';
 import { usePlayback } from './usePlayback';
+import { useRealtime, type RemoteDoc } from './useRealtime';
 
 export function App() {
   const { user, setUser, signOut } = useSession();
@@ -60,6 +63,9 @@ export function App() {
   // The server's last confirmed document, for rolling back a rejected op.
   const confirmed = useRef<DocState | null>(null);
 
+  // One serial queue per open project; ops go out in order, one at a time.
+  const queue = useRef<OpQueue | null>(null);
+
   /** Accept the server's fold as the truth: remember it and show it. */
   const settle = useCallback((doc: DocState) => {
     confirmed.current = doc;
@@ -78,7 +84,8 @@ export function App() {
       dispatch(action);
       if (!op) return;
       const clientOp: ClientOp = { ...op, opId: newOpId() };
-      submitOps(project.id, [clientOp])
+      queue.current
+        ?.push(clientOp)
         .then(settle)
         .catch((err: unknown) => {
           setLoadError(err instanceof Error ? err.message : String(err));
@@ -94,7 +101,8 @@ export function App() {
       if (!project || !canEdit) return;
       const targetSeq = kind === 'undo' ? editor.undoable : editor.redoable;
       if (targetSeq === null) return;
-      submitOps(project.id, [{ kind, targetSeq, opId: newOpId() }])
+      queue.current
+        ?.push({ kind, targetSeq, opId: newOpId() })
         .then(settle)
         .catch((err: unknown) => setLoadError(err instanceof Error ? err.message : String(err)));
     },
@@ -144,6 +152,35 @@ export function App() {
       cancelled = true;
     };
   }, [projectId, words, duration, twoWordFillers]);
+
+  useEffect(() => {
+    if (!projectId) {
+      queue.current = null;
+      return;
+    }
+    queue.current = createOpQueue((ops) => submitOps(projectId, ops));
+    return () => {
+      queue.current = null;
+    };
+  }, [projectId]);
+
+  // The socket delivers everyone's appends, including our own; `remote` keeps
+  // only folds newer than ours, so it never fights the reply to our own POST.
+  const onRemoteDoc = useCallback((doc: RemoteDoc) => dispatch({ type: 'remote', ...doc }), []);
+  const onSocketOpen = useCallback(() => queue.current?.flush(), []);
+  const { sendPresence } = useRealtime(projectId, onRemoteDoc, onSocketOpen);
+
+  // Tell peers where we are: playhead, selection, caret. Coalesced by the socket client.
+  useEffect(() => {
+    if (!projectId) return;
+    const state: PresenceState = {
+      playhead: playback.currentTime,
+      selection: selected,
+      caret: selected && selected[0] === selected[1] ? selected[0] : null,
+      playing: playback.playing,
+    };
+    sendPresence(state);
+  }, [projectId, playback.currentTime, playback.playing, selected, sendPresence]);
 
   // Back to the start screen. The document lives on the server, so nothing is lost.
   const goHome = useCallback(() => {
