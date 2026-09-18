@@ -1,17 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  captionsAt,
   formatTime,
+  joins,
   keptSegments,
+  nearDipJoin,
   normalizeCuts,
   outputDuration,
   overdubAt,
+  pieces,
   rangeForWords,
   skipTarget,
   wordIndexAt,
   wordStatus,
 } from './editlist';
-import type { Edit, Word } from './types';
+import type { CaptionEdit, Edit, TitleEdit, Word } from './types';
 
 const words: Word[] = [
   { id: 'w0', text: 'thankful', start: 0, end: 0.91 },
@@ -120,5 +124,59 @@ describe('formatTime', () => {
   it('formats m:ss.t', () => {
     expect(formatTime(0)).toBe('0:00.0');
     expect(formatTime(75.26)).toBe('1:15.3');
+  });
+});
+
+describe('titles and joins', () => {
+  const title = (at: number, duration: number): TitleEdit => ({
+    kind: 'title',
+    at,
+    duration,
+    text: 'T',
+    subtitle: null,
+    style: 'dark',
+  });
+  it('outputDuration adds title durations', () => {
+    expect(outputDuration(10, [title(4, 2), { kind: 'cut', start: 1, end: 2 }])).toBe(11);
+  });
+  it('pieces mirror the engine: split at a title, title precedes an overdub at the same instant', () => {
+    const p = pieces(10, [
+      title(5, 1),
+      { kind: 'overdub', start: 5, end: 6, text: 'x', audioUrl: '/a', audioDuration: 0.5 },
+    ]);
+    expect(p.map((x) => x.kind)).toEqual(['source', 'title', 'overdub', 'source']);
+    expect(p[0]?.source).toEqual({ start: 0, end: 5 });
+    expect(p[3]?.source).toEqual({ start: 6, end: 10 });
+  });
+  it('joins: override, then project default, always dip around titles, none around overdubs', () => {
+    const edits: Edit[] = [
+      { kind: 'cut', start: 2, end: 3, transition: 'none' },
+      { kind: 'cut', start: 5, end: 6 },
+      title(8, 1),
+      { kind: 'overdub', start: 9, end: 9.5, text: 'x', audioUrl: '/a', audioDuration: 1 },
+    ];
+    const p = pieces(10, edits);
+    expect(joins(p, edits, 'dip').map((j) => j.transition)).toEqual([
+      'none',
+      'dip',
+      'dip',
+      'dip',
+      'none',
+      'none',
+    ]);
+  });
+  it('nearDipJoin is true within 0.25 s of a dipping boundary in source time', () => {
+    const edits: Edit[] = [{ kind: 'cut', start: 3, end: 5 }];
+    const p = pieces(10, edits);
+    const j = joins(p, edits, 'dip');
+    expect(nearDipJoin(2.9, p, j)).toBe(true);
+    expect(nearDipJoin(5.2, p, j)).toBe(true);
+    expect(nearDipJoin(4, p, j)).toBe(false);
+    expect(nearDipJoin(2.5, p, j)).toBe(false);
+  });
+  it('captionsAt returns captions whose range contains t', () => {
+    const c: CaptionEdit = { kind: 'caption', start: 1, end: 2, text: 'c', position: 'topLeft' };
+    expect(captionsAt(1.5, [c])).toEqual([c]);
+    expect(captionsAt(2, [c])).toEqual([]);
   });
 });

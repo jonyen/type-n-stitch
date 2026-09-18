@@ -138,6 +138,8 @@ export function Transcript({
         </span>
       );
     }
+    // Title cards get their own chrome in the transcript; nothing to draw yet.
+    if (token.kind === 'title') return null;
     if (token.kind === 'overdub') {
       const { overdub, first, last } = token;
       const active = activeWord >= first && activeWord <= last;
