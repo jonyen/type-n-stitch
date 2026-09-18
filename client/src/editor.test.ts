@@ -248,6 +248,15 @@ describe('titles, captions and transitions', () => {
     s = editorReducer(s, { type: 'removeTitle', at: 1.25 });
     expect(s.edits).toEqual([]);
   });
+  it('edits only the first title at an instant, as the engine fold does', () => {
+    let s = editorReducer(loaded, { type: 'addTitle', ...t });
+    s = editorReducer(s, { type: 'addTitle', ...t, text: 'Second' });
+    s = editorReducer(s, { type: 'editTitle', ...t, text: 'Only me' });
+    expect(s.edits.map((e) => (e.kind === 'title' ? e.text : e.kind))).toEqual([
+      'Only me',
+      'Second',
+    ]);
+  });
   it('captions cover the selection and replace overlapping ones', () => {
     let s = editorReducer(select(loaded, 1, 2), {
       type: 'addCaption',

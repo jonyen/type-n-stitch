@@ -165,6 +165,16 @@ describe('titles and joins', () => {
       'none',
     ]);
   });
+  it('takes an override only from the cut starting at the boundary', () => {
+    // Two adjacent cuts fill one gap; only the first one's start is the
+    // boundary, so the second's override must not leak into the join.
+    const edits: Edit[] = [
+      { kind: 'cut', start: 2, end: 3 },
+      { kind: 'cut', start: 3, end: 5, transition: 'none' },
+    ];
+    const p = pieces(10, edits);
+    expect(joins(p, edits, 'dip').map((j) => j.transition)).toEqual(['dip']);
+  });
   it('nearDipJoin is true within 0.25 s of a dipping boundary in source time', () => {
     const edits: Edit[] = [{ kind: 'cut', start: 3, end: 5 }];
     const p = pieces(10, edits);

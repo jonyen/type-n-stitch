@@ -13,7 +13,8 @@ import type {
   Word,
 } from './types';
 
-const EPS = 1e-6;
+/** Two times closer than this are the same instant, as in the engine. */
+export const EPS = 1e-6;
 
 /** How long a dip at a join lasts, in seconds. Mirrors the engine's fade. */
 export const FADE = 0.25;
@@ -184,13 +185,11 @@ export function joins(list: Piece[], edits: Edit[], project: Transition): Join[]
     if (prev.kind === 'title' || next.kind === 'title') {
       transition = 'dip';
     } else if (next.source.start > prev.source.end + EPS) {
-      // A cut boundary: the gap was removed. Merged cuts can fill one gap, so
-      // the first cut inside it carrying an override decides.
+      // A cut boundary: the gap was removed. Only a cut that *starts* at the
+      // boundary can override it, so where several cuts merged into one gap
+      // the later ones' overrides do not apply.
       const override = cuts.find(
-        (c) =>
-          c.transition !== undefined &&
-          c.start >= prev.source.end - EPS &&
-          c.end <= next.source.start + EPS,
+        (c) => c.transition !== undefined && Math.abs(c.start - prev.source.end) < EPS,
       );
       transition = override?.transition ?? project;
     }

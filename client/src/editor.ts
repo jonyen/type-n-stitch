@@ -1,7 +1,7 @@
 // The editor's state machine: words, the edit list, server-fold metadata and
 // the current word selection. Pure, so it is easy to test.
 
-import { rangeForWords, wordStatus } from './editlist';
+import { EPS, rangeForWords, wordStatus } from './editlist';
 import type { DocState } from './ops';
 import type {
   CaptionEdit,
@@ -14,9 +14,6 @@ import type {
   Transition,
   Word,
 } from './types';
-
-/** Two title instants closer than this are the same title, as in the engine. */
-const EPS = 1e-6;
 
 export interface Selection {
   /** Where the selection started (click). */
@@ -242,19 +239,19 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     }
 
     case 'editTitle': {
-      let found = false;
-      const edits = state.edits.map((e) => {
-        if (e.kind !== 'title' || !sameInstant(e.at, action.at)) return e;
-        found = true;
-        return {
-          ...e,
-          duration: action.duration,
-          text: action.text,
-          subtitle: action.subtitle,
-          style: action.style,
-        };
-      });
-      return found ? { ...state, edits } : state;
+      // The engine's fold edits the first title at the instant and no others.
+      const at = state.edits.findIndex((e) => e.kind === 'title' && sameInstant(e.at, action.at));
+      const found = state.edits[at];
+      if (at === -1 || found?.kind !== 'title') return state;
+      const edits = [...state.edits];
+      edits[at] = {
+        ...found,
+        duration: action.duration,
+        text: action.text,
+        subtitle: action.subtitle,
+        style: action.style,
+      };
+      return { ...state, edits };
     }
 
     case 'removeTitle':
