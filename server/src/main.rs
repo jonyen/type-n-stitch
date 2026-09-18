@@ -59,6 +59,26 @@ async fn main() -> anyhow::Result<()> {
 
     let app = app::router(state.clone());
 
+    if let (Some(email), Some(password)) = (&state.config.admin_email, &state.config.admin_password)
+    {
+        let admin = match auth::create_user(&state.db, email, password, "admin").await {
+            Ok(user) => Some(user.id),
+            Err(e) if e.status() == axum::http::StatusCode::BAD_REQUEST => {
+                let row: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE email = ?")
+                    .bind(email.trim().to_ascii_lowercase())
+                    .fetch_optional(&state.db)
+                    .await?;
+                row.map(|r| r.0)
+            }
+            Err(e) => anyhow::bail!("creating admin user: {e:?}"),
+        };
+        if let Some(id) = admin {
+            projects::adopt_orphans(&state, &id)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        }
+    }
+
     tokio::spawn(library::warm(state.clone()));
 
     let addr = format!("127.0.0.1:{}", state.config.port);

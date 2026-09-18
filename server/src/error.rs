@@ -64,7 +64,6 @@ impl AppError {
         }
     }
 
-    #[allow(dead_code)] // consumed once batched op submission lands (Task 5)
     pub fn status(&self) -> StatusCode {
         self.status
     }

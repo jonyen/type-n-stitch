@@ -19,7 +19,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
-        .route("/api/projects", get(projects::list))
+        .route("/api/projects", get(projects::list).post(routes::upload))
         .route("/api/projects/{id}", get(ops::get_project))
         .route("/api/projects/{id}/ops", post(ops::submit))
         .route(
@@ -30,19 +30,18 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/projects/{id}/members/{user_id}",
             axum::routing::delete(projects::remove_member),
         )
-        .route("/api/library", get(library::list))
-        .route("/api/library/{slug}", post(library::open))
-        .route("/api/media", post(routes::upload))
-        .route("/api/media/{id}/transcribe", post(routes::transcribe))
-        .route("/api/media/{id}/suggest", post(routes::suggest))
-        .route("/api/media/{id}/thumbnails", post(routes::thumbnails))
-        .route("/api/media/{id}/speakers", post(routes::speakers))
-        .route("/api/media/{id}/overdub", post(routes::overdub))
-        .route("/api/media/{id}/export", post(routes::export))
+        .route("/api/projects/{id}/transcribe", post(routes::transcribe))
+        .route("/api/projects/{id}/suggest", post(routes::suggest))
+        .route("/api/projects/{id}/thumbnails", post(routes::thumbnails))
+        .route("/api/projects/{id}/speakers", post(routes::speakers))
+        .route("/api/projects/{id}/overdub", post(routes::overdub))
+        .route("/api/projects/{id}/export", post(routes::export))
         .route(
-            "/api/media/{id}/export/{job}/progress",
+            "/api/projects/{id}/export/{job}/progress",
             get(routes::export_progress),
         )
+        .route("/api/library", get(library::list))
+        .route("/api/library/{slug}", post(library::open))
         .nest_service("/data", ServeDir::new(&state.config.data_dir))
         .nest_service(
             "/library",

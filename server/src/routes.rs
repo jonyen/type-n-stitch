@@ -1,4 +1,4 @@
-//! HTTP handlers. Each media item lives in `data/<id>/`:
+//! HTTP handlers for a project's media. Each media item lives in `data/<id>/`:
 //! `source.<ext>`, `meta.json`, `whisper.wav`, `words-v2.json`,
 //! `overdub-<n>.wav` and `export-<n>.<ext>`.
 
@@ -19,7 +19,10 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
+use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
+use crate::ops::load_doc;
+use crate::projects::{create_project, summary, ProjectAccess, ProjectSummary};
 use crate::{media, tts, AppState};
 
 const ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "m4a", "mp4", "mov", "aac", "ogg", "webm"];
@@ -36,7 +39,7 @@ pub struct Meta {
 }
 
 /// A media item's directory, validated so `id` can't escape `data/`.
-fn item_dir(state: &AppState, id: &str) -> AppResult<PathBuf> {
+pub(crate) fn media_dir(state: &AppState, id: &str) -> AppResult<PathBuf> {
     Uuid::parse_str(id).map_err(|_| AppError::bad_request("malformed media id"))?;
     let dir = state.config.data_dir.join(id);
     if !dir.is_dir() {
@@ -69,18 +72,24 @@ pub async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
-/// `POST /api/media` — multipart with one `file` field.
+/// `POST /api/projects` — multipart with one `file` field; creates the
+/// media item and a project owned by the caller.
 pub async fn upload(
     State(state): State<Arc<AppState>>,
+    CurrentUser(user): CurrentUser,
     mut multipart: Multipart,
-) -> AppResult<Json<Meta>> {
+) -> AppResult<Json<ProjectSummary>> {
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?
     {
         if field.name() == Some("file") {
-            return store_upload(&state, field).await.map(Json);
+            let meta = store_upload(&state, field).await?;
+            let project = create_project(&state.db, &user, &meta.id, &meta.filename).await?;
+            return Ok(Json(
+                summary(&state, &project, crate::projects::Role::Owner).await?,
+            ));
         }
     }
     Err(AppError::bad_request("missing `file` field"))
@@ -150,18 +159,19 @@ pub struct Transcript {
 /// in a way that alters the words (v2: disfluency prompt keeps "um"/"uh").
 const WORDS_CACHE: &str = "words-v2.json";
 
-/// `POST /api/media/:id/transcribe` — whisper.cpp word timestamps (cached).
+/// `POST /api/projects/:id/transcribe` — whisper.cpp word timestamps (cached).
 pub async fn transcribe(
     State(state): State<Arc<AppState>>,
-    UrlPath(id): UrlPath<String>,
+    access: ProjectAccess,
 ) -> AppResult<Json<Transcript>> {
+    let id = access.project.media_id.clone();
     let words = transcribe_item(&state, &id).await?;
     Ok(Json(Transcript { words }))
 }
 
 /// Words for a media item, running whisper.cpp only if nothing is cached.
 pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>> {
-    let dir = item_dir(state, id)?;
+    let dir = media_dir(state, id)?;
     let cached = dir.join(WORDS_CACHE);
     if let Ok(json) = tokio::fs::read_to_string(&cached).await {
         return Ok(serde_json::from_str(&json).context("parsing cached words")?);
@@ -202,18 +212,19 @@ pub struct Speakers {
 /// Speaker cache file. Bump the version when diarization settings change.
 const SPEAKERS_CACHE: &str = "speakers-v1.json";
 
-/// `POST /api/media/:id/speakers` — who says each word (cached).
+/// `POST /api/projects/:id/speakers` — who says each word (cached).
 pub async fn speakers(
     State(state): State<Arc<AppState>>,
-    UrlPath(id): UrlPath<String>,
+    access: ProjectAccess,
 ) -> AppResult<Json<Speakers>> {
+    let id = access.project.media_id.clone();
     speakers_item(&state, &id).await.map(Json)
 }
 
 /// Speaker labels for a transcribed item, running the diarizer only if
 /// nothing is cached.
 pub async fn speakers_item(state: &AppState, id: &str) -> AppResult<Speakers> {
-    let dir = item_dir(state, id)?;
+    let dir = media_dir(state, id)?;
     let cached = dir.join(SPEAKERS_CACHE);
     if let Ok(json) = tokio::fs::read_to_string(&cached).await {
         return Ok(serde_json::from_str(&json).context("parsing cached speakers")?);
@@ -245,13 +256,14 @@ pub struct Thumbnails {
 /// Sprite sheet cache file. Bump the version when the sheet layout changes.
 const THUMBS_CACHE: &str = "thumbs-v1.jpg";
 
-/// `POST /api/media/:id/thumbnails` — a sprite sheet of frames for the
+/// `POST /api/projects/:id/thumbnails` — a sprite sheet of frames for the
 /// scrubber preview, rendered once per video and cached.
 pub async fn thumbnails(
     State(state): State<Arc<AppState>>,
-    UrlPath(id): UrlPath<String>,
+    access: ProjectAccess,
 ) -> AppResult<Json<Thumbnails>> {
-    let dir = item_dir(&state, &id)?;
+    let id = access.project.media_id.clone();
+    let dir = media_dir(&state, &id)?;
     let meta = read_meta(&dir).await?;
     if meta.kind != MediaKind::Video {
         return Err(AppError::bad_request("audio has no frames to preview"));
@@ -316,14 +328,15 @@ pub struct Suggestions {
     pauses: Vec<Edit>,
 }
 
-/// `POST /api/media/:id/suggest` — filler-word and long-pause cuts the
+/// `POST /api/projects/:id/suggest` — filler-word and long-pause cuts the
 /// client can apply as one batch. The body is optional.
 pub async fn suggest(
     State(state): State<Arc<AppState>>,
-    UrlPath(id): UrlPath<String>,
+    access: ProjectAccess,
     body: Option<Json<SuggestRequest>>,
 ) -> AppResult<Json<Suggestions>> {
-    let dir = item_dir(&state, &id)?;
+    let id = access.project.media_id.clone();
+    let dir = media_dir(&state, &id)?;
     let meta = read_meta(&dir).await?;
     let words = read_words(&dir).await?;
     let opts = SuggestOptions {
@@ -355,13 +368,15 @@ pub struct OverdubResponse {
     duration: f64,
 }
 
-/// `POST /api/media/:id/overdub` — synthesize replacement speech.
+/// `POST /api/projects/:id/overdub` — synthesize replacement speech.
 pub async fn overdub(
     State(state): State<Arc<AppState>>,
-    UrlPath(id): UrlPath<String>,
+    access: ProjectAccess,
     Json(req): Json<OverdubRequest>,
 ) -> AppResult<Json<OverdubResponse>> {
-    let dir = item_dir(&state, &id)?;
+    access.require_edit()?;
+    let id = access.project.media_id.clone();
+    let dir = media_dir(&state, &id)?;
     let text = req.text.trim();
     if text.is_empty() {
         return Err(AppError::bad_request("overdub text is empty"));
@@ -385,9 +400,8 @@ pub async fn overdub(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct ExportRequest {
-    edits: Vec<Edit>,
     /// `mp4` (video sources only), `mp3` or `wav`. Defaults by source kind.
     format: Option<String>,
 }
@@ -469,15 +483,20 @@ fn set_job(state: &AppState, job_id: &str, job: ExportJob) {
         .insert(job_id.to_owned(), job);
 }
 
-/// `POST /api/media/:id/export` — plan the render, start ffmpeg in the
-/// background and return a job id to poll.
+/// `POST /api/projects/:id/export` — fold the log, plan the render, start
+/// ffmpeg in the background and return a job id to poll.
 pub async fn export(
     State(state): State<Arc<AppState>>,
-    UrlPath(id): UrlPath<String>,
-    Json(req): Json<ExportRequest>,
+    access: ProjectAccess,
+    body: Option<Json<ExportRequest>>,
 ) -> AppResult<Json<ExportStarted>> {
-    let dir = item_dir(&state, &id)?;
+    access.require_edit()?;
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let id = access.project.media_id.clone();
+    let dir = media_dir(&state, &id)?;
     let meta = read_meta(&dir).await?;
+    let (_, doc) = load_doc(&state, &access.project.id).await?;
+    let edits = doc.edits;
     let format = match req.format.as_deref() {
         None => OutputFormat::for_kind(meta.kind),
         Some("mp4") => OutputFormat::Mp4,
@@ -485,13 +504,13 @@ pub async fn export(
         Some("wav") => OutputFormat::Wav,
         Some(other) => return Err(AppError::bad_request(format!("unknown format {other}"))),
     };
-    let overdub_audio = overdub_files(&id, &dir, &req.edits)?;
+    let overdub_audio = overdub_files(&id, &dir, &edits)?;
     let (output, name) = next_numbered(&dir, "export", format.extension()).await?;
     let source = dir.join(format!("source.{}", meta.ext));
 
     let args = build_ffmpeg_args(
         &source,
-        &req.edits,
+        &edits,
         &ExportOptions {
             duration: meta.duration,
             kind: meta.kind,
@@ -501,7 +520,7 @@ pub async fn export(
         },
     )
     .map_err(|e| AppError::bad_request(e.to_string()))?;
-    let planned = output_duration(&timeline(meta.duration, &req.edits));
+    let planned = output_duration(&timeline(meta.duration, &edits));
 
     let job_id = Uuid::new_v4().to_string();
     set_job(
@@ -515,7 +534,7 @@ pub async fn export(
     tracing::info!(
         id,
         job = job_id,
-        edits = req.edits.len(),
+        edits = edits.len(),
         planned,
         "rendering with ffmpeg"
     );
@@ -562,12 +581,13 @@ pub async fn export(
     Ok(Json(ExportStarted { job_id, planned }))
 }
 
-/// `GET /api/media/:id/export/:job/progress` — poll an export.
+/// `GET /api/projects/:id/export/:job/progress` — poll an export.
 pub async fn export_progress(
     State(state): State<Arc<AppState>>,
-    UrlPath((id, job_id)): UrlPath<(String, String)>,
+    access: ProjectAccess,
+    UrlPath((_, job_id)): UrlPath<(String, String)>,
 ) -> AppResult<Json<ExportJob>> {
-    item_dir(&state, &id)?;
+    let id = access.project.media_id;
     let job = state
         .jobs
         .lock()

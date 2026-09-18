@@ -651,6 +651,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn media_routes_require_membership_and_upload_creates_a_project() {
+        let (state, _d, ada, bob, project) = setup(None).await;
+        // suggest needs a transcript; without one the route answers 404 for a
+        // member, but 403 for a non-member — the extractor runs first.
+        let (status, _, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{project}/suggest"),
+                Some(&bob),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{project}/suggest"),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // The old media routes are gone.
+        let (status, _, _) = call(
+            app(&state),
+            json_req(Method::POST, "/api/media/x/suggest", Some(&ada), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn export_uses_the_fold_and_viewers_may_not_export() {
+        let (state, _d, ada, bob, project) = setup(Some("viewer")).await;
+        let (status, _, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{project}/export"),
+                Some(&bob),
+                Some(json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // Owner: the seeded media has no real source file, so ffmpeg planning
+        // still succeeds (it only builds args) but the job errors later; we
+        // assert the request itself is accepted with the planned duration
+        // reflecting the fold's cut.
+        post_ops(&state, &ada, &project, vec![cut("a", 0.0, 4.0)]).await;
+        let (status, body, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{project}/export"),
+                Some(&ada),
+                Some(json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["planned"], 6.0);
+    }
+
+    #[tokio::test]
     async fn concurrent_appends_all_succeed_and_head_seq_matches_count() {
         let (state, _d, ada, _bob, project) = setup(None).await;
         let n = 8;
