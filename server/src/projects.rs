@@ -69,7 +69,6 @@ pub struct Project {
 /// parameter. Rejections, in order: 401 (no session), 404 (no such project),
 /// 403 (not a member).
 pub struct ProjectAccess {
-    #[allow(dead_code)] // read once project routes need the acting user (Task 5)
     pub user: User,
     pub project: Project,
     pub role: Role,
@@ -86,7 +85,6 @@ pub struct ProjectSummary {
 }
 
 impl ProjectAccess {
-    #[allow(dead_code)] // consumed once project edit routes land (Task 5)
     pub fn require_edit(&self) -> AppResult<()> {
         if self.role.can_edit() {
             Ok(())

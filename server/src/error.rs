@@ -56,7 +56,6 @@ impl AppError {
     }
 
     /// A bad request that names which entry of a batch was rejected.
-    #[allow(dead_code)] // consumed once batched op submission lands (Task 5)
     pub fn bad_request_at(index: usize, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

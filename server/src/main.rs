@@ -9,6 +9,7 @@ mod db;
 mod error;
 mod library;
 mod media;
+mod ops;
 mod projects;
 mod routes;
 #[cfg(test)]
@@ -28,8 +29,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub jobs: Mutex<HashMap<String, routes::ExportJob>>,
     pub db: sqlx::SqlitePool,
-    /// In-memory fold cache for collaborative editing sessions; wired up in Task 5.
-    #[allow(dead_code)]
+    /// In-memory fold cache for collaborative editing sessions.
     pub folds: Mutex<HashMap<String, (i64, engine::ProjectDoc)>>,
 }
 
