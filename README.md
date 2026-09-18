@@ -90,11 +90,11 @@ see [samples/README.md](samples/README.md) for what's in it and where it comes f
 The first visit asks you to create an account. To create an admin non-interactively and
 adopt any media already under `DATA_DIR`, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` before
 starting the server. `ADMIN_PASSWORD` is only used when the admin account is first created;
-changing it later has no effect — reset the password through the app instead. The database
-lives at `$DATA_DIR/type-n-stitch.db`; override with `DATABASE_URL`. Registration is open to
-anyone who can reach the server — put it behind your own network or proxy. The client mirrors
-the engine's edit rules for the live preview, but the server's fold of the operation log is
-what export renders.
+changing it later has no effect (there is no password-reset flow yet; edit the `users` row if
+you must). The database lives at `$DATA_DIR/type-n-stitch.db`; override with `DATABASE_URL`.
+Registration is open to anyone who can reach the server — put it behind your own network or
+proxy. The client mirrors the engine's edit rules for the live preview, but the server's fold
+of the operation log is what export renders.
 
 **Overdub** needs a local OpenAI-compatible speech endpoint. I use VoiceStudio with a cloned
 voice profile; anything that answers `POST /v1/audio/speech` with `response_format: "wav"` will
@@ -113,17 +113,20 @@ do. Without it, the Overdub button explains what's missing and everything else k
 | `DATA_DIR`                   | `server/data`                                                    | uploads, transcripts and renders                        |
 | `SAMPLES_DIR`                | `samples`                                                        | sample library manifest and clips                       |
 | `PORT`                       | `5175`                                                           | server port                                             |
+| `DATABASE_URL`               | `$DATA_DIR/type-n-stitch.db`                                     | SQLite database location                                |
+| `ADMIN_EMAIL`                | unset                                                            | creates an admin account on first start                 |
+| `ADMIN_PASSWORD`             | unset                                                            | password for that first admin account                   |
 
 ## Scripts
 
-| Command           | What it does                                                            |
-| ----------------- | ----------------------------------------------------------------------- |
-| `npm run dev`     | `cargo run -p server` and the Vite client, side by side                 |
-| `npm run library` | makes `samples/sample.mp4` and downloads the sample library             |
-| `npm test`        | `cargo test` (engine unit tests + ffmpeg render test) and client vitest |
-| `npm run lint`    | `cargo fmt --check`, `cargo clippy -D warnings`, eslint, prettier       |
-| `npm run build`   | release build of the server and a production client bundle              |
-| `npm run format`  | `cargo fmt` and `prettier --write`                                      |
+| Command           | What it does                                                        |
+| ----------------- | ------------------------------------------------------------------- |
+| `npm run dev`     | `cargo run -p server` and the Vite client, side by side             |
+| `npm run library` | makes `samples/sample.mp4` and downloads the sample library         |
+| `npm test`        | `cargo test` (engine and server suites) and the client's vitest run |
+| `npm run lint`    | `cargo fmt --check`, `cargo clippy -D warnings`, eslint, prettier   |
+| `npm run build`   | release build of the server and a production client bundle          |
+| `npm run format`  | `cargo fmt` and `prettier --write`                                  |
 
 The engine's render test needs `samples/sample.mp4` (see `samples/README.md`); it skips itself
 if the clip is missing.
@@ -173,6 +176,9 @@ seek to it · shift-click or drag to select a run.
 - The preview skips cuts on the browser's clock, so a cut boundary can bleed a frame or two;
   the export is frame-accurate.
 - Exports re-encode the whole file with libx264. Fine for clips, slow for an hour of 4K.
+- `/data/<media id>/…` (source media, transcripts, overdub audio, exports) is served without
+  authentication — anyone who learns a media id can fetch the files. The server binds to
+  127.0.0.1, so this is only reachable from your machine; a per-project media route is planned.
 
 ## License
 
