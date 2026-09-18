@@ -169,7 +169,9 @@ export function Transcript({
     );
   };
 
-  const renderToken = (token: Token): ReactNode => {
+  // `at` is not unique — two cards may share an instant — so a title's key
+  // comes from where the token sits in the turn instead.
+  const renderToken = (token: Token, tokenIndex: number): ReactNode => {
     if (token.kind === 'gap') {
       const n = token.last - token.first + 1;
       // The cut op's start is the first cut word's start, which is how
@@ -200,7 +202,7 @@ export function Transcript({
       const selected = selectedTitle !== null && Math.abs(selectedTitle - title.at) < EPS;
       return (
         <button
-          key={`title-${title.at}`}
+          key={`title-${token.before}-${tokenIndex}`}
           type="button"
           className={`title-token ${title.style}${selected ? ' selected' : ''}`}
           title={readOnly ? title.text : 'Click to select · double-click to edit'}

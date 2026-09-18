@@ -50,7 +50,10 @@ export function App() {
   const [overdubOpen, setOverdubOpen] = useState(false);
   // The title dialog, adding at `at` or editing `initial`.
   const [titleDialog, setTitleDialog] = useState<{ at: number; initial?: TitleEdit } | null>(null);
-  const [captionDialogOpen, setCaptionDialogOpen] = useState(false);
+  // The word range the caption dialog was opened on. Holding it here keeps
+  // the dialog mounted (and the caption anchored) when a peer's `sync` clears
+  // the selection while someone is still typing.
+  const [captionRange, setCaptionRange] = useState<[number, number] | null>(null);
   // A selected title card, by its instant. Exclusive with the word selection.
   const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle' });
@@ -241,7 +244,7 @@ export function App() {
     setExportState({ status: 'idle' });
     setSelectedTitle(null);
     setTitleDialog(null);
-    setCaptionDialogOpen(false);
+    setCaptionRange(null);
   }, []);
 
   // Opening a project pushes a history entry, so the browser's Back button
@@ -419,10 +422,11 @@ export function App() {
 
   const onCaptionSubmit = useCallback(
     (text: string, position: CaptionPos) => {
-      edit({ type: 'addCaption', text, position });
-      setCaptionDialogOpen(false);
+      if (!captionRange) return;
+      edit({ type: 'addCaption', text, position, range: captionRange });
+      setCaptionRange(null);
     },
-    [edit],
+    [captionRange, edit],
   );
 
   // A peer's edit (or an undo) can remove the card we had selected.
@@ -437,7 +441,7 @@ export function App() {
     if (!projectId) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (overdubOpen || titleDialog || captionDialogOpen) return;
+      if (overdubOpen || titleDialog || captionRange) return;
       if (target?.closest('input, textarea, select, [contenteditable]')) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
@@ -474,7 +478,7 @@ export function App() {
     projectId,
     overdubOpen,
     titleDialog,
-    captionDialogOpen,
+    captionRange,
     selectedTitle,
     playback,
     showCuts,
@@ -482,12 +486,16 @@ export function App() {
     undoRedo,
   ]);
 
-  const selectedText = selected
-    ? editor.words
-        .slice(selected[0], selected[1] + 1)
-        .map((w) => w.text)
-        .join(' ')
-    : '';
+  const wordsIn = (range: [number, number] | null) =>
+    range
+      ? editor.words
+          .slice(range[0], range[1] + 1)
+          .map((w) => w.text)
+          .join(' ')
+      : '';
+  const selectedText = wordsIn(selected);
+  // The dialog keeps showing the words it was opened on, selection or not.
+  const captionText = wordsIn(captionRange);
 
   if (user === undefined)
     return (
@@ -588,7 +596,9 @@ export function App() {
                   : edit({ type: 'deleteSelection' })
               }
               onAddTitle={onAddTitle}
-              onAddCaption={() => setCaptionDialogOpen(true)}
+              onAddCaption={() => {
+                if (selected) setCaptionRange(selected);
+              }}
               onTransition={(transition: Transition) => edit({ type: 'setTransition', transition })}
               onRemoveFillers={() => edit({ type: 'applyCuts', cuts: fillers })}
               onTightenPauses={() => edit({ type: 'applyCuts', cuts: pauses })}
@@ -645,11 +655,11 @@ export function App() {
         />
       )}
 
-      {captionDialogOpen && selected && (
+      {captionRange && (
         <CaptionDialog
-          original={selectedText}
+          original={captionText}
           onSubmit={onCaptionSubmit}
-          onCancel={() => setCaptionDialogOpen(false)}
+          onCancel={() => setCaptionRange(null)}
         />
       )}
     </div>

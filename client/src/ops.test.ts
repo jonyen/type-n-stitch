@@ -103,6 +103,21 @@ describe('titles, captions and transitions', () => {
     expect(
       opForAction(loaded, { type: 'addCaption', text: 'Ada', position: 'topLeft' }),
     ).toBeNull();
+    // A range captured when the dialog opened survives a cleared selection.
+    expect(
+      opForAction(loaded, {
+        type: 'addCaption',
+        text: 'Ada',
+        position: 'topLeft',
+        range: [1, 2],
+      }),
+    ).toEqual({
+      kind: 'addcaption',
+      start: 0.91,
+      end: 2.0,
+      text: 'Ada',
+      position: 'topLeft',
+    });
     expect(opForAction(loaded, { type: 'removeCaption', start: 0.91 })).toEqual({
       kind: 'removecaption',
       start: 0.91,

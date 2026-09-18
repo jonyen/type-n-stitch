@@ -29,6 +29,15 @@ export function nextTitleAt(
   return list.find((title) => title.at === at && !shown.includes(title)) ?? null;
 }
 
+/**
+ * The far end of the span the playhead traverses this tick: a cut skip or an
+ * overdub jump carries it past `t` in the same tick, and a title inside that
+ * span must still be seen.
+ */
+export function tickSpan(t: number, skip: number | null, overdubEnd: number | null): number {
+  return Math.max(t, skip ?? t, overdubEnd ?? t);
+}
+
 export interface Playback {
   playing: boolean;
   currentTime: number;
@@ -189,23 +198,24 @@ export function usePlayback(
       if (!editsRef.current.includes(od)) leaveOverdub(true);
     } else {
       const t = media.currentTime;
-      const crossed = titleCrossed(titles(editsRef.current), lastTime.current, t);
+      const next = overdubAt(t, editsRef.current);
+      const skip = next ? null : skipTarget(t, cutRanges(editsRef.current));
+      // The jump is decided first but taken last: a title inside the cut (or
+      // the overdubbed range) would otherwise be stepped over in this tick
+      // and never seen, because the crossing is checked against the time
+      // `sync` recorded *after* the jump.
+      const after = tickSpan(t, skip, next?.end ?? null);
+      const crossed = titleCrossed(titles(editsRef.current), lastTime.current, after);
       if (crossed) {
         enterTitle(crossed);
-      } else {
-        const next = overdubAt(t, editsRef.current);
-        if (next) {
-          enterOverdub(next);
+      } else if (next) {
+        enterOverdub(next);
+      } else if (skip !== null) {
+        if (skip >= duration - 0.01) {
+          media.pause();
+          media.currentTime = duration;
         } else {
-          const skip = skipTarget(t, cutRanges(editsRef.current));
-          if (skip !== null) {
-            if (skip >= duration - 0.01) {
-              media.pause();
-              media.currentTime = duration;
-            } else {
-              media.currentTime = skip;
-            }
-          }
+          media.currentTime = skip;
         }
       }
     }

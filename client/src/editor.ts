@@ -69,7 +69,8 @@ export type EditorAction =
       style: TitleStyle;
     }
   | { type: 'removeTitle'; at: number }
-  | { type: 'addCaption'; text: string; position: CaptionPos }
+  /** `range` is the word range captured when the dialog opened, if any. */
+  | { type: 'addCaption'; text: string; position: CaptionPos; range?: [number, number] }
   | { type: 'removeCaption'; start: number }
   | { type: 'setTransition'; transition: Transition }
   | { type: 'setCutTransition'; start: number; transition: Transition | null }
@@ -261,7 +262,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       };
 
     case 'addCaption': {
-      const range = selectedRange(state.selection);
+      const range = action.range ?? selectedRange(state.selection);
       if (!range) return state;
       const span = rangeForWords(state.words, range[0], range[1], state.duration);
       // A new caption replaces any it overlaps, like an overdub.

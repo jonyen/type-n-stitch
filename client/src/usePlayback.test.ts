@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TitleEdit } from './types';
-import { nextTitleAt, titleCrossed } from './usePlayback';
+import { nextTitleAt, tickSpan, titleCrossed } from './usePlayback';
 
 const t = (at: number): TitleEdit => ({
   kind: 'title',
@@ -30,6 +30,31 @@ describe('titleCrossed', () => {
     const first = { ...t(5), text: 'first' };
     const second = { ...t(5), text: 'second' };
     expect(titleCrossed([first, second], 4, 6)).toEqual(first);
+  });
+});
+
+describe('tickSpan', () => {
+  it('reaches the far side of a cut skip or an overdub', () => {
+    expect(tickSpan(1.9, null, null)).toBe(1.9);
+    expect(tickSpan(2.0, 4.0, null)).toBe(4.0);
+    expect(tickSpan(2.0, null, 5.0)).toBe(5.0);
+    // A jump never pulls the span backwards.
+    expect(tickSpan(6.0, 4.0, null)).toBe(6.0);
+  });
+});
+
+describe('titleCrossed over a tick span', () => {
+  it('sees a title buried inside a cut the tick skips over', () => {
+    // The playhead is at 1.9, a cut covers [2, 4) and a title sits at 3.0:
+    // the tick jumps to 4, so the crossing has to be checked over (1.9, 4].
+    const buried = t(3);
+    expect(titleCrossed([buried], 1.9, tickSpan(1.9, null, null))).toBeNull();
+    expect(titleCrossed([buried], 1.9, tickSpan(2.0, 4.0, null))).toEqual(buried);
+  });
+
+  it('sees a title inside an overdubbed range', () => {
+    const inside = t(5.5);
+    expect(titleCrossed([inside], 4.9, tickSpan(5.0, null, 6.0))).toEqual(inside);
   });
 });
 

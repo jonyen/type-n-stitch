@@ -110,7 +110,7 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
     case 'removeTitle':
       return { kind: 'removetitle', at: action.at };
     case 'addCaption': {
-      const range = selectedRange(state.selection);
+      const range = action.range ?? selectedRange(state.selection);
       if (!range) return null;
       return {
         kind: 'addcaption',

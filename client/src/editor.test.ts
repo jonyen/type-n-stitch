@@ -270,6 +270,17 @@ describe('titles, captions and transitions', () => {
     s = editorReducer(s, { type: 'removeCaption', start: 1.25 });
     expect(s.edits).toEqual([]);
   });
+  it('captions an explicit range even with no selection left', () => {
+    const s = editorReducer(loaded, {
+      type: 'addCaption',
+      text: 'A',
+      position: 'bottomLeft',
+      range: [1, 2],
+    });
+    expect(s.edits).toEqual([
+      { kind: 'caption', start: 0.91, end: 2.0, text: 'A', position: 'bottomLeft' },
+    ]);
+  });
   it('sets the project transition and a per-cut override, and sync/remote carry it', () => {
     let s = editorReducer(loaded, { type: 'setTransition', transition: 'dip' });
     expect(s.transition).toBe('dip');
