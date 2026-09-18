@@ -1,7 +1,7 @@
 //! Accounts and sessions: argon2id passwords, an opaque session token in an
 //! HttpOnly cookie, and the `CurrentUser` extractor every private route uses.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -101,6 +101,14 @@ fn verify_password(password: &str, hash: &str) -> bool {
         })
         .unwrap_or(false)
 }
+
+/// A hash of a password nobody will type, computed once at first use so
+/// `login` can run a real argon2id verification even when the email isn't
+/// registered. Without this, the "no such user" and "wrong password" 401s
+/// are byte-identical but take different amounts of time — a timing side
+/// channel that lets an attacker enumerate registered emails.
+static DUMMY_HASH: LazyLock<String> =
+    LazyLock::new(|| hash_password("not-a-real-password").expect("hashing the dummy password"));
 
 pub async fn count_users(db: &SqlitePool) -> AppResult<i64> {
     let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
@@ -211,6 +219,11 @@ pub async fn login(
     .fetch_optional(&state.db)
     .await?;
     let Some((id, email, display_name, color, hash)) = row else {
+        // Run a real (deliberately slow) verification against a dummy hash
+        // so this branch takes about as long as a genuine wrong-password
+        // failure below — the two 401s must be indistinguishable in timing,
+        // not just in body.
+        verify_password(&req.password, &DUMMY_HASH);
         return Err(AppError::unauthorized());
     };
     if !verify_password(&req.password, &hash) {
