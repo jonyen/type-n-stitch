@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { splitTurns, tokenize, turnContains } from './tokens';
-import type { Edit, Word } from './types';
+import type { Edit, TitleEdit, Word } from './types';
 
 const words: Word[] = [
   { id: 'w0', text: 'thankful', start: 0, end: 0.91 },
@@ -104,5 +104,24 @@ describe('turnContains', () => {
   it('is false for -1, the index before any word plays', () => {
     const [turn] = splitTurns(tokenize(words, []), null);
     expect(turn && turnContains(turn, -1)).toBe(false);
+  });
+});
+
+describe('title tokens', () => {
+  it('places a title token before the first word at or after its instant', () => {
+    const t: TitleEdit = {
+      kind: 'title',
+      at: 1.0,
+      duration: 2,
+      text: 'T',
+      subtitle: null,
+      style: 'dark',
+    };
+    const kinds = tokenize(words, [t]).map((k) =>
+      k.kind === 'title' ? `title@${k.before}` : k.kind,
+    );
+    expect(kinds).toEqual(['word', 'title@1', 'word', 'word', 'word']);
+    const late: TitleEdit = { ...t, at: 19 };
+    expect(tokenize(words, [late]).at(-1)).toMatchObject({ kind: 'title', before: 4 });
   });
 });

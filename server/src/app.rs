@@ -44,6 +44,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library", get(library::list))
         .route("/api/library/{slug}", post(library::open))
         .nest_service("/data", ServeDir::new(&state.config.data_dir))
+        .nest_service("/fonts", ServeDir::new(&state.config.fonts_dir))
         .nest_service(
             "/library",
             ServeDir::new(state.config.samples_dir.join("library")),

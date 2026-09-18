@@ -1,12 +1,14 @@
 // Turning the word list plus the edit list into what the transcript draws.
 
-import { overdubs, wordStatus } from './editlist';
-import type { Edit, OverdubEdit, Word } from './types';
+import { overdubs, titles, wordStatus } from './editlist';
+import type { Edit, OverdubEdit, TitleEdit, Word } from './types';
 
 export type Token =
   | { kind: 'word'; index: number; word: Word }
   | { kind: 'overdub'; overdub: OverdubEdit; first: number; last: number }
-  | { kind: 'gap'; first: number; last: number };
+  | { kind: 'gap'; first: number; last: number }
+  /** A title card, drawn before word `before` (`words.length` past the end). */
+  | { kind: 'title'; title: TitleEdit; before: number };
 
 /**
  * Words, with each overdubbed run collapsed into one token showing its new
@@ -15,6 +17,10 @@ export type Token =
 export function tokenize(words: Word[], edits: Edit[], showCuts = true): Token[] {
   const tokens: Token[] = [];
   const dubs = overdubs(edits);
+  // Title cards, earliest first, each emitted before the word its instant
+  // falls in — so a title at a word's exact start reads before that word.
+  const cards = titles(edits).sort((a, b) => a.at - b.at);
+  let card = 0;
   const covered = (word: Word | undefined, od: OverdubEdit) =>
     word !== undefined && wordStatus(word, [od]) === 'overdub';
   const isCut = (word: Word | undefined) => word !== undefined && wordStatus(word, edits) === 'cut';
@@ -23,6 +29,12 @@ export function tokenize(words: Word[], edits: Edit[], showCuts = true): Token[]
   while (i < words.length) {
     const word = words[i];
     if (!word) break;
+    while (card < cards.length) {
+      const title = cards[card];
+      if (!title || title.at >= word.end) break;
+      tokens.push({ kind: 'title', title, before: i });
+      card++;
+    }
     const od = dubs.find((d) => covered(word, d));
     if (od) {
       let last = i;
@@ -39,17 +51,28 @@ export function tokenize(words: Word[], edits: Edit[], showCuts = true): Token[]
       i++;
     }
   }
+  for (; card < cards.length; card++) {
+    const title = cards[card];
+    if (title) tokens.push({ kind: 'title', title, before: words.length });
+  }
   return tokens;
 }
 
 /** Index of the first transcript word a token stands for. */
 export function tokenStart(token: Token): number {
-  return token.kind === 'word' ? token.index : token.first;
+  if (token.kind === 'word') return token.index;
+  if (token.kind === 'title') return token.before;
+  return token.first;
 }
 
 /** Index of the last transcript word a token stands for. */
 export function tokenEnd(token: Token): number {
-  return token.kind === 'word' ? token.index : token.last;
+  if (token.kind === 'word') return token.index;
+  // A title stands between words rather than over one, so it starts and ends
+  // at the word it precedes; past the last word that index is `words.length`,
+  // which no word ever equals, so it claims nothing.
+  if (token.kind === 'title') return token.before;
+  return token.last;
 }
 
 /** Whether word `index` falls inside `turn`. */

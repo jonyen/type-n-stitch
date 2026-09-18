@@ -193,6 +193,7 @@ async fn import(state: &AppState, entry: &Entry) -> AppResult<Meta> {
         ext,
         duration: probe.duration,
         kind: probe.kind,
+        video: probe.video,
     };
     tokio::fs::write(dir.join("meta.json"), serde_json::to_vec_pretty(&meta)?)
         .await

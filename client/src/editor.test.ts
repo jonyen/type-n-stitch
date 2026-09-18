@@ -237,3 +237,63 @@ describe('remote', () => {
     expect(remote(2).headSeq).toBe(3);
   });
 });
+
+describe('titles, captions and transitions', () => {
+  const t = { at: 1.25, duration: 3, text: 'Intro', subtitle: null, style: 'dark' as const };
+  it('adds, edits and removes a title', () => {
+    let s = editorReducer(loaded, { type: 'addTitle', ...t });
+    expect(s.edits).toEqual([{ kind: 'title', ...t }]);
+    s = editorReducer(s, { type: 'editTitle', ...t, text: 'Part 2', style: 'accent' });
+    expect(s.edits[0]).toMatchObject({ text: 'Part 2', style: 'accent' });
+    s = editorReducer(s, { type: 'removeTitle', at: 1.25 });
+    expect(s.edits).toEqual([]);
+  });
+  it('edits only the first title at an instant, as the engine fold does', () => {
+    let s = editorReducer(loaded, { type: 'addTitle', ...t });
+    s = editorReducer(s, { type: 'addTitle', ...t, text: 'Second' });
+    s = editorReducer(s, { type: 'editTitle', ...t, text: 'Only me' });
+    expect(s.edits.map((e) => (e.kind === 'title' ? e.text : e.kind))).toEqual([
+      'Only me',
+      'Second',
+    ]);
+  });
+  it('captions cover the selection and replace overlapping ones', () => {
+    let s = editorReducer(select(loaded, 1, 2), {
+      type: 'addCaption',
+      text: 'A',
+      position: 'bottomLeft',
+    });
+    s = editorReducer(select(s, 2, 3), { type: 'addCaption', text: 'B', position: 'bottomLeft' });
+    expect(s.edits).toEqual([
+      { kind: 'caption', start: 1.25, end: 20, text: 'B', position: 'bottomLeft' },
+    ]);
+    s = editorReducer(s, { type: 'removeCaption', start: 1.25 });
+    expect(s.edits).toEqual([]);
+  });
+  it('captions an explicit range even with no selection left', () => {
+    const s = editorReducer(loaded, {
+      type: 'addCaption',
+      text: 'A',
+      position: 'bottomLeft',
+      range: [1, 2],
+    });
+    expect(s.edits).toEqual([
+      { kind: 'caption', start: 0.91, end: 2.0, text: 'A', position: 'bottomLeft' },
+    ]);
+  });
+  it('sets the project transition and a per-cut override, and sync/remote carry it', () => {
+    let s = editorReducer(loaded, { type: 'setTransition', transition: 'dip' });
+    expect(s.transition).toBe('dip');
+    s = editorReducer(select(s, 0), { type: 'deleteSelection' });
+    s = editorReducer(s, { type: 'setCutTransition', start: 0, transition: 'none' });
+    expect(s.edits[0]).toMatchObject({ kind: 'cut', transition: 'none' });
+    s = editorReducer(s, {
+      type: 'remote',
+      headSeq: 9,
+      edits: [],
+      speakerNames: [],
+      transition: 'none',
+    });
+    expect(s.transition).toBe('none');
+  });
+});

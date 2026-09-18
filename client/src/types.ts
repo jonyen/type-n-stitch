@@ -13,8 +13,17 @@ export interface Range {
   end: number;
 }
 
+/** How two output pieces meet. `crossfade` is reserved: the server rejects it. */
+export type Transition = 'none' | 'dip' | 'crossfade';
+
+export type TitleStyle = 'dark' | 'light' | 'accent';
+
+export type CaptionPos = 'bottomLeft' | 'bottomCenter' | 'topLeft';
+
 export interface CutEdit extends Range {
   kind: 'cut';
+  /** Overrides the project transition where this cut joins its neighbours. */
+  transition?: Transition;
 }
 
 export interface OverdubEdit extends Range {
@@ -24,7 +33,24 @@ export interface OverdubEdit extends Range {
   audioDuration: number;
 }
 
-export type Edit = CutEdit | OverdubEdit;
+/** A card inserted at source instant `at`; the output grows by `duration`. */
+export interface TitleEdit {
+  kind: 'title';
+  at: number;
+  duration: number;
+  text: string;
+  subtitle: string | null;
+  style: TitleStyle;
+}
+
+/** Text drawn over the picture for `[start, end)`; the output length is unchanged. */
+export interface CaptionEdit extends Range {
+  kind: 'caption';
+  text: string;
+  position: CaptionPos;
+}
+
+export type Edit = CutEdit | OverdubEdit | TitleEdit | CaptionEdit;
 
 export type MediaKind = 'audio' | 'video';
 

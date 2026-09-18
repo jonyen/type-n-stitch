@@ -11,12 +11,14 @@ import {
   type Realtime,
   type ServerMsg,
 } from './realtime';
-import type { Edit } from './types';
+import type { Edit, Transition } from './types';
 
 export interface RemoteDoc {
   headSeq: number;
   edits: Edit[];
   speakerNames: string[];
+  /** Absent on folds from a server that does not know transitions yet. */
+  transition?: Transition;
 }
 
 /**

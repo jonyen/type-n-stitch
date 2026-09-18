@@ -1,10 +1,13 @@
 //! Edit-list math: turning a list of cuts and overdubs into a timeline and
 //! mapping times between the source and the rendered output.
 
-use crate::types::{Edit, Range};
+use crate::types::{Edit, Range, Transition};
 
 /// Two ranges closer than this are treated as touching.
-const EPS: f64 = 1e-6;
+pub const EPS: f64 = 1e-6;
+
+/// Length of a dip-to-black on either side of a join.
+pub const FADE: f64 = 0.25;
 
 /// One piece of the rendered output, in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +25,8 @@ pub enum SegmentKind {
     Source,
     /// Frozen first frame of `source` with `edits[index]`'s audio.
     Overdub { index: usize },
+    /// A title card: no source picture, `edits[index]`'s text for its duration.
+    Title { index: usize },
 }
 
 /// Sort cuts and merge any that overlap or touch. Empty ranges are dropped.
@@ -44,7 +49,7 @@ fn cut_ranges(edits: &[Edit]) -> Vec<Range> {
         .iter()
         .filter_map(|e| match e {
             Edit::Cut { .. } => Some(e.range()),
-            Edit::Overdub { .. } => None,
+            _ => None,
         })
         .collect()
 }
@@ -74,21 +79,33 @@ pub fn kept_segments(duration: f64, edits: &[Edit]) -> Vec<Range> {
 }
 
 /// The rendered output, piece by piece: kept source ranges split around
-/// overdubs, and overdub ranges holding their first frame for the length of
-/// the synthesized audio. Where an overdub overlaps a cut, the overdub wins.
+/// overdubs and title instants, overdub ranges holding their first frame for
+/// the length of the synthesized audio, and title cards holding for their own
+/// duration. Where an overdub overlaps a cut, the overdub wins.
 pub fn timeline(duration: f64, edits: &[Edit]) -> Vec<Segment> {
     let overdubs: Vec<(usize, Range, f64)> = edits
         .iter()
         .enumerate()
         .filter_map(|(i, e)| match e {
             Edit::Overdub { audio_duration, .. } => Some((i, e.range(), *audio_duration)),
-            Edit::Cut { .. } => None,
+            _ => None,
         })
         .filter(|(_, r, _)| !r.is_empty())
         .collect();
+    let titles: Vec<(usize, f64, f64)> = edits
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Edit::Title { at, duration, .. } => Some((i, *at, *duration)),
+            _ => None,
+        })
+        .collect();
 
-    // Source pieces: kept ranges minus every overdub range.
+    // Source pieces: kept ranges minus every overdub range, then split at
+    // every title instant so a title can sit between two halves.
     let overdub_holes = normalize_cuts(&overdubs.iter().map(|(_, r, _)| *r).collect::<Vec<_>>());
+    let mut cut_points: Vec<f64> = titles.iter().map(|(_, at, _)| *at).collect();
+    cut_points.sort_by(|a, b| a.total_cmp(b));
     let mut pieces: Vec<(Range, SegmentKind)> = kept_segments(duration, edits)
         .into_iter()
         .flat_map(|kept| {
@@ -100,13 +117,10 @@ pub fn timeline(duration: f64, edits: &[Edit]) -> Vec<Segment> {
             complement(kept.end, &holes)
                 .into_iter()
                 .filter(move |r| r.end > kept.start + EPS)
-                .map(move |r| {
-                    (
-                        Range::new(r.start.max(kept.start), r.end),
-                        SegmentKind::Source,
-                    )
-                })
+                .map(move |r| Range::new(r.start.max(kept.start), r.end))
         })
+        .flat_map(|r| split_at(r, &cut_points))
+        .map(|r| (r, SegmentKind::Source))
         .collect();
 
     // Overdub pieces sit at their source position but take `audio_duration`.
@@ -115,7 +129,19 @@ pub fn timeline(duration: f64, edits: &[Edit]) -> Vec<Segment> {
             .iter()
             .map(|(index, r, _)| (*r, SegmentKind::Overdub { index: *index })),
     );
-    pieces.sort_by(|a, b| a.0.start.total_cmp(&b.0.start));
+    // Title cards are zero-length in the source and stretch the output.
+    pieces.extend(
+        titles
+            .iter()
+            .map(|(index, at, _)| (Range::new(*at, *at), SegmentKind::Title { index: *index })),
+    );
+    // Stable: titles at one instant keep edit order; a title precedes an
+    // overdub or source piece starting at the same instant.
+    pieces.sort_by(|a, b| {
+        a.0.start
+            .total_cmp(&b.0.start)
+            .then(rank(&a.1).cmp(&rank(&b.1)))
+    });
 
     let mut out_cursor = 0.0;
     pieces
@@ -123,10 +149,13 @@ pub fn timeline(duration: f64, edits: &[Edit]) -> Vec<Segment> {
         .map(|(source, kind)| {
             let out_len = match kind {
                 SegmentKind::Source => source.len(),
-                SegmentKind::Overdub { index } => match &edits[index] {
-                    Edit::Overdub { audio_duration, .. } => *audio_duration,
-                    Edit::Cut { .. } => unreachable!("overdub index points at a cut"),
-                },
+                SegmentKind::Overdub { index } | SegmentKind::Title { index } => {
+                    match &edits[index] {
+                        Edit::Overdub { audio_duration, .. } => *audio_duration,
+                        Edit::Title { duration, .. } => *duration,
+                        _ => unreachable!("segment index points at a non-hold edit"),
+                    }
+                }
             };
             let output = Range::new(out_cursor, out_cursor + out_len);
             out_cursor += out_len;
@@ -139,6 +168,29 @@ pub fn timeline(duration: f64, edits: &[Edit]) -> Vec<Segment> {
         .collect()
 }
 
+/// Ordering of pieces that begin at the same instant.
+fn rank(kind: &SegmentKind) -> u8 {
+    match kind {
+        SegmentKind::Title { .. } => 0,
+        SegmentKind::Overdub { .. } => 1,
+        SegmentKind::Source => 2,
+    }
+}
+
+/// Split `r` at every point strictly inside it.
+fn split_at(r: Range, points: &[f64]) -> Vec<Range> {
+    let mut out = Vec::new();
+    let mut cursor = r.start;
+    for &p in points {
+        if p > cursor + EPS && p < r.end - EPS {
+            out.push(Range::new(cursor, p));
+            cursor = p;
+        }
+    }
+    out.push(Range::new(cursor, r.end));
+    out
+}
+
 /// Total length of the rendered output.
 pub fn output_duration(timeline: &[Segment]) -> f64 {
     timeline.last().map_or(0.0, |s| s.output.end)
@@ -148,10 +200,18 @@ pub fn output_duration(timeline: &[Segment]) -> f64 {
 /// cut closes; times inside an overdub map to where that overdub begins.
 pub fn source_to_output_time(t: f64, timeline: &[Segment]) -> f64 {
     for seg in timeline {
+        if let SegmentKind::Title { .. } = seg.kind {
+            // A title is zero-length in the source: only the exact instant
+            // lands on it, and everything else reads straight through.
+            if (t - seg.source.start).abs() < EPS {
+                return seg.output.start;
+            }
+            continue;
+        }
         if seg.source.contains(t) {
             return match seg.kind {
                 SegmentKind::Source => seg.output.start + (t - seg.source.start),
-                SegmentKind::Overdub { .. } => seg.output.start,
+                _ => seg.output.start,
             };
         }
         if t < seg.source.start {
@@ -168,19 +228,111 @@ pub fn output_to_source_time(t: f64, timeline: &[Segment]) -> f64 {
         if seg.output.contains(t) {
             return match seg.kind {
                 SegmentKind::Source => seg.source.start + (t - seg.output.start),
-                SegmentKind::Overdub { .. } => seg.source.start,
+                _ => seg.source.start,
             };
         }
     }
     timeline.last().map_or(0.0, |s| s.source.end)
 }
 
+/// A caption's visible span inside one segment, in seconds from that
+/// segment's output start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptionWindow {
+    pub index: usize,
+    pub start: f64,
+    pub end: f64,
+}
+
+/// Per segment, every caption that overlaps it. Overdubs hold one frame, so
+/// a caption touching them covers the whole hold; titles get none.
+pub fn caption_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<CaptionWindow>> {
+    segments
+        .iter()
+        .map(|seg| {
+            edits
+                .iter()
+                .enumerate()
+                .filter_map(|(index, e)| {
+                    let Edit::Caption { start, end, .. } = e else {
+                        return None;
+                    };
+                    let cap = Range::new(*start, *end);
+                    match seg.kind {
+                        SegmentKind::Title { .. } => None,
+                        SegmentKind::Overdub { .. } => (cap.start < seg.source.end
+                            && cap.end > seg.source.start)
+                            .then_some(CaptionWindow {
+                                index,
+                                start: 0.0,
+                                end: seg.output.len(),
+                            }),
+                        SegmentKind::Source => {
+                            let a = cap.start.max(seg.source.start);
+                            let b = cap.end.min(seg.source.end);
+                            (b > a + EPS).then_some(CaptionWindow {
+                                index,
+                                start: a - seg.source.start,
+                                end: b - seg.source.start,
+                            })
+                        }
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// How the piece at `after` meets the one following it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Join {
+    pub after: usize,
+    pub transition: Transition,
+}
+
+/// The effective transition at every boundary: both sides of a title dip;
+/// a boundary that is a cut takes the cut's override, else the project
+/// setting; any other boundary (into or out of an overdub) has none.
+pub fn joins(segments: &[Segment], edits: &[Edit], project: Transition) -> Vec<Join> {
+    segments
+        .windows(2)
+        .enumerate()
+        .map(|(after, pair)| {
+            let (a, b) = (&pair[0], &pair[1]);
+            let is_title = |s: &Segment| matches!(s.kind, SegmentKind::Title { .. });
+            let transition = if is_title(a) || is_title(b) {
+                Transition::Dip
+            } else if b.source.start > a.source.end + EPS {
+                edits
+                    .iter()
+                    .find_map(|e| match e {
+                        Edit::Cut {
+                            start,
+                            transition: Some(t),
+                            ..
+                        } if (start - a.source.end).abs() < EPS => Some(*t),
+                        _ => None,
+                    })
+                    .unwrap_or(project)
+            } else {
+                Transition::None
+            };
+            Join { after, transition }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{CaptionPos, TitleStyle, Transition};
 
     fn cut(start: f64, end: f64) -> Edit {
-        Edit::Cut { start, end }
+        Edit::Cut {
+            start,
+            end,
+            transition: None,
+        }
     }
 
     fn overdub(start: f64, end: f64, audio_duration: f64) -> Edit {
@@ -195,6 +347,29 @@ mod tests {
 
     fn r(start: f64, end: f64) -> Range {
         Range::new(start, end)
+    }
+
+    fn title(at: f64, duration: f64) -> Edit {
+        Edit::Title {
+            at,
+            duration,
+            text: "T".into(),
+            subtitle: None,
+            style: TitleStyle::Dark,
+        }
+    }
+
+    fn caption(start: f64, end: f64) -> Edit {
+        Edit::Caption {
+            start,
+            end,
+            text: "c".into(),
+            position: CaptionPos::BottomLeft,
+        }
+    }
+
+    fn kinds(tl: &[Segment]) -> Vec<&SegmentKind> {
+        tl.iter().map(|s| &s.kind).collect()
     }
 
     #[test]
@@ -328,5 +503,162 @@ mod tests {
             let back = output_to_source_time(source_to_output_time(t, &tl), &tl);
             assert!((back - t).abs() < 1e-9, "{t} -> {back}");
         }
+    }
+
+    #[test]
+    fn title_splits_a_kept_piece_and_stretches_the_output() {
+        let tl = timeline(10.0, &[title(4.0, 2.0)]);
+        assert_eq!(tl.len(), 3);
+        assert_eq!(tl[0].source, r(0.0, 4.0));
+        assert_eq!(tl[1].kind, SegmentKind::Title { index: 0 });
+        assert_eq!(tl[1].source, r(4.0, 4.0));
+        assert_eq!(tl[1].output, r(4.0, 6.0));
+        assert_eq!(tl[2].source, r(4.0, 10.0));
+        assert_eq!(tl[2].output, r(6.0, 12.0));
+        assert_eq!(output_duration(&tl), 12.0);
+    }
+
+    #[test]
+    fn title_at_a_cut_boundary_and_inside_a_cut_still_renders() {
+        let tl = timeline(10.0, &[cut(2.0, 4.0), title(2.0, 1.0)]);
+        assert_eq!(
+            kinds(&tl),
+            vec![
+                &SegmentKind::Source,
+                &SegmentKind::Title { index: 1 },
+                &SegmentKind::Source
+            ]
+        );
+        assert_eq!(tl[2].source, r(4.0, 10.0));
+        let tl = timeline(10.0, &[cut(2.0, 4.0), title(3.0, 1.0)]);
+        assert_eq!(
+            kinds(&tl),
+            vec![
+                &SegmentKind::Source,
+                &SegmentKind::Title { index: 1 },
+                &SegmentKind::Source
+            ]
+        );
+        assert_eq!(output_duration(&tl), 9.0);
+    }
+
+    #[test]
+    fn two_titles_at_one_instant_keep_edit_order_and_a_title_precedes_an_overdub_there() {
+        let tl = timeline(
+            10.0,
+            &[title(5.0, 1.0), title(5.0, 2.0), overdub(5.0, 6.0, 0.5)],
+        );
+        assert_eq!(
+            kinds(&tl),
+            vec![
+                &SegmentKind::Source,
+                &SegmentKind::Title { index: 0 },
+                &SegmentKind::Title { index: 1 },
+                &SegmentKind::Overdub { index: 2 },
+                &SegmentKind::Source
+            ]
+        );
+        assert_eq!(tl[2].output, r(6.0, 8.0));
+    }
+
+    #[test]
+    fn title_at_start_and_end() {
+        let tl = timeline(10.0, &[title(0.0, 1.0), title(10.0, 1.0)]);
+        assert_eq!(
+            kinds(&tl),
+            vec![
+                &SegmentKind::Title { index: 0 },
+                &SegmentKind::Source,
+                &SegmentKind::Title { index: 1 }
+            ]
+        );
+        assert_eq!(output_duration(&tl), 12.0);
+    }
+
+    #[test]
+    fn remaps_treat_a_title_like_a_freeze() {
+        let tl = timeline(10.0, &[title(4.0, 2.0)]);
+        assert_eq!(source_to_output_time(4.0, &tl), 4.0);
+        assert_eq!(source_to_output_time(4.5, &tl), 6.5);
+        assert_eq!(output_to_source_time(5.0, &tl), 4.0);
+        assert_eq!(output_to_source_time(6.5, &tl), 4.5);
+    }
+
+    #[test]
+    fn caption_windows_are_segment_relative_and_split_across_a_cut() {
+        let edits = [cut(3.0, 5.0), caption(2.0, 7.0)];
+        let tl = timeline(10.0, &edits);
+        let w = caption_windows(&tl, &edits);
+        assert_eq!(w.len(), tl.len());
+        assert_eq!(
+            w[0],
+            vec![CaptionWindow {
+                index: 1,
+                start: 2.0,
+                end: 3.0
+            }]
+        );
+        assert_eq!(
+            w[1],
+            vec![CaptionWindow {
+                index: 1,
+                start: 0.0,
+                end: 2.0
+            }]
+        );
+    }
+
+    #[test]
+    fn caption_over_an_overdub_covers_its_whole_hold_and_titles_get_none() {
+        let edits = [overdub(2.0, 3.0, 4.0), caption(2.5, 2.8), title(6.0, 1.0)];
+        let tl = timeline(10.0, &edits);
+        let w = caption_windows(&tl, &edits);
+        assert_eq!(
+            w[1],
+            vec![CaptionWindow {
+                index: 1,
+                start: 0.0,
+                end: 4.0
+            }]
+        );
+        let title_i = tl
+            .iter()
+            .position(|s| matches!(s.kind, SegmentKind::Title { .. }))
+            .unwrap();
+        assert!(w[title_i].is_empty());
+    }
+
+    #[test]
+    fn joins_use_cut_override_then_project_and_always_dip_around_titles() {
+        let edits = [
+            Edit::Cut {
+                start: 2.0,
+                end: 3.0,
+                transition: Some(Transition::None),
+            },
+            cut(5.0, 6.0),
+            title(8.0, 1.0),
+            overdub(9.0, 9.5, 1.0),
+        ];
+        let tl = timeline(10.0, &edits);
+        let j = joins(&tl, &edits, Transition::Dip);
+        let by_after: Vec<(usize, Transition)> =
+            j.iter().map(|j| (j.after, j.transition)).collect();
+        // pieces: [0,2) [3,5) [6,8) T [8,9) OD [9.5,10)
+        assert_eq!(
+            by_after,
+            vec![
+                (0, Transition::None),
+                (1, Transition::Dip),
+                (2, Transition::Dip),
+                (3, Transition::Dip),
+                (4, Transition::None),
+                (5, Transition::None)
+            ]
+        );
+        assert_eq!(
+            joins(&tl, &edits, Transition::None)[1].transition,
+            Transition::None
+        );
     }
 }

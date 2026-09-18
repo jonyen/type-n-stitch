@@ -398,6 +398,7 @@ pub mod test_support {
             duration,
             kind: engine::MediaKind::Video,
             url: format!("/data/{id}/source.mp4"),
+            video: None,
         };
         tokio::fs::write(dir.join("meta.json"), serde_json::to_vec(&meta).unwrap())
             .await

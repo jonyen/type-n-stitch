@@ -5,7 +5,7 @@
 import { rangeForWords } from './editlist';
 import type { EditorAction, EditorState } from './editor';
 import { selectedRange } from './editor';
-import type { Edit, Range } from './types';
+import type { CaptionPos, Edit, Range, TitleStyle, Transition } from './types';
 
 export type Op =
   | { kind: 'cut'; start: number; end: number }
@@ -20,7 +20,28 @@ export type Op =
   | { kind: 'applycuts'; cuts: Range[] }
   | { kind: 'renamespeaker'; speaker: number; name: string }
   | { kind: 'undo'; targetSeq: number }
-  | { kind: 'redo'; targetSeq: number };
+  | { kind: 'redo'; targetSeq: number }
+  | {
+      kind: 'addtitle';
+      at: number;
+      duration: number;
+      text: string;
+      subtitle: string | null;
+      style: TitleStyle;
+    }
+  | {
+      kind: 'edittitle';
+      at: number;
+      duration: number;
+      text: string;
+      subtitle: string | null;
+      style: TitleStyle;
+    }
+  | { kind: 'removetitle'; at: number }
+  | { kind: 'addcaption'; start: number; end: number; text: string; position: CaptionPos }
+  | { kind: 'removecaption'; start: number }
+  | { kind: 'settransition'; transition: Transition }
+  | { kind: 'setcuttransition'; start: number; transition: Transition | null };
 
 export type ClientOp = Op & { opId: string };
 
@@ -30,6 +51,8 @@ export interface DocState {
   speakerNames: string[];
   undoable: number | null;
   redoable: number | null;
+  /** The project-wide transition. Absent on folds from an older server. */
+  transition?: Transition;
 }
 
 /**
@@ -66,6 +89,42 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
       return { kind: 'applycuts', cuts: action.cuts.map(({ start, end }) => ({ start, end })) };
     case 'renameSpeaker':
       return { kind: 'renamespeaker', speaker: action.speaker, name: action.name.trim() };
+    case 'addTitle':
+      return {
+        kind: 'addtitle',
+        at: action.at,
+        duration: action.duration,
+        text: action.text,
+        subtitle: action.subtitle,
+        style: action.style,
+      };
+    case 'editTitle':
+      return {
+        kind: 'edittitle',
+        at: action.at,
+        duration: action.duration,
+        text: action.text,
+        subtitle: action.subtitle,
+        style: action.style,
+      };
+    case 'removeTitle':
+      return { kind: 'removetitle', at: action.at };
+    case 'addCaption': {
+      const range = action.range ?? selectedRange(state.selection);
+      if (!range) return null;
+      return {
+        kind: 'addcaption',
+        ...rangeForWords(state.words, range[0], range[1], state.duration),
+        text: action.text,
+        position: action.position,
+      };
+    }
+    case 'removeCaption':
+      return { kind: 'removecaption', start: action.start };
+    case 'setTransition':
+      return { kind: 'settransition', transition: action.transition };
+    case 'setCutTransition':
+      return { kind: 'setcuttransition', start: action.start, transition: action.transition };
     default:
       return null;
   }

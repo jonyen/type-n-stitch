@@ -4,6 +4,11 @@
 //! an overdub, a frozen first frame plus the synthesized WAV), and the pieces
 //! are joined with the `concat` filter. Audio is resampled to a common
 //! format first because `concat` refuses mismatched streams.
+//!
+//! Text is not drawn by ffmpeg: the installed builds have no `drawtext`, so
+//! `crate::text` rasterises title cards and caption boxes into PNGs and this
+//! planner brings them in as extra inputs — a looped still for a title piece,
+//! an `overlay` for a caption.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -11,8 +16,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::editlist::{timeline, Segment, SegmentKind};
-use crate::types::{Edit, MediaKind};
+use serde::{Deserialize, Serialize};
+
+use crate::editlist::{caption_windows, joins, timeline, Segment, SegmentKind, FADE};
+use crate::types::{Edit, MediaKind, Transition};
 
 /// Container/codec for the rendered file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +47,40 @@ impl OutputFormat {
     }
 }
 
+/// Frame size and rate of the source picture.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoInfo {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+}
+
+/// Used when the source's frame size and rate are unknown.
+pub const DEFAULT_VIDEO: VideoInfo = VideoInfo {
+    width: 1280,
+    height: 720,
+    fps: 30.0,
+};
+
+/// The frame size ffmpeg actually decodes, given a display-matrix `rotation`
+/// (degrees, as ffprobe reports it — possibly negative).
+///
+/// ffmpeg autorotates the picture inside the filtergraph, so a quarter-turn
+/// source decodes transposed: title cards and caption placements have to be
+/// rasterised at the swapped size or `concat` rejects them.
+pub fn oriented(video: VideoInfo, rotation: i32) -> VideoInfo {
+    if rotation.rem_euclid(180) == 90 {
+        VideoInfo {
+            width: video.height,
+            height: video.width,
+            ..video
+        }
+    } else {
+        video
+    }
+}
+
 #[derive(Debug)]
 pub struct ExportOptions<'a> {
     pub duration: f64,
@@ -48,6 +89,14 @@ pub struct ExportOptions<'a> {
     pub output: &'a Path,
     /// Local audio file for each overdub edit's `audio_url`.
     pub overdub_audio: &'a HashMap<String, PathBuf>,
+    /// Frame size and rate of the source picture; titles must match it.
+    pub video: Option<VideoInfo>,
+    /// PNG for each `Edit::Title`, by edit index, rendered at the frame size.
+    pub title_images: &'a HashMap<usize, PathBuf>,
+    /// PNG and its `overlay` placement for each `Edit::Caption`, by edit index.
+    pub caption_images: &'a HashMap<usize, (PathBuf, u32, u32)>,
+    /// Transition used at every join that does not override it.
+    pub transition: Transition,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -58,6 +107,10 @@ pub enum ExportError {
     MissingOverdubAudio(String),
     #[error("a video source cannot be exported as {0}")]
     FormatMismatch(&'static str),
+    #[error("no rendered image for title {0}")]
+    MissingTitleImage(usize),
+    #[error("no rendered image for caption {0}")]
+    MissingCaptionImage(usize),
 }
 
 /// Audio format every segment is coerced to before `concat`.
@@ -85,44 +138,128 @@ pub fn build_ffmpeg_args(
         .to_vec();
     args.push(input.to_string_lossy().into_owned());
 
-    // Each overdub WAV is an extra input; remember its index.
-    let mut input_index: HashMap<usize, usize> = HashMap::new();
+    let video_info = opts.video.unwrap_or(DEFAULT_VIDEO);
+    let windows = caption_windows(&segments, edits);
+
+    // Overdub WAVs and title cards become extra inputs, numbered in the order
+    // they are pushed; the source is always input 0.
+    let mut next_input = 1;
+    let mut overdub_input: HashMap<usize, usize> = HashMap::new();
+    let mut title_input: HashMap<usize, usize> = HashMap::new();
     for seg in &segments {
-        if let SegmentKind::Overdub { index } = seg.kind {
-            let Edit::Overdub { audio_url, .. } = &edits[index] else {
+        match seg.kind {
+            SegmentKind::Overdub { index } => {
+                let Edit::Overdub { audio_url, .. } = &edits[index] else {
+                    continue;
+                };
+                let path = opts
+                    .overdub_audio
+                    .get(audio_url)
+                    .ok_or_else(|| ExportError::MissingOverdubAudio(audio_url.clone()))?;
+                overdub_input.insert(index, next_input);
+                next_input += 1;
+                args.push("-i".into());
+                args.push(path.to_string_lossy().into_owned());
+            }
+            // An audio-only export renders no picture, so it needs no card.
+            SegmentKind::Title { index } if render_video => {
+                let path = opts
+                    .title_images
+                    .get(&index)
+                    .ok_or(ExportError::MissingTitleImage(index))?;
+                title_input.insert(index, next_input);
+                next_input += 1;
+                args.extend(["-loop", "1", "-framerate"].map(String::from));
+                args.push(fmt(video_info.fps));
+                args.push("-t".into());
+                args.push(fmt(seg.output.len()));
+                args.push("-i".into());
+                args.push(path.to_string_lossy().into_owned());
+            }
+            _ => {}
+        }
+    }
+    // One input per caption edit, however many pieces it is drawn on.
+    let mut caption_input: HashMap<usize, usize> = HashMap::new();
+    if render_video {
+        for w in windows.iter().flatten() {
+            if caption_input.contains_key(&w.index) {
                 continue;
-            };
-            let path = opts
-                .overdub_audio
-                .get(audio_url)
-                .ok_or_else(|| ExportError::MissingOverdubAudio(audio_url.clone()))?;
-            input_index.insert(index, input_index.len() + 1);
+            }
+            let (path, ..) = opts
+                .caption_images
+                .get(&w.index)
+                .ok_or(ExportError::MissingCaptionImage(w.index))?;
+            caption_input.insert(w.index, next_input);
+            next_input += 1;
             args.push("-i".into());
             args.push(path.to_string_lossy().into_owned());
         }
     }
+    let joins = joins(&segments, edits, opts.transition);
+    // A dip needs room for both halves, so very short pieces stay hard-cut.
+    let dips = |i: usize| segments[i].output.len() >= 2.0 * FADE;
+    let dip_out = |i: usize| {
+        dips(i)
+            && joins
+                .iter()
+                .any(|j| j.after == i && j.transition == Transition::Dip)
+    };
+    let dip_in = |i: usize| {
+        i > 0
+            && dips(i)
+            && joins
+                .iter()
+                .any(|j| j.after + 1 == i && j.transition == Transition::Dip)
+    };
 
     let mut graph = String::new();
     let mut concat_inputs = String::new();
     for (i, seg) in segments.iter().enumerate() {
-        match seg.kind {
-            SegmentKind::Source => {
-                if render_video {
-                    let _ = write!(graph, "{}[v{i}];", video_trim(seg));
-                }
-                let _ = write!(graph, "{}[a{i}];", audio_trim(seg));
+        let hold = seg.output.len();
+        let (v, mut a) = match seg.kind {
+            SegmentKind::Source => (render_video.then(|| video_trim(seg)), audio_trim(seg)),
+            SegmentKind::Overdub { index } => (
+                render_video.then(|| freeze_frame(seg, opts.duration, hold)),
+                overdub_audio(overdub_input[&index], hold),
+            ),
+            SegmentKind::Title { index } => (
+                render_video.then(|| title_still(title_input[&index], hold)),
+                silence(hold),
+            ),
+        };
+        if let Some(base) = v {
+            // `overlay` takes two inputs, so each caption closes the chain so
+            // far under a temporary label and starts a new one from it.
+            let mut chain = base;
+            for (n, w) in windows[i].iter().enumerate() {
+                let label = format!("v{i}c{n}");
+                let _ = write!(graph, "{chain}[{label}];");
+                let (_, x, y) = &opts.caption_images[&w.index];
+                chain = format!(
+                    "[{label}][{}:v]overlay=x={x}:y={y}:enable='between(t,{},{})'",
+                    caption_input[&w.index],
+                    fmt(w.start),
+                    fmt(w.end)
+                );
             }
-            SegmentKind::Overdub { index } => {
-                let hold = seg.output.len();
-                if render_video {
-                    let _ = write!(graph, "{}[v{i}];", freeze_frame(seg, opts.duration, hold));
-                }
-                let _ = write!(graph, "{}[a{i}];", overdub_audio(input_index[&index], hold));
+            // Fades come last so a dip takes the captions with the picture.
+            if dip_in(i) {
+                let _ = write!(chain, ",fade=t=in:st=0:d={}", fmt(FADE));
             }
-        }
-        if render_video {
+            if dip_out(i) {
+                let _ = write!(chain, ",fade=t=out:st={}:d={}", fmt(hold - FADE), fmt(FADE));
+            }
+            let _ = write!(graph, "{chain}[v{i}];");
             let _ = write!(concat_inputs, "[v{i}]");
         }
+        if dip_in(i) {
+            let _ = write!(a, ",afade=t=in:st=0:d={}", fmt(FADE));
+        }
+        if dip_out(i) {
+            let _ = write!(a, ",afade=t=out:st={}:d={}", fmt(hold - FADE), fmt(FADE));
+        }
+        let _ = write!(graph, "{a}[a{i}];");
         let _ = write!(concat_inputs, "[a{i}]");
     }
     let _ = write!(
@@ -146,7 +283,7 @@ pub fn build_ffmpeg_args(
 
 fn video_trim(seg: &Segment) -> String {
     format!(
-        "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS",
+        "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS,setsar=1",
         fmt(seg.source.start),
         fmt(seg.source.end)
     )
@@ -166,7 +303,7 @@ fn freeze_frame(seg: &Segment, duration: f64, hold: f64) -> String {
     let window_end = (seg.source.start + 1.0).min(duration);
     format!(
         "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS,select=eq(n\\,0),\
-         tpad=stop_mode=clone:stop_duration={hold},trim=end={hold},setpts=PTS-STARTPTS",
+         tpad=stop_mode=clone:stop_duration={hold},trim=end={hold},setpts=PTS-STARTPTS,setsar=1",
         fmt(seg.source.start),
         fmt(window_end),
         hold = fmt(hold),
@@ -178,6 +315,22 @@ fn overdub_audio(input: usize, hold: f64) -> String {
     format!(
         "[{input}:a]{AUDIO_NORMALIZE},apad=whole_dur={hold},atrim=end={hold},asetpts=PTS-STARTPTS",
         hold = fmt(hold)
+    )
+}
+
+/// The title card PNG, held for `hold` seconds by its looped input.
+fn title_still(input: usize, hold: f64) -> String {
+    format!(
+        "[{input}:v]format=yuv420p,setsar=1,trim=end={hold},setpts=PTS-STARTPTS",
+        hold = fmt(hold)
+    )
+}
+
+/// Silence under a title card, in the same format as every other piece.
+fn silence(hold: f64) -> String {
+    format!(
+        "anullsrc=r=48000:cl=stereo,atrim=end={},asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE}",
+        fmt(hold)
     )
 }
 
@@ -204,13 +357,40 @@ fn codec_args(format: OutputFormat) -> Vec<&'static str> {
     }
 }
 
+/// Millisecond precision, without trailing zeros: ffmpeg reads `2.75` and
+/// `0` as happily as `2.750`, and the graphs stay readable.
 fn fmt(t: f64) -> String {
-    format!("{t:.3}")
+    if t.abs() < 5e-4 {
+        return "0".into();
+    }
+    let s = format!("{t:.3}");
+    s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{CaptionPos, TitleStyle};
+
+    /// An empty map that lives as long as the test needs it.
+    fn leak<T: 'static>(value: T) -> &'static T {
+        Box::leak(Box::new(value))
+    }
+
+    /// PNG paths keyed by title edit index.
+    fn titles(pairs: &[(usize, &str)]) -> &'static HashMap<usize, PathBuf> {
+        leak(pairs.iter().map(|(i, p)| (*i, PathBuf::from(p))).collect())
+    }
+
+    /// PNG paths and placements keyed by caption edit index.
+    fn captions(pairs: &[(usize, &str, u32, u32)]) -> &'static HashMap<usize, (PathBuf, u32, u32)> {
+        leak(
+            pairs
+                .iter()
+                .map(|(i, p, x, y)| (*i, (PathBuf::from(p), *x, *y)))
+                .collect(),
+        )
+    }
 
     fn opts<'a>(
         kind: MediaKind,
@@ -224,12 +404,90 @@ mod tests {
             format,
             output,
             overdub_audio,
+            video: Some(VideoInfo {
+                width: 1280,
+                height: 720,
+                fps: 30.0,
+            }),
+            title_images: titles(&[]),
+            caption_images: captions(&[]),
+            transition: Transition::None,
         }
     }
 
-    fn graph(args: &[String]) -> &str {
+    fn filter_complex(args: &[String]) -> &str {
         let i = args.iter().position(|a| a == "-filter_complex").unwrap();
         &args[i + 1]
+    }
+
+    fn cut(start: f64, end: f64) -> Edit {
+        Edit::Cut {
+            start,
+            end,
+            transition: None,
+        }
+    }
+
+    /// Plan `edits` with the default options and return the filter graph.
+    fn graph(edits: &[Edit], kind: MediaKind, format: OutputFormat) -> String {
+        graph_with(edits, kind, format, |_| {})
+    }
+
+    /// Same, with a chance to tweak the options first.
+    fn graph_with(
+        edits: &[Edit],
+        kind: MediaKind,
+        format: OutputFormat,
+        tweak: impl FnOnce(&mut ExportOptions),
+    ) -> String {
+        let args = args_with(edits, kind, format, tweak).unwrap();
+        filter_complex(&args).to_owned()
+    }
+
+    /// The whole argv, so tests can look at the inputs as well as the graph.
+    fn args_with(
+        edits: &[Edit],
+        kind: MediaKind,
+        format: OutputFormat,
+        tweak: impl FnOnce(&mut ExportOptions),
+    ) -> Result<Vec<String>, ExportError> {
+        let none = HashMap::new();
+        let out = PathBuf::from(format!("out.{}", format.extension()));
+        let mut options = opts(kind, format, &out, &none);
+        tweak(&mut options);
+        let input = if kind == MediaKind::Video {
+            "in.mp4"
+        } else {
+            "in.mp3"
+        };
+        build_ffmpeg_args(Path::new(input), edits, &options)
+    }
+
+    /// Does `args` contain `needle` as a contiguous run?
+    fn has_run(args: &[String], needle: &[&str]) -> bool {
+        args.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn oriented_swaps_only_on_a_quarter_turn() {
+        let v = VideoInfo {
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+        };
+        let swapped = VideoInfo {
+            width: 1080,
+            height: 1920,
+            fps: 30.0,
+        };
+        assert_eq!(oriented(v, 0), v);
+        assert_eq!(oriented(v, 180), v);
+        assert_eq!(oriented(v, -180), v);
+        assert_eq!(oriented(v, 360), v);
+        assert_eq!(oriented(v, 90), swapped);
+        assert_eq!(oriented(v, -90), swapped);
+        assert_eq!(oriented(v, 270), swapped);
+        assert_eq!(oriented(v, -270), swapped);
     }
 
     #[test]
@@ -239,6 +497,7 @@ mod tests {
         let edits = [Edit::Cut {
             start: 2.0,
             end: 4.0,
+            transition: None,
         }];
         let args = build_ffmpeg_args(
             Path::new("in.mp4"),
@@ -251,9 +510,9 @@ mod tests {
             &args[..6],
             &["-y", "-hide_banner", "-loglevel", "error", "-i", "in.mp4"]
         );
-        let g = graph(&args);
-        assert!(g.contains("[0:v]trim=start=0.000:end=2.000,setpts=PTS-STARTPTS[v0]"));
-        assert!(g.contains("[0:a]atrim=start=4.000:end=10.000,asetpts=PTS-STARTPTS"));
+        let g = filter_complex(&args);
+        assert!(g.contains("[0:v]trim=start=0:end=2,setpts=PTS-STARTPTS,setsar=1[v0]"));
+        assert!(g.contains("[0:a]atrim=start=4:end=10,asetpts=PTS-STARTPTS"));
         assert!(g.ends_with("[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"));
         assert!(args.windows(2).any(|w| w == ["-map", "[outv]"]));
         assert!(args.windows(2).any(|w| w == ["-c:v", "libx264"]));
@@ -283,13 +542,13 @@ mod tests {
         .unwrap();
 
         assert!(args.windows(2).any(|w| w == ["-i", "/srv/od-0.wav"]));
-        let g = graph(&args);
+        let g = filter_complex(&args);
         assert!(g.contains(
-            "[0:v]trim=start=3.000:end=4.000,setpts=PTS-STARTPTS,select=eq(n\\,0),\
-             tpad=stop_mode=clone:stop_duration=2.500,trim=end=2.500,setpts=PTS-STARTPTS[v1]"
+            "[0:v]trim=start=3:end=4,setpts=PTS-STARTPTS,select=eq(n\\,0),\
+             tpad=stop_mode=clone:stop_duration=2.5,trim=end=2.5,setpts=PTS-STARTPTS,setsar=1[v1]"
         ));
         assert!(g.contains("[1:a]aresample=48000"));
-        assert!(g.contains("apad=whole_dur=2.500,atrim=end=2.500,asetpts=PTS-STARTPTS[a1]"));
+        assert!(g.contains("apad=whole_dur=2.5,atrim=end=2.5,asetpts=PTS-STARTPTS[a1]"));
         assert!(g.contains("concat=n=3:v=1:a=1[outv][outa]"));
     }
 
@@ -300,6 +559,7 @@ mod tests {
         let edits = [Edit::Cut {
             start: 0.0,
             end: 1.0,
+            transition: None,
         }];
         let args = build_ffmpeg_args(
             Path::new("in.mp3"),
@@ -307,7 +567,7 @@ mod tests {
             &opts(MediaKind::Audio, OutputFormat::Mp3, out, &none),
         )
         .unwrap();
-        let g = graph(&args);
+        let g = filter_complex(&args);
         assert!(!g.contains("[0:v]"));
         assert!(g.ends_with("[a0]concat=n=1:v=0:a=1[outa]"));
         assert!(!args.iter().any(|a| a == "[outv]"));
@@ -324,7 +584,7 @@ mod tests {
             &opts(MediaKind::Video, OutputFormat::Wav, out, &none),
         )
         .unwrap();
-        assert!(!graph(&args).contains("[0:v]"));
+        assert!(!filter_complex(&args).contains("[0:v]"));
         assert!(args.windows(2).any(|w| w == ["-c:a", "pcm_s16le"]));
     }
 
@@ -335,6 +595,7 @@ mod tests {
         let edits = [Edit::Cut {
             start: 0.0,
             end: 10.0,
+            transition: None,
         }];
         let err = build_ffmpeg_args(
             Path::new("in.mp4"),
@@ -379,5 +640,275 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, ExportError::FormatMismatch("mp4"));
+    }
+
+    #[test]
+    fn title_piece_uses_a_looped_png_input() {
+        let edits = [Edit::Title {
+            at: 2.0,
+            duration: 3.0,
+            text: "Hello".into(),
+            subtitle: Some("sub".into()),
+            style: TitleStyle::Accent,
+        }];
+        let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.title_images = titles(&[(0, "/imgs/title-0.png")])
+        })
+        .unwrap();
+        assert!(
+            has_run(
+                &args,
+                &[
+                    "-loop",
+                    "1",
+                    "-framerate",
+                    "30",
+                    "-t",
+                    "3",
+                    "-i",
+                    "/imgs/title-0.png"
+                ]
+            ),
+            "{args:?}"
+        );
+        let g = filter_complex(&args);
+        assert!(
+            g.contains("[1:v]format=yuv420p,setsar=1,trim=end=3,setpts=PTS-STARTPTS"),
+            "{g}"
+        );
+        // A title always dips into and out of its neighbours.
+        assert!(
+            g.contains("fade=t=in:st=0:d=0.25,fade=t=out:st=2.75:d=0.25[v1]"),
+            "{g}"
+        );
+        assert!(g.contains("anullsrc=r=48000:cl=stereo,atrim=end=3"), "{g}");
+        assert!(g.contains("concat=n=3:v=1:a=1"), "{g}");
+    }
+
+    #[test]
+    fn title_without_video_info_uses_the_default_frame_rate() {
+        let edits = [Edit::Title {
+            at: 2.0,
+            duration: 1.0,
+            text: "T".into(),
+            subtitle: None,
+            style: TitleStyle::Dark,
+        }];
+        let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.video = None;
+            o.title_images = titles(&[(0, "/imgs/t.png")]);
+        })
+        .unwrap();
+        assert!(has_run(&args, &["-framerate", "30", "-t", "1"]), "{args:?}");
+    }
+
+    #[test]
+    fn audio_only_export_keeps_title_silence_and_skips_captions() {
+        let edits = [
+            Edit::Title {
+                at: 2.0,
+                duration: 1.0,
+                text: "T".into(),
+                subtitle: None,
+                style: TitleStyle::Dark,
+            },
+            Edit::Caption {
+                start: 3.0,
+                end: 4.0,
+                text: "c".into(),
+                position: CaptionPos::BottomLeft,
+            },
+        ];
+        // No images at all: an audio-only export must not need or add them.
+        let args = args_with(&edits, MediaKind::Audio, OutputFormat::Mp3, |_| {}).unwrap();
+        assert!(!args.iter().any(|a| a == "-loop"), "{args:?}");
+        assert_eq!(args.iter().filter(|a| *a == "-i").count(), 1, "{args:?}");
+        let g = filter_complex(&args);
+        assert!(g.contains("anullsrc"), "{g}");
+        assert!(!g.contains("overlay"), "{g}");
+        assert!(g.contains("concat=n=3:v=0:a=1"), "{g}");
+    }
+
+    #[test]
+    fn caption_overlays_its_segment_with_an_enable_window() {
+        let edits = [
+            cut(3.0, 5.0),
+            Edit::Caption {
+                start: 2.0,
+                end: 7.0,
+                text: "Ada".into(),
+                position: CaptionPos::BottomCenter,
+            },
+        ];
+        let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.caption_images = captions(&[(1, "/imgs/cap-1.png", 64, 540)])
+        })
+        .unwrap();
+        assert!(has_run(&args, &["-i", "/imgs/cap-1.png"]), "{args:?}");
+        let g = filter_complex(&args);
+        assert!(
+            g.contains("overlay=x=64:y=540:enable='between(t,2,3)'"),
+            "{g}"
+        );
+        assert!(g.contains("enable='between(t,0,2)'"), "{g}");
+        // The overlay is a two-input filter, so the piece is built as a chain
+        // and concat still consumes one label per piece.
+        assert!(g.contains("[1:v]overlay="), "{g}");
+        assert!(g.contains("[v0][a0][v1][a1]concat=n=2:v=1:a=1"), "{g}");
+    }
+
+    #[test]
+    fn captions_fade_with_the_picture() {
+        let edits = [
+            cut(3.0, 5.0),
+            Edit::Caption {
+                start: 0.0,
+                end: 3.0,
+                text: "Ada".into(),
+                position: CaptionPos::BottomLeft,
+            },
+        ];
+        let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.caption_images = captions(&[(1, "/imgs/cap-1.png", 64, 540)]);
+            o.transition = Transition::Dip;
+        });
+        assert!(g.contains("enable='between(t,0,3)',fade=t=out"), "{g}");
+    }
+
+    #[test]
+    fn missing_title_image_is_an_error() {
+        let edits = [Edit::Title {
+            at: 2.0,
+            duration: 1.0,
+            text: "T".into(),
+            subtitle: None,
+            style: TitleStyle::Dark,
+        }];
+        let err = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap_err();
+        assert_eq!(err, ExportError::MissingTitleImage(0));
+    }
+
+    #[test]
+    fn missing_caption_image_is_an_error() {
+        let edits = [
+            cut(3.0, 5.0),
+            Edit::Caption {
+                start: 2.0,
+                end: 7.0,
+                text: "Ada".into(),
+                position: CaptionPos::BottomLeft,
+            },
+        ];
+        let err = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap_err();
+        assert_eq!(err, ExportError::MissingCaptionImage(1));
+    }
+
+    /// A title, an overdub and a caption together: the inputs are numbered in
+    /// the order the planner pushes them (overdubs and titles in timeline
+    /// order, then one input per caption), and every `[N:v]`/`[N:a]` label in
+    /// the graph names the input at that position.
+    #[test]
+    fn title_overdub_and_caption_inputs_are_numbered_in_graph_order() {
+        let mut audio = HashMap::new();
+        audio.insert("/data/m/od.wav".to_owned(), PathBuf::from("/srv/od.wav"));
+        let edits = [
+            Edit::Title {
+                at: 1.0,
+                duration: 2.0,
+                text: "One".into(),
+                subtitle: None,
+                style: TitleStyle::Dark,
+            },
+            Edit::Overdub {
+                start: 4.0,
+                end: 5.0,
+                text: "hi".into(),
+                audio_url: "/data/m/od.wav".into(),
+                audio_duration: 1.5,
+            },
+            Edit::Caption {
+                start: 6.0,
+                end: 8.0,
+                text: "Ada".into(),
+                position: CaptionPos::BottomLeft,
+            },
+        ];
+        let out = PathBuf::from("out.mp4");
+        let mut options = opts(MediaKind::Video, OutputFormat::Mp4, &out, &audio);
+        options.title_images = titles(&[(0, "/imgs/title-0.png")]);
+        options.caption_images = captions(&[(2, "/imgs/cap-2.png", 64, 540)]);
+        let args = build_ffmpeg_args(Path::new("in.mp4"), &edits, &options).unwrap();
+
+        // The files given to `-i`, in argv order: source, title, overdub, caption.
+        let inputs: Vec<&str> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "-i" && *i + 1 < args.len())
+            .map(|(i, _)| args[i + 1].as_str())
+            .collect();
+        assert_eq!(
+            inputs,
+            [
+                "in.mp4",
+                "/imgs/title-0.png",
+                "/srv/od.wav",
+                "/imgs/cap-2.png"
+            ],
+            "{args:?}"
+        );
+        // The title's looped still is the input right before its PNG.
+        assert!(
+            has_run(
+                &args,
+                &[
+                    "-loop",
+                    "1",
+                    "-framerate",
+                    "30",
+                    "-t",
+                    "2",
+                    "-i",
+                    "/imgs/title-0.png"
+                ]
+            ),
+            "{args:?}"
+        );
+
+        let g = filter_complex(&args);
+        // Each label points at the input at that position: 1 is the title
+        // still, 2 the overdub WAV, 3 the caption overlay.
+        assert!(g.contains("[1:v]format=yuv420p"), "{g}");
+        assert!(g.contains("[2:a]aresample=48000"), "{g}");
+        assert!(g.contains("[3:v]overlay=x=64:y=540"), "{g}");
+        // Nothing refers to an input that was never opened, and no label
+        // reads the source's picture as audio or the still as a waveform.
+        assert!(!g.contains("[4:"), "{g}");
+        assert!(!g.contains("[1:a]"), "{g}");
+        assert!(!g.contains("[2:v]"), "{g}");
+        assert!(!g.contains("[3:a]"), "{g}");
+    }
+
+    #[test]
+    fn dip_adds_fade_pairs_only_at_dipping_joins() {
+        let edits = [cut(3.0, 5.0)];
+        let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.transition = Transition::Dip
+        });
+        assert!(g.contains("fade=t=out:st=2.75:d=0.25"), "{g}");
+        assert!(g.contains("afade=t=out:st=2.75:d=0.25"), "{g}");
+        assert!(g.contains("fade=t=in:st=0:d=0.25"), "{g}");
+        assert!(g.contains("afade=t=in:st=0:d=0.25"), "{g}");
+        let g = graph(&edits, MediaKind::Video, OutputFormat::Mp4);
+        assert!(!g.contains("fade="), "{g}");
+    }
+
+    #[test]
+    fn a_piece_shorter_than_half_a_second_is_not_faded() {
+        let edits = [cut(0.3, 5.0)];
+        let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.transition = Transition::Dip
+        });
+        assert!(!g.contains("fade=t=out"), "{g}");
+        assert!(g.contains("fade=t=in"), "{g}");
     }
 }

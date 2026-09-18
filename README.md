@@ -19,7 +19,11 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    deleted word goes with it and no half-gaps are left behind. Overdubbing a run sends new text
    to VoiceStudio and adds an `overdub` edit carrying the WAV and its duration. Every change is
    an operation appended to the project's log in SQLite; the edit list is the fold of that log,
-   and undo appends an `undo` targeting your own operation. Everyone with the project open holds
+   and undo appends an `undo` targeting your own operation. Titles are cards inserted at an instant —
+   the engine splits the timeline wherever one falls, and the UI places them at word
+   boundaries — captions are text drawn over a word range, and a project-wide (or per-cut) transition
+   dips to black where pieces meet; all three are operations like any other. Everyone with the
+   project open holds
    a WebSocket (`GET /api/projects/:id/ws`); after each append the server pushes its fold to all
    of them, and presence frames carry each person's playhead, selection, caret and whether they
    are playing. Edits still go over `POST …/ops`, one at a time from a queue that retries after a
@@ -30,7 +34,9 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    resumes at the end of the range.
 4. **Export.** The Rust engine turns the edit list into a timeline of output pieces, then into
    one ffmpeg `filter_complex`: `trim`/`atrim` + `setpts` per kept piece, a `select`/`tpad`
-   freeze-frame over the synthesized audio per overdub, and a `concat`. ffmpeg renders an mp4
+   freeze-frame over the synthesized audio per overdub, title cards as looped PNG inputs,
+   `overlay` for captions, and `fade`/`afade` for dip transitions, joined with a `concat`.
+   ffmpeg renders an mp4
    (or mp3/wav for audio-only sources) and the UI offers a download.
 
 ```
@@ -107,6 +113,11 @@ of the operation log is what export renders.
 voice profile; anything that answers `POST /v1/audio/speech` with `response_format: "wav"` will
 do. Without it, the Overdub button explains what's missing and everything else keeps working.
 
+**Titles and captions** use the bundled Inter font (SIL OFL, `engine/assets/inter/`), rasterised
+to PNGs in Rust and composited by ffmpeg's `overlay` — no extra ffmpeg build features
+(`drawtext`/libfreetype) are needed. The same files are served at `/fonts/` so the client's
+preview can match the exported look.
+
 | Variable                     | Default                                                          | Purpose                                                 |
 | ---------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- |
 | `WHISPER_MODEL`              | `models/ggml-large-v3-turbo.bin`                                 | ggml model file for whisper-cli                         |
@@ -119,6 +130,7 @@ do. Without it, the Overdub button explains what's missing and everything else k
 | `TTS_VOICE`                  | `513bb606`                                                       | voice id sent to the TTS server                         |
 | `DATA_DIR`                   | `server/data`                                                    | uploads, transcripts and renders                        |
 | `SAMPLES_DIR`                | `samples`                                                        | sample library manifest and clips                       |
+| `FONTS_DIR`                  | `engine/assets/inter`                                            | font files served at `/fonts/`                          |
 | `PORT`                       | `5175`                                                           | server port                                             |
 | `DATABASE_URL`               | `$DATA_DIR/type-n-stitch.db`                                     | SQLite database location                                |
 | `ADMIN_EMAIL`                | unset                                                            | creates an admin account on first start                 |
@@ -188,6 +200,13 @@ seek to it · shift-click or drag to select a run.
   127.0.0.1, so this is only reachable from your machine; a per-project media route is planned.
 - Presence and the live channel are in-process; running two server instances would split them
   (the `Bus` trait is the seam for a shared implementation).
+- Crossfade transitions are not implemented yet (dip-to-black only).
+- Two title cards at the same instant are edited and removed together: the title operations
+  key on `at`, so they cannot be told apart. The export and the preview still play them in
+  edit order, one after the other.
+- Tightened pauses have no per-cut transition control: the transcript's transition toggle names a
+  cut by the start of the word it begins at, and a pause cut starts inside the silence between two
+  words, so only cuts that begin at a word (hand-made or filler) can be overridden.
 
 ## License
 

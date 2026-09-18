@@ -8,6 +8,9 @@ pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
     pub samples_dir: PathBuf,
+    /// Directory served at `/fonts`, so the browser draws title cards in the
+    /// same face the engine rasterises them with.
+    pub fonts_dir: PathBuf,
     pub whisper_bin: String,
     pub whisper_model: PathBuf,
     pub diarize_bin: PathBuf,
@@ -34,6 +37,10 @@ impl Config {
             samples_dir: PathBuf::from(env(
                 "SAMPLES_DIR",
                 concat!(env!("CARGO_MANIFEST_DIR"), "/../samples"),
+            )),
+            fonts_dir: PathBuf::from(env(
+                "FONTS_DIR",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../engine/assets/inter"),
             )),
             whisper_bin: env("WHISPER_BIN", "whisper-cli"),
             whisper_model: PathBuf::from(env(

@@ -127,6 +127,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                 head_seq,
                 edits: doc.edits,
                 speaker_names: doc.speaker_names,
+                transition: doc.transition,
                 peers,
                 you,
             }
@@ -194,6 +195,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                                 head_seq,
                                 edits: doc.edits,
                                 speaker_names: doc.speaker_names,
+                                transition: doc.transition,
                             },
                             Err(e) => ServerMsg::Error { code: "load".into(), detail: format!("{e:?}") },
                         };
@@ -395,6 +397,10 @@ mod tests {
             assert_eq!(doc["seq"], 1);
             assert_eq!(doc["headSeq"], 1);
             assert_eq!(doc["edits"][0]["start"], 1.0);
+            assert_eq!(
+                doc["transition"], "none",
+                "the fold's transition rides every frame"
+            );
             assert!(
                 doc.get("undoable").is_none(),
                 "per-user fields never ride a broadcast"
@@ -423,6 +429,7 @@ mod tests {
                     head_seq: i,
                     edits: vec![],
                     speaker_names: vec![],
+                    transition: engine::Transition::None,
                 },
             );
         }

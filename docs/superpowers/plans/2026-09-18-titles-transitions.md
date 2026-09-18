@@ -1482,3 +1482,68 @@ git commit -m "README: document titles, captions, transitions and TITLE_FONT"
 **Placeholder scan:** none. Task 7 describes UI wiring in prose with exact prop names and action shapes rather than full component listings; the dialogs copy an existing modal.
 
 **Type consistency:** `Transition`/`TitleStyle`/`CaptionPos` string values match serde (`lowercase` / `camelCase`); op kinds lowercase on both sides; `setcuttransition.transition` is `Transition | null` ↔ `Option<Transition>`; `Edit::Cut.transition` omitted when `None` ↔ optional `transition?`; `DocState.transition` ↔ `EditorState.transition`; `CaptionWindow`/`Join` field names match between engine and the client mirror (`after`, `transition`).
+
+---
+
+## Amendment A (2026-09-18): no `drawtext` — rasterise text in Rust
+
+Discovered during Task 3: every Homebrew ffmpeg build here lacks `drawtext`
+(no libfreetype). The spec's "Rendering text" section now describes the
+replacement. Task 3 as written landed at 019d61d and is superseded by Task 3b;
+Task 4 changes as noted; Task 6 gains the font-face step.
+
+### Task 3b: Engine text raster + overlay-based planner (replaces the drawtext parts of Task 3)
+
+**Files:** create `engine/src/text.rs`; modify `engine/Cargo.toml` (`ab_glyph = "0.2"`, `png = "0.18"`), `engine/src/lib.rs`, `engine/src/ffmpeg.rs` (+ tests), `server/src/routes.rs` (placeholder fields only).
+**Assets:** `engine/assets/inter/Inter-Regular.ttf`, `Inter-SemiBold.ttf`, `LICENSE.txt` (already in the tree, uncommitted — commit them in this task).
+
+**Interfaces:**
+
+```rust
+// engine/src/text.rs
+pub const FONT_REGULAR: &[u8] = include_bytes!("../assets/inter/Inter-Regular.ttf");
+pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../assets/inter/Inter-SemiBold.ttf");
+pub struct Rgba(pub [u8; 4]);
+/// A rendered image: RGBA pixels, row-major.
+pub struct Raster { pub width: u32, pub height: u32, pub rgba: Vec<u8> }
+impl Raster { pub fn to_png(&self) -> Vec<u8>; }
+/// Full-frame title card: background per style, text centred (semibold, height/12),
+/// optional subtitle beneath (regular, height/24). Long text wraps at 80% width.
+pub fn render_title(text: &str, subtitle: Option<&str>, style: TitleStyle, video: VideoInfo) -> Raster;
+/// Caption box: regular, height/28, white on rgba(0,0,0,140), 12 px padding, transparent outside.
+pub struct CaptionBox { pub raster: Raster, pub x: u32, pub y: u32 } // placement for `overlay`
+pub fn render_caption(text: &str, position: CaptionPos, video: VideoInfo) -> CaptionBox;
+```
+
+```rust
+// engine/src/ffmpeg.rs
+pub struct ExportOptions<'a> {
+    …existing…, pub video: Option<VideoInfo>, pub transition: Transition,
+    /// PNG for each `Edit::Title` (by edit index), rendered at the frame size.
+    pub title_images: &'a HashMap<usize, PathBuf>,
+    /// PNG + placement for each `Edit::Caption` (by edit index).
+    pub caption_images: &'a HashMap<usize, (PathBuf, u32, u32)>,
+}
+pub enum ExportError { …, MissingTitleImage(usize), MissingCaptionImage(usize) }
+```
+
+Remove `font` and `drawtext_escape`. Title piece video chain: an extra input `-loop 1 -framerate <fps> -t <dur> -i <png>` (record its input index like overdub WAVs), then `[N:v]format=yuv420p,setsar=1,trim=end=<dur>,setpts=PTS-STARTPTS`. Caption: extra input `-i <png>` once per caption edit; on the containing segment's chain end with `[vX][M:v]overlay=x=<x>:y=<y>:enable='between(t,a,b)'[vX']` — because `overlay` is a two-input filter, build each video piece as a labelled chain: first the trim/title chain to `[pi]`, then for each caption window `[pi][M:v]overlay=…[pi_c1]`, then fades on the final label, then the concat consumes the final label. Dips unchanged (fades apply after overlays so captions fade with the picture).
+
+Tests (replace the drawtext ones from Task 3): `title_piece_uses_a_looped_png_input` (asserts `-loop`,`1`,`-framerate`,`30`,`-t`,`3`,`-i`,`/imgs/title-0.png` in args and `[1:v]format=yuv420p,setsar=1,trim=end=3` in the graph, `anullsrc` audio, `concat=n=3`); `caption_overlays_its_segment_with_an_enable_window` (assert `overlay=x=64:y=540:enable='between(t,2,3)'` and `between(t,0,2)` on the second piece); `missing_title_image_is_an_error`; keep the dip tests and the audio-only test (no `-loop` input for audio-only: the title becomes silence only — do not add the PNG input when `render_video` is false). `text.rs` tests: `render_title` returns `width×height` RGBA with a background pixel of the style colour at (0,0) and at least one text pixel differing from the background near the centre; `render_caption` box smaller than the frame, positioned inside it for each `CaptionPos`, corner pixel transparent, some pixel near the middle white; `to_png` decodes back (use `png::Decoder`) to the same dimensions; wrapping: a 200-char title produces more than one line (assert the text bounding box is taller than one line's height — expose a `pub fn layout_lines(text, font, size, max_width) -> Vec<String>` helper and test it directly).
+
+Real-ffmpeg smoke (ffmpeg is installed, no drawtext needed now): 3 s testsrc, a title at 1 s (2 s), a caption 0.5–2.5 s, a cut 2–2.5 s with `Dip`; render must exit 0 and be 5 s long. Put it in `engine/tests/render.rs` guarded by `which ffmpeg` (skip with a message if absent), writing PNGs via `text::render_*` to a temp dir.
+
+### Task 4 changes
+
+- Drop `TITLE_FONT`/`Config.title_font` and the "font missing → 400" test; instead `export` renders the images: for each `Edit::Title` at index `i`, `text::render_title(...).to_png()` → `data/<media>/title-<i>-<hash>.png` (hash of text+subtitle+style+WxH so re-exports reuse files); captions likewise → `caption-<i>-<hash>.png` with the returned `(x, y)`; pass both maps in `ExportOptions`. Rendering happens on a blocking thread (`tokio::task::spawn_blocking`) since rasterising is CPU work.
+- Serve the font: `app.rs` adds `.nest_service("/fonts", ServeDir::new(<engine assets dir>))` where the dir is `Config.fonts_dir` defaulting to `concat!(env!("CARGO_MANIFEST_DIR"), "/../engine/assets/inter")`.
+- Test: export with a title returns 200 (no font error) and a `title-0-*.png` exists in the media dir afterwards.
+
+### Task 6 changes
+
+- Vite proxy gains `'/fonts': server`.
+- `styles.css`: `@font-face { font-family: 'Inter Title'; src: url('/fonts/Inter-SemiBold.ttf'); font-weight: 600 }` and `{ … Inter-Regular.ttf; font-weight: 400 }`; `.title-card`, `.caption` use `font-family: 'Inter Title', Inter, system-ui, sans-serif`.
+
+### Task 8 changes
+
+- No `TITLE_FONT` row; instead a sentence that titles use the bundled Inter font (SIL OFL) and need no extra ffmpeg features.
