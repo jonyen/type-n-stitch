@@ -119,6 +119,8 @@ pub fn build_ffmpeg_args(
                 }
                 let _ = write!(graph, "{}[a{i}];", overdub_audio(input_index[&index], hold));
             }
+            // Task 3 renders title cards; the planner does not emit them yet.
+            SegmentKind::Title { .. } => unreachable!("title rendering lands in task 3"),
         }
         if render_video {
             let _ = write!(concat_inputs, "[v{i}]");
