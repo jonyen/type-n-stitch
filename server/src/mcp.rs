@@ -19,7 +19,7 @@
 //! same wording the browser does — and renders the JSON.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::extract::{Request, State};
 use axum::http::header;
@@ -194,6 +194,16 @@ impl Agents {
             now.duration_since(last) < idle
         });
         before - live.len()
+    }
+
+    /// Retire one agent by its bot id, whatever it has been doing. Used
+    /// when the token behind it is revoked.
+    pub fn evict(&self, bot_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(bot_id)
+            .is_some()
     }
 
     /// How many agents are live, for tests.
@@ -526,6 +536,9 @@ impl McpSession {
     }
 
     pub(crate) async fn tool_list_projects(&self, identity: &McpIdentity) -> AppResult<Value> {
+        // Nothing here needs the agent, but asking what there is to edit is
+        // not going quiet: keep whatever is open alive.
+        self.agent(identity);
         let summaries = projects::summaries(&self.state, &identity.owner.id).await?;
         Ok(Value::Array(
             summaries
@@ -635,7 +648,8 @@ impl McpSession {
         from: usize,
         to: usize,
     ) -> AppResult<Value> {
-        self.edit(identity, |open| {
+        let agent = self.agent(identity);
+        self.edit(&agent, identity, |open| {
             let range = range_of(open, from, to)?;
             Ok((
                 Some((from, to)),
@@ -663,8 +677,9 @@ impl McpSession {
         to: usize,
         text: &str,
     ) -> AppResult<Value> {
-        // The handle is held for the whole call, so even a slow one outlives
-        // the reaper rather than losing its project halfway through.
+        // Resolved once and used for the rest of the call, so a reaper tick
+        // during the slow part cannot leave the edit looking for an agent
+        // that is no longer the one it started as.
         let agent = self.agent(identity);
         let project = {
             let open = agent.lock().await;
@@ -678,7 +693,7 @@ impl McpSession {
         // Synthesis is the slow part and can fail upstream; do it before the
         // cursor moves, so a failure never leaves a phantom selection.
         let audio = routes::overdub_for(&self.state, &project.media_id, text).await?;
-        self.edit(identity, |open| {
+        self.edit(&agent, identity, |open| {
             let range = range_of(open, from, to)?;
             Ok((
                 Some((from, to)),
@@ -703,7 +718,8 @@ impl McpSession {
         style: Option<&str>,
         duration: Option<f64>,
     ) -> AppResult<Value> {
-        self.edit(identity, |open| {
+        let agent = self.agent(identity);
+        self.edit(&agent, identity, |open| {
             // `-1` is "before the first word", which is the media's start;
             // anything further back is a mistake, not a shorthand.
             let (at, selection) = match after {
@@ -746,7 +762,8 @@ impl McpSession {
         text: &str,
         position: Option<&str>,
     ) -> AppResult<Value> {
-        self.edit(identity, |open| {
+        let agent = self.agent(identity);
+        self.edit(&agent, identity, |open| {
             let range = range_of(open, from, to)?;
             Ok((
                 Some((from, to)),
@@ -768,8 +785,9 @@ impl McpSession {
     ) -> AppResult<Value> {
         // Parsed inside the plan, so an unopened session is told to open a
         // project before it is told how to spell the transition.
+        let agent = self.agent(identity);
         let mut out = self
-            .edit(identity, |_| {
+            .edit(&agent, identity, |_| {
                 let transition = transition_kind(kind)?;
                 Ok((None, Op::SetTransition { transition }))
             })
@@ -802,7 +820,7 @@ impl McpSession {
             project
         };
         let started = routes::start_export(&self.state, &project, format).await?;
-        let deadline = Instant::now() + EXPORT_CAP;
+        let deadline = tokio::time::Instant::now() + EXPORT_CAP;
         loop {
             match routes::export_job(&self.state, &project.media_id, &started.job_id) {
                 Some(ExportJob::Done {
@@ -820,7 +838,7 @@ impl McpSession {
             // A render can take as long as the idle timeout, so say we are
             // still here: waiting for ffmpeg is not going quiet.
             self.agent(identity);
-            if Instant::now() >= deadline {
+            if tokio::time::Instant::now() >= deadline {
                 // Still rendering: hand back the id rather than hold the call
                 // open forever. `export` again later to pick it up.
                 return Ok(json!({ "jobId": started.job_id, "pending": true }));
@@ -838,11 +856,21 @@ impl McpSession {
     /// so the word indices it returns cannot go stale: a concurrent
     /// `open_project` either swaps the transcript before `plan` validates
     /// against it, or waits until this call is finished.
-    async fn edit<F>(&self, identity: &McpIdentity, plan: F) -> AppResult<Value>
+    ///
+    /// The agent is passed in rather than looked up again, because a tool
+    /// that did slow work first (synthesis, a suggestion pass) may have been
+    /// reaped meanwhile: a second lookup would find a fresh, empty entry and
+    /// refuse the edit while the old subscription still sat in the peer list.
+    /// Resolved once, the call finishes on the agent it started as.
+    async fn edit<F>(
+        &self,
+        agent: &Arc<Mutex<Open>>,
+        identity: &McpIdentity,
+        plan: F,
+    ) -> AppResult<Value>
     where
         F: FnOnce(&Open) -> AppResult<(Option<(usize, usize)>, Op)>,
     {
-        let agent = self.agent(identity);
         let open = agent.lock().await;
         let project = require_open(&open, identity)?.clone();
         require_edit(&open)?;
@@ -866,8 +894,9 @@ impl McpSession {
 
     /// `undo` and `redo` share everything but which target they look up.
     async fn step(&self, identity: &McpIdentity, redo: bool) -> AppResult<Value> {
-        // The handle is held for the whole call, so even a slow one outlives
-        // the reaper rather than losing its project halfway through.
+        // Resolved once and used for the rest of the call, so a reaper tick
+        // during the slow part cannot leave the edit looking for an agent
+        // that is no longer the one it started as.
         let agent = self.agent(identity);
         let project = {
             let open = agent.lock().await;
@@ -889,7 +918,7 @@ impl McpSession {
         } else {
             Op::Undo { target_seq: target }
         };
-        self.edit(identity, |_| Ok((None, op))).await
+        self.edit(&agent, identity, |_| Ok((None, op))).await
     }
 
     /// `remove_fillers` and `tighten_pauses`: the engine's suggestions, minus
@@ -899,8 +928,9 @@ impl McpSession {
         identity: &McpIdentity,
         which: Suggestion,
     ) -> AppResult<Value> {
-        // The handle is held for the whole call, so even a slow one outlives
-        // the reaper rather than losing its project halfway through.
+        // Resolved once and used for the rest of the call, so a reaper tick
+        // during the slow part cannot leave the edit looking for an agent
+        // that is no longer the one it started as.
         let agent = self.agent(identity);
         let project = {
             let open = agent.lock().await;
@@ -925,7 +955,7 @@ impl McpSession {
         }
         let applied = cuts.len();
         let mut out = self
-            .edit(identity, |open| {
+            .edit(&agent, identity, |open| {
                 Ok((touched_by(open, &cuts), Op::ApplyCuts { cuts }))
             })
             .await?;
@@ -989,7 +1019,10 @@ impl ServerHandler for McpSession {
              range to point at, so they leave it where it is. All of them return \
              the new counts and the words they touched. `export` renders and waits. Indices are always the \
              transcript's `i`, so call `get_transcript` again after an edit \
-             rather than reusing stale ones.",
+             rather than reusing stale ones. One token is one agent: every \
+             window connected with it shares the project you open and the \
+             cursor you move, and after ten minutes without a call the agent \
+             leaves the project, so open one again before editing.",
         )
     }
 }
@@ -1443,6 +1476,81 @@ mod tests {
             .to_string()
             .contains("open a project first"));
         reaper.abort();
+    }
+
+    #[tokio::test]
+    async fn an_edit_finishes_on_the_agent_it_started_as() {
+        // A tool that does slow work before it edits — synthesis, a
+        // suggestion pass — resolves its agent once. If `edit` looked it up
+        // again it would find a fresh, empty entry after a reaper tick and
+        // refuse, while the old subscription still sat in the peer list.
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let agent = session.agent(&identity);
+        // The reaper fires between resolving the agent and the edit itself.
+        assert_eq!(state.agents.evict_idle(Duration::ZERO), 1);
+        let out = session
+            .edit(&agent, &identity, |open| {
+                let range = range_of(open, 1, 1)?;
+                Ok((
+                    Some((1, 1)),
+                    Op::Cut {
+                        start: range.start,
+                        end: range.end,
+                    },
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(out["headSeq"], 1);
+        assert_eq!(out["touched"][0]["status"], "cut");
+        // And still one peer, not the evicted one plus a new one.
+        assert_eq!(state.bus.peers(&project.id).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn revoking_a_token_retires_its_agent_at_once() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let (_, minted, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                "/api/tokens",
+                Some(&ada),
+                Some(json!({ "label": "laptop" })),
+            ),
+        )
+        .await;
+        let id = minted["id"].as_str().unwrap().to_owned();
+        McpSession::new(state.clone())
+            .tool_open_project(&identity_for(&state, &ada).await, &project.id)
+            .await
+            .unwrap();
+        assert_eq!(state.bus.peers(&project.id).len(), 1);
+        let (status, _, _) = call(
+            app(&state),
+            json_req(
+                Method::DELETE,
+                &format!("/api/tokens/{id}"),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Gone from the project the moment the token was revoked, rather
+        // than ten minutes later.
+        assert_eq!(state.bus.peers(&project.id).len(), 0);
+        assert_eq!(state.agents.len(), 0);
     }
 
     #[tokio::test]

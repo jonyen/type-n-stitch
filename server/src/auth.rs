@@ -210,6 +210,15 @@ pub async fn create_user(
 /// repeat calls for the same owner return the same row. Bots have no
 /// password (`password_hash = ''`) and can never log in — see `login`.
 #[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
+/// The id of the bot that acts for `owner_id`, if one has ever been minted.
+pub async fn bot_id_for(db: &SqlitePool, owner_id: &str) -> AppResult<Option<String>> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE owner_id = ?")
+        .bind(owner_id)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.map(|r| r.0))
+}
+
 pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
     let existing: Option<User> = sqlx::query_as(
         "SELECT id, email, display_name, color, owner_id FROM users WHERE owner_id = ?",

@@ -137,6 +137,13 @@ pub async fn delete(
     UrlPath(id): UrlPath<String>,
 ) -> AppResult<Json<Value>> {
     if revoke(&state.db, &user.id, &id).await? {
+        // A revoked token must stop being a peer at once rather than linger
+        // until it goes idle. The agent belongs to the owner's bot, not to
+        // one token, so revoking any of them retires it; another live token
+        // simply opens a project again on its next call.
+        if let Some(bot) = crate::auth::bot_id_for(&state.db, &user.id).await? {
+            state.agents.evict(&bot);
+        }
         Ok(Json(json!({ "ok": true })))
     } else {
         Err(AppError::not_found("no such token"))
