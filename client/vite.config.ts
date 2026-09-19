@@ -13,6 +13,7 @@ export default defineConfig({
       '/data': server,
       '/library': server,
       '/fonts': server,
+      '/mcp': { target: server, changeOrigin: true },
     },
   },
 });

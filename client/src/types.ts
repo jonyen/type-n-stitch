@@ -85,6 +85,14 @@ export interface User {
   bot?: boolean;
 }
 
+/** An API token minted from the "Connect an agent" dialog (POST /api/tokens). */
+export interface TokenInfo {
+  id: string;
+  label: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
 export type Role = 'owner' | 'editor' | 'commenter' | 'viewer';
 
 export interface ProjectSummary {

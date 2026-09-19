@@ -15,6 +15,7 @@ import {
   uploadMedia,
   type Suggestions,
 } from './api';
+import { AgentDialog } from './components/AgentDialog';
 import { Avatar } from './components/Avatar';
 import { CaptionDialog } from './components/CaptionDialog';
 import { Dropzone } from './components/Dropzone';
@@ -50,6 +51,7 @@ export function App() {
   const [overdubOpen, setOverdubOpen] = useState(false);
   // The title dialog, adding at `at` or editing `initial`.
   const [titleDialog, setTitleDialog] = useState<{ at: number; initial?: TitleEdit } | null>(null);
+  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   // The word range the caption dialog was opened on. Holding it here keeps
   // the dialog mounted (and the caption anchored) when a peer's `sync` clears
   // the selection while someone is still typing.
@@ -441,7 +443,7 @@ export function App() {
     if (!projectId) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (overdubOpen || titleDialog || captionRange) return;
+      if (overdubOpen || titleDialog || captionRange || agentDialogOpen) return;
       if (target?.closest('input, textarea, select, [contenteditable]')) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
@@ -479,6 +481,7 @@ export function App() {
     overdubOpen,
     titleDialog,
     captionRange,
+    agentDialogOpen,
     selectedTitle,
     playback,
     showCuts,
@@ -543,6 +546,9 @@ export function App() {
         {project && <span className="header-file muted">{project.media.filename}</span>}
         {project && <Presence peers={peers} status={status} lastError={lastError} />}
         <Avatar user={user} withName size="sm" />
+        <button type="button" className="ghost" onClick={() => setAgentDialogOpen(true)}>
+          Connect an agent
+        </button>
         <button type="button" className="ghost" onClick={signOut}>
           Sign out
         </button>
@@ -654,6 +660,8 @@ export function App() {
           onCancel={() => setTitleDialog(null)}
         />
       )}
+
+      {agentDialogOpen && <AgentDialog onCancel={() => setAgentDialogOpen(false)} />}
 
       {captionRange && (
         <CaptionDialog
