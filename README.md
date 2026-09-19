@@ -184,6 +184,51 @@ instant preview.
 `Esc` clears the selection · `←` `→` move the selection, with `Shift` extend it · click a word to
 seek to it · shift-click or drag to select a run.
 
+## Agents
+
+Claude Code (or any MCP client) can open a project over `/mcp` and edit it as a peer: it shows
+up in the project like anyone else, with its own cursor and colour, and everyone watching sees
+its selection move just before each edit lands.
+
+From the avatar menu, choose **Connect an agent** to mint an API token. The token is shown once
+— copy it before closing the dialog — and the dialog gives you the ready-to-paste command:
+
+```sh
+claude mcp add --transport http type-n-stitch <origin>/mcp --header "Authorization: Bearer <token>"
+```
+
+Existing tokens are listed in the same dialog, each with a revoke button.
+
+The first time a token is used, the server creates a bot user for it — display name "Claude",
+its own colour — and, when the agent opens a project, adds that bot as a member with your role
+capped at editor (an owner or editor grants editor; a commenter or viewer grants that role
+unchanged). The bot's edits are attributed to it, so `undo`/`redo` only reach its own history,
+never yours.
+
+| Tool                                                   | What it does                                                                                              |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `list_projects()`                                      | Every project you can open, with your role and its duration.                                              |
+| `open_project(project_id)`                             | Opens a project and joins it as a visible peer; returns duration, edit counts and the transcript.         |
+| `get_transcript()`                                     | The open project's transcript, with each word's status under the current edits.                           |
+| `find(text)`                                           | Whole-word search, ignoring case and punctuation; returns inclusive word-index ranges.                    |
+| `look_at(from, to)`                                    | Moves the agent's cursor to a range of words so collaborators can see where it's looking. No edit.        |
+| `cut(from, to)`                                        | Deletes words `from`..`to`, exactly as pressing Delete on that selection would.                           |
+| `remove_fillers()`                                     | Cuts every filler word the engine finds, in one operation.                                                |
+| `tighten_pauses()`                                     | Shortens every long silence the engine finds, in one operation.                                           |
+| `overdub(from, to, text)`                              | Replaces what's said over `from`..`to` with synthesized speech saying `text`.                             |
+| `add_title(after, text, subtitle?, style?, duration?)` | Inserts a full-screen title card just after word `after` (`-1` for before the first word).                |
+| `add_caption(from, to, text, position?)`               | Draws text over the picture while words `from`..`to` play.                                                |
+| `set_transition(kind)`                                 | How pieces meet at every cut: `none` for a hard cut, `dip` to dip through black.                          |
+| `undo()`                                               | Undoes the agent's own most recent edit; other people's edits are theirs to undo.                         |
+| `redo()`                                               | Redoes the edit the agent last undid.                                                                     |
+| `export(format?)`                                      | Renders and waits; returns `{ url, duration, bytes }`, or a job id with `pending: true` past ten minutes. |
+
+Every editing tool moves the agent's cursor onto the words it's about to touch and pauses about
+half a second before applying, so the change is visible to anyone watching. `undo`, `redo`,
+`set_transition` and `add_title` with `after: -1` have no range to point at, so they leave the
+cursor where it is. `export` can take minutes to render; if it's still going after ten minutes
+the tool returns the job id instead of blocking, and calling `export` again picks up the same job.
+
 ## Limitations
 
 - English only (`-l en`), and whisper's word boundaries are what they are: a cut
