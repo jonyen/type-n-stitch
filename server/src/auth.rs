@@ -234,7 +234,7 @@ pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
         bot: false,
     }
     .finish();
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO users (id, email, password_hash, display_name, color, created_at, owner_id)
          VALUES (?, ?, '', ?, ?, ?, ?)",
     )
@@ -245,8 +245,26 @@ pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
     .bind(now())
     .bind(&owner.id)
     .execute(db)
-    .await?;
-    Ok(bot)
+    .await;
+    match inserted {
+        Ok(_) => Ok(bot),
+        // Another call for the same owner won the race between our SELECT
+        // and INSERT and already created the bot (same deterministic
+        // email). Re-read it so both callers agree on one row instead of
+        // one of them surfacing a bare 500.
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            let winner: Option<User> = sqlx::query_as(
+                "SELECT id, email, display_name, color, owner_id FROM users WHERE owner_id = ?",
+            )
+            .bind(&owner.id)
+            .fetch_optional(db)
+            .await?;
+            winner
+                .map(User::finish)
+                .ok_or_else(|| anyhow::anyhow!("bot insert conflicted but no bot row found").into())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn create_session(db: &SqlitePool, user_id: &str) -> AppResult<String> {
@@ -552,5 +570,37 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Several racing `ensure_bot` calls for the same owner all miss the
+    /// `SELECT ... WHERE owner_id = ?` before any of them has inserted, so
+    /// only one INSERT can win — the deterministic email makes the rest
+    /// hit the unique constraint. Every caller must still get back the
+    /// same bot row instead of one of them surfacing a bare 500.
+    #[tokio::test]
+    async fn ensure_bot_survives_a_concurrent_insert_race() {
+        let (state, _d) = state().await;
+        let cookie = register(&state, "ada@example.com").await;
+        let (_, me, _) = call(
+            app(&state),
+            json_req(Method::GET, "/api/me", Some(&cookie), None),
+        )
+        .await;
+        let owner: User = serde_json::from_value(me).unwrap();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let db = state.db.clone();
+            let owner = owner.clone();
+            handles.push(tokio::spawn(async move { ensure_bot(&db, &owner).await }));
+        }
+        let mut ids = Vec::new();
+        for handle in handles {
+            let bot = handle.await.unwrap().unwrap();
+            ids.push(bot.id);
+        }
+        assert!(
+            ids.iter().all(|id| *id == ids[0]),
+            "every racer should agree on one bot: {ids:?}"
+        );
     }
 }
