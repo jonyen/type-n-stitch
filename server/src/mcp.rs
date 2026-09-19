@@ -3,10 +3,15 @@
 //! `/mcp` is rmcp's streamable-HTTP transport nested into the same router as
 //! the browser API. A tower layer in front of it turns an
 //! `Authorization: Bearer` token into the person who minted it plus the bot
-//! user that acts on their behalf; rmcp then builds one [`McpSession`] per
-//! MCP session, which holds the open project and the hub subscription that
-//! makes the agent show up in everyone's peer list. When rmcp drops the
-//! session the subscription goes with it and the hub announces `left`.
+//! user that acts on their behalf.
+//!
+//! What the agent is doing — the project it opened and the hub subscription
+//! that makes it show up in everyone's peer list — does not live in the
+//! [`McpSession`] rmcp hands the request, because on the current protocol
+//! there is no session to live in: the 2026-07-28 lifecycle has none, so
+//! rmcp builds a fresh handler for every single request. It lives in
+//! [`Agents`] on the shared state instead, keyed by the bot behind the
+//! token, and is retired when it has gone quiet for [`IDLE_TIMEOUT`].
 //!
 //! Every `#[tool]` here is a thin wrapper: it pulls the identity out of the
 //! HTTP request parts rmcp forwards, calls the matching `tool_*` function —
@@ -69,9 +74,12 @@ const EXPORT_CAP: Duration = Duration::from_secs(2);
 /// How long a title card stays on screen when the agent does not say.
 const TITLE_SECONDS: f64 = 3.0;
 
-/// An MCP session with no traffic for this long is dropped, which releases
-/// the agent's subscription and clears its cursor from everyone's screen.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+/// An agent that has called nothing for this long is retired, which releases
+/// its subscription and clears its cursor from everyone's screen.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How often the reaper looks for agents that have gone quiet.
+const REAP_EVERY: Duration = Duration::from_secs(30);
 
 /// Who an MCP request acts for: the person who minted the token, and the bot
 /// user that does the editing on their behalf.
@@ -114,10 +122,10 @@ pub async fn bearer_layer(
 }
 
 /// What an open project gives the tools. `subscription` is held only to
-/// exist as a peer: the session never reads its own frames, and dropping it
-/// is what tells everyone else the agent left.
+/// exist as a peer: the agent never reads its own frames, and dropping it is
+/// what tells everyone else the agent left.
 #[derive(Default)]
-struct Open {
+pub struct Open {
     project: Option<Project>,
     role: Option<Role>,
     bot: Option<User>,
@@ -131,12 +139,87 @@ struct Open {
     speakers: Option<Vec<Option<u32>>>,
 }
 
-/// One MCP session. rmcp may clone the handler, so the mutable half lives
-/// behind an `Arc<Mutex<_>>`; the subscription drops with the last clone.
+/// The live agents, one per token owner's bot.
+///
+/// Every request on the 2026-07-28 lifecycle gets its own [`McpSession`], so
+/// an agent cannot be a session: what it has open is kept here, on the shared
+/// state, and found again by the bot id behind the Bearer token. All of one
+/// person's Claude Code instances therefore drive the same agent — the same
+/// open project, the same cursor, the one peer in the project. An entry is
+/// created by the first tool call that needs it, and removed once it has been
+/// idle for [`IDLE_TIMEOUT`], which drops its subscription and announces
+/// `left`.
+#[derive(Default)]
+pub struct Agents {
+    live: std::sync::Mutex<std::collections::HashMap<String, Agent>>,
+}
+
+/// One live agent: what it has open, and when it last did anything. The two
+/// are separate locks because the reaper must read the clock without waiting
+/// behind a tool call that is holding the open project for a slow render.
+struct Agent {
+    open: Arc<Mutex<Open>>,
+    /// Tokio's clock rather than the standard one, so a test can wind it on
+    /// instead of waiting out the timeout.
+    last_used: std::sync::Mutex<tokio::time::Instant>,
+}
+
+impl Agents {
+    /// This bot's agent, created empty if this is its first call, with its
+    /// idle clock reset.
+    fn touch(&self, bot_id: &str) -> Arc<Mutex<Open>> {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let agent = live.entry(bot_id.to_owned()).or_insert_with(|| Agent {
+            open: Arc::new(Mutex::new(Open {
+                // The agent's identity in the peer list, for as long as it
+                // lives: one conn_id across all its calls and projects.
+                conn_id: Uuid::new_v4().to_string(),
+                ..Open::default()
+            })),
+            last_used: std::sync::Mutex::new(tokio::time::Instant::now()),
+        });
+        *agent.last_used.lock().unwrap_or_else(|e| e.into_inner()) = tokio::time::Instant::now();
+        agent.open.clone()
+    }
+
+    /// Retire every agent that has called nothing for `idle`, and say how
+    /// many went. Dropping the entry drops the subscription with it, so the
+    /// people watching the project see the agent leave.
+    pub fn evict_idle(&self, idle: Duration) -> usize {
+        let now = tokio::time::Instant::now();
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let before = live.len();
+        live.retain(|_, agent| {
+            let last = *agent.last_used.lock().unwrap_or_else(|e| e.into_inner());
+            now.duration_since(last) < idle
+        });
+        before - live.len()
+    }
+
+    /// How many agents are live, for tests.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// Retire idle agents for as long as the server runs.
+pub async fn reap_idle_agents(state: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(REAP_EVERY).await;
+        let gone = state.agents.evict_idle(IDLE_TIMEOUT);
+        if gone > 0 {
+            tracing::info!(gone, "retired idle MCP agents");
+        }
+    }
+}
+
+/// One MCP request's handler. It holds nothing of its own beyond the router:
+/// the agent it acts for is looked up in [`AppState::agents`] per call, by
+/// the identity the Bearer token resolved to.
 pub struct McpSession {
     state: Arc<AppState>,
-    inner: Arc<Mutex<Open>>,
-    /// Built once per session and dispatched through by `#[tool_handler]`.
+    /// Built per handler and dispatched through by `#[tool_handler]`.
     tool_router: ToolRouter<McpSession>,
 }
 
@@ -430,12 +513,16 @@ impl McpSession {
     pub fn new(state: Arc<AppState>) -> Self {
         Self {
             state,
-            inner: Arc::new(Mutex::new(Open {
-                conn_id: Uuid::new_v4().to_string(),
-                ..Open::default()
-            })),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// The agent this identity acts as, with its idle clock reset. The
+    /// returned handle keeps the agent alive for the length of the call even
+    /// if the reaper retires it meanwhile, so a slow tool never loses the
+    /// project out from under itself.
+    fn agent(&self, identity: &McpIdentity) -> Arc<Mutex<Open>> {
+        self.state.agents.touch(&identity.bot.id)
     }
 
     pub(crate) async fn tool_list_projects(&self, identity: &McpIdentity) -> AppResult<Value> {
@@ -474,7 +561,8 @@ impl McpSession {
         let (words, speakers) = routes::transcript_for(&self.state, &project.media_id).await?;
         let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
 
-        let mut open = self.inner.lock().await;
+        let agent = self.agent(identity);
+        let mut open = agent.lock().await;
         // Leave whatever was open before, so the agent is never two peers.
         open.subscription = None;
         let subscription =
@@ -504,7 +592,8 @@ impl McpSession {
     }
 
     pub(crate) async fn tool_get_transcript(&self, identity: &McpIdentity) -> AppResult<Value> {
-        let open = self.inner.lock().await;
+        let agent = self.agent(identity);
+        let open = agent.lock().await;
         let project = require_open(&open, identity)?;
         let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
         Ok(serde_json::to_value(transcript(
@@ -515,7 +604,8 @@ impl McpSession {
     }
 
     pub(crate) async fn tool_find(&self, identity: &McpIdentity, text: &str) -> AppResult<Value> {
-        let open = self.inner.lock().await;
+        let agent = self.agent(identity);
+        let open = agent.lock().await;
         require_open(&open, identity)?;
         Ok(Value::Array(
             find_ranges(&open.words, text)
@@ -531,7 +621,8 @@ impl McpSession {
         from: usize,
         to: usize,
     ) -> AppResult<Value> {
-        let open = self.inner.lock().await;
+        let agent = self.agent(identity);
+        let open = agent.lock().await;
         let project = require_open(&open, identity)?;
         let words = words_in(&open, from, to)?;
         self.move_cursor(&open, project, from, to);
@@ -572,8 +663,11 @@ impl McpSession {
         to: usize,
         text: &str,
     ) -> AppResult<Value> {
+        // The handle is held for the whole call, so even a slow one outlives
+        // the reaper rather than losing its project halfway through.
+        let agent = self.agent(identity);
         let project = {
-            let open = self.inner.lock().await;
+            let open = agent.lock().await;
             let project = require_open(&open, identity)?.clone();
             require_edit(&open)?;
             // Checked here too, so nothing is synthesized for a range that
@@ -699,8 +793,11 @@ impl McpSession {
     ) -> AppResult<Value> {
         // The guard is released before the poll loop: a ten-minute render
         // must not hold the session shut.
+        // The handle is held for the whole call, so even a slow one outlives
+        // the reaper rather than losing its project halfway through.
+        let agent = self.agent(identity);
         let project = {
-            let open = self.inner.lock().await;
+            let open = agent.lock().await;
             let project = require_open(&open, identity)?.clone();
             require_edit(&open)?;
             project
@@ -743,7 +840,8 @@ impl McpSession {
     where
         F: FnOnce(&Open) -> AppResult<(Option<(usize, usize)>, Op)>,
     {
-        let open = self.inner.lock().await;
+        let agent = self.agent(identity);
+        let open = agent.lock().await;
         let project = require_open(&open, identity)?.clone();
         require_edit(&open)?;
         let (selection, op) = plan(&open)?;
@@ -766,8 +864,11 @@ impl McpSession {
 
     /// `undo` and `redo` share everything but which target they look up.
     async fn step(&self, identity: &McpIdentity, redo: bool) -> AppResult<Value> {
+        // The handle is held for the whole call, so even a slow one outlives
+        // the reaper rather than losing its project halfway through.
+        let agent = self.agent(identity);
         let project = {
-            let open = self.inner.lock().await;
+            let open = agent.lock().await;
             let project = require_open(&open, identity)?.clone();
             require_edit(&open)?;
             project
@@ -796,8 +897,11 @@ impl McpSession {
         identity: &McpIdentity,
         which: Suggestion,
     ) -> AppResult<Value> {
+        // The handle is held for the whole call, so even a slow one outlives
+        // the reaper rather than losing its project halfway through.
+        let agent = self.agent(identity);
         let project = {
-            let open = self.inner.lock().await;
+            let open = agent.lock().await;
             let project = require_open(&open, identity)?.clone();
             require_edit(&open)?;
             project
@@ -888,7 +992,7 @@ impl ServerHandler for McpSession {
     }
 }
 
-/// A project is open and this session is the one that opened it.
+/// A project is open, and it is this agent's.
 fn require_open<'a>(open: &'a Open, identity: &McpIdentity) -> AppResult<&'a Project> {
     let project = open
         .project
@@ -896,13 +1000,13 @@ fn require_open<'a>(open: &'a Open, identity: &McpIdentity) -> AppResult<&'a Pro
         .ok_or_else(|| AppError::bad_request("open a project first"))?;
     match &open.bot {
         Some(bot) if bot.id == identity.bot.id => Ok(project),
-        // The token changed mid-session: whoever this is has not opened
-        // anything, and must not inherit the previous agent's project.
+        // Belt and braces: agents are already keyed by bot, so nobody can
+        // reach someone else's entry, and nobody inherits their project.
         _ => Err(AppError::bad_request("open a project first")),
     }
 }
 
-/// This session's bot may edit the open project.
+/// This agent's bot may edit the open project.
 fn require_edit(open: &Open) -> AppResult<()> {
     match open.role {
         // The same words `ProjectAccess::require_edit` gives the browser.
@@ -1050,12 +1154,16 @@ fn rendered(result: AppResult<Value>) -> Result<CallToolResult, McpError> {
     }
 }
 
-/// The MCP transport, one session per connected agent.
+/// The MCP transport.
 ///
-/// rmcp keeps a session only for a client that opens with `initialize`;
-/// a client on the stateless discover lifecycle gets a fresh handler per
-/// request, so its second call sees no open project and is told to "open a
-/// project first".
+/// rmcp keeps a session only for a client that opens with `initialize`; on
+/// the 2026-07-28 lifecycle, which is what Claude Code negotiates, SEP-2567
+/// removes sessions altogether and every request gets a fresh handler. So
+/// the handler is stateless on purpose: what the agent has open lives in
+/// [`Agents`], keyed by the bot behind the token. One live agent per token
+/// owner, shared by all their Claude Code instances, retired after ten idle
+/// minutes. `keep_alive` below only bounds the sessions rmcp still keeps for
+/// legacy clients.
 pub fn mcp_service(state: Arc<AppState>) -> StreamableHttpService<McpSession, LocalSessionManager> {
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(IDLE_TIMEOUT);
@@ -1080,6 +1188,13 @@ mod tests {
     use crate::test_util::{
         add_member, app, call, json_req, me, owned_project, register, serve, state, with_bearer,
     };
+
+    /// Let a spawned task run to its next await, on a paused clock.
+    async fn settle() {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
 
     async fn identity_for(state: &Arc<AppState>, cookie: &str) -> McpIdentity {
         let owner = me(state, cookie).await;
@@ -1271,7 +1386,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_the_session_announces_left() {
+    async fn retiring_the_agent_announces_left() {
+        // A handler no longer owns anything, so dropping one changes nothing:
+        // the agent leaves when its entry does.
         let (state, _d) = state().await;
         let ada = register(&state, "ada@example.com").await;
         let project = owned_project(&state, &ada).await;
@@ -1282,7 +1399,77 @@ mod tests {
             .unwrap();
         assert_eq!(state.bus.peers(&project.id).len(), 1);
         drop(session);
+        assert_eq!(state.bus.peers(&project.id).len(), 1);
+        assert_eq!(state.agents.evict_idle(Duration::ZERO), 1);
         assert_eq!(state.bus.peers(&project.id).len(), 0);
+        assert_eq!(state.agents.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_reaper_retires_an_agent_that_has_gone_quiet() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        // Paused only now that the database is up: sqlx's own timeouts fire
+        // instantly against a clock that jumps.
+        tokio::time::pause();
+        let reaper = tokio::spawn(reap_idle_agents(state.clone()));
+
+        // Still working: a call inside the window keeps the agent alive.
+        tokio::time::advance(IDLE_TIMEOUT - Duration::from_secs(1)).await;
+        session.tool_find(&identity, "b").await.unwrap();
+        tokio::time::advance(IDLE_TIMEOUT - Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(state.bus.peers(&project.id).len(), 1, "retired too eagerly");
+
+        // Quiet for the whole timeout: the peer list loses it.
+        tokio::time::advance(IDLE_TIMEOUT + REAP_EVERY).await;
+        settle().await;
+        assert_eq!(state.agents.len(), 0);
+        assert_eq!(state.bus.peers(&project.id).len(), 0);
+        // And the next call starts a fresh agent, with nothing open.
+        assert!(session
+            .tool_find(&identity, "b")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("open a project first"));
+        reaper.abort();
+    }
+
+    #[tokio::test]
+    async fn two_handlers_for_one_token_share_the_open_project() {
+        // Every request on the current lifecycle builds its own handler, so
+        // what the agent has open has to be found by who it is, not by which
+        // handler happens to be asking.
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let bob = register(&state, "bob@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        McpSession::new(state.clone())
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let out = McpSession::new(state.clone())
+            .tool_find(&identity, "b")
+            .await
+            .unwrap();
+        assert_eq!(out, json!([{ "from": 1, "to": 1 }]));
+        // Still one peer: the second handler joined nothing of its own.
+        assert_eq!(state.bus.peers(&project.id).len(), 1);
+        // Somebody else's token is somebody else's agent.
+        let err = McpSession::new(state.clone())
+            .tool_find(&identity_for(&state, &bob).await, "b")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("open a project first"), "{err}");
     }
 
     #[tokio::test]
@@ -1673,8 +1860,9 @@ mod tests {
 
     #[tokio::test]
     async fn end_to_end_over_streamable_http_with_a_browser_peer_watching() {
-        use rmcp::model::CallToolRequestParams;
-        use rmcp::ServiceExt;
+        use rmcp::model::{CallToolRequestParams, ProtocolVersion};
+        use rmcp::ClientLifecycleMode;
+        use rmcp::ClientServiceExt;
 
         let (state, _d) = state().await;
         let ada = register(&state, "ada@example.com").await;
@@ -1717,7 +1905,20 @@ mod tests {
                 format!("{base}/mcp"),
             ),
         );
-        let agent = ().serve(transport).await.unwrap();
+        // Claude Code negotiates 2026-07-28, whose lifecycle has no sessions
+        // at all (SEP-2567): every request is served statelessly, with a
+        // fresh handler. Say so explicitly rather than take rmcp's default
+        // `initialize`, or the test would exercise a lifecycle no real client
+        // of ours uses and would miss the bug entirely.
+        let agent = ()
+            .serve_with_lifecycle(
+                transport,
+                ClientLifecycleMode::Discover {
+                    preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                },
+            )
+            .await
+            .unwrap();
         let tools = agent.list_tools(Default::default()).await.unwrap();
         assert!(tools.tools.iter().any(|t| t.name == "cut"));
         agent
@@ -1755,7 +1956,12 @@ mod tests {
         assert!(saw_doc);
         assert_eq!(state.bus.peers(&project.id).len(), 2);
 
+        // Nothing tells the server an agent has stopped: on this lifecycle
+        // there is no session to end, and closing the client is invisible.
+        // What retires it is going quiet, which is the reaper's job; evict
+        // with a zero idle rather than wait ten minutes for it.
         agent.cancel().await.unwrap();
+        assert_eq!(state.agents.evict_idle(Duration::ZERO), 1);
         let left = loop {
             let f = crate::ws::tests_support::next_json(&mut ws).await;
             if f["t"] == "left" {

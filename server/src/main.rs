@@ -38,6 +38,8 @@ pub struct AppState {
     pub folds: Mutex<HashMap<String, (i64, engine::ProjectDoc)>>,
     /// Fan-out for live edits and presence, one hub per project.
     pub bus: Arc<dyn bus::Bus>,
+    /// The live MCP agents, one per token owner's bot.
+    pub agents: mcp::Agents,
 }
 
 #[tokio::main]
@@ -63,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         folds: Mutex::new(HashMap::new()),
         bus: Arc::new(bus::LocalBus::new()),
+        agents: mcp::Agents::default(),
     });
 
     let app = app::router(state.clone());
@@ -88,6 +91,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tokio::spawn(library::warm(state.clone()));
+    // Nothing else notices an agent that simply stops calling, so a reaper
+    // retires the idle ones and, with them, their place in the peer list.
+    tokio::spawn(mcp::reap_idle_agents(state.clone()));
 
     let addr = format!("127.0.0.1:{}", state.config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

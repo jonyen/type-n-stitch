@@ -41,6 +41,9 @@ schemars = "1"
 tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
+# `test-util` gives the tests a clock they can wind forward, so the idle
+# reaper can be tested without waiting ten real minutes.
+tokio = { version = "1", features = ["full", "test-util"] }
 http-body-util = "0.1"
 tempfile = "3"
 tokio-tungstenite = "0.30"

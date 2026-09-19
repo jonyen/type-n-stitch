@@ -33,6 +33,7 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
         db,
         folds: Mutex::new(HashMap::new()),
         bus: Arc::new(bus::LocalBus::new()),
+        agents: Default::default(),
     });
     (state, dir)
 }

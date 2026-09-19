@@ -205,6 +205,11 @@ capped at editor (an owner or editor grants editor; a commenter or viewer grants
 unchanged). The bot's edits are attributed to it, so `undo`/`redo` only reach its own history,
 never yours.
 
+One token is one agent: the project it has open belongs to the bot, not to a connection, so
+every Claude Code window using the same token drives the same peer — open a project in one and
+the others are already there. An agent that calls nothing for ten minutes is retired and leaves
+the project; the next call starts it again, and it opens a project as usual.
+
 | Tool                                                   | What it does                                                                                              |
 | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
 | `list_projects()`                                      | Every project you can open, with your role and its duration.                                              |
