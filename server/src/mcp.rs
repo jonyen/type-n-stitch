@@ -544,20 +544,16 @@ impl McpSession {
         from: usize,
         to: usize,
     ) -> AppResult<Value> {
-        let range = {
-            let open = self.inner.lock().await;
-            require_open(&open, identity)?;
-            require_edit(&open)?;
-            range_of(&open, from, to)?
-        };
-        self.edit(
-            identity,
-            Some((from, to)),
-            Op::Cut {
-                start: range.start,
-                end: range.end,
-            },
-        )
+        self.edit(identity, |open| {
+            let range = range_of(open, from, to)?;
+            Ok((
+                Some((from, to)),
+                Op::Cut {
+                    start: range.start,
+                    end: range.end,
+                },
+            ))
+        })
         .await
     }
 
@@ -576,27 +572,31 @@ impl McpSession {
         to: usize,
         text: &str,
     ) -> AppResult<Value> {
-        let (project, range) = {
+        let project = {
             let open = self.inner.lock().await;
             let project = require_open(&open, identity)?.clone();
             require_edit(&open)?;
-            let range = range_of(&open, from, to)?;
-            (project, range)
+            // Checked here too, so nothing is synthesized for a range that
+            // cannot land; `edit` checks it again against the live guard.
+            range_of(&open, from, to)?;
+            project
         };
         // Synthesis is the slow part and can fail upstream; do it before the
         // cursor moves, so a failure never leaves a phantom selection.
         let audio = routes::overdub_for(&self.state, &project.media_id, text).await?;
-        self.edit(
-            identity,
-            Some((from, to)),
-            Op::Overdub {
-                start: range.start,
-                end: range.end,
-                text: text.to_owned(),
-                audio_url: audio.audio_url,
-                audio_duration: audio.duration,
-            },
-        )
+        self.edit(identity, |open| {
+            let range = range_of(open, from, to)?;
+            Ok((
+                Some((from, to)),
+                Op::Overdub {
+                    start: range.start,
+                    end: range.end,
+                    text: text.to_owned(),
+                    audio_url: audio.audio_url,
+                    audio_duration: audio.duration,
+                },
+            ))
+        })
         .await
     }
 
@@ -609,35 +609,38 @@ impl McpSession {
         style: Option<&str>,
         duration: Option<f64>,
     ) -> AppResult<Value> {
-        let (at, selection) = {
-            let open = self.inner.lock().await;
-            require_open(&open, identity)?;
-            require_edit(&open)?;
-            // `-1` is "before the first word", which is the media's start.
-            if after < 0 {
-                (0.0, None)
-            } else {
-                let i = after as usize;
-                let word = open.words.get(i).ok_or_else(|| {
-                    AppError::bad_request(format!(
-                        "no word {i} in a transcript of {}",
-                        open.words.len()
-                    ))
-                })?;
-                (word.end, Some((i, i)))
-            }
-        };
-        self.edit(
-            identity,
-            selection,
-            Op::AddTitle {
-                at,
-                duration: duration.unwrap_or(TITLE_SECONDS),
-                text: text.to_owned(),
-                subtitle: subtitle.map(str::to_owned),
-                style: title_style(style)?,
-            },
-        )
+        self.edit(identity, |open| {
+            // `-1` is "before the first word", which is the media's start;
+            // anything further back is a mistake, not a shorthand.
+            let (at, selection) = match after {
+                -1 => (0.0, None),
+                i if i < -1 => {
+                    return Err(AppError::bad_request(format!(
+                        "no word {after}: use -1 for a title before the first word"
+                    )))
+                }
+                _ => {
+                    let i = after as usize;
+                    let word = open.words.get(i).ok_or_else(|| {
+                        AppError::bad_request(format!(
+                            "no word {i} in a transcript of {}",
+                            open.words.len()
+                        ))
+                    })?;
+                    (word.end, Some((i, i)))
+                }
+            };
+            Ok((
+                selection,
+                Op::AddTitle {
+                    at,
+                    duration: duration.unwrap_or(TITLE_SECONDS),
+                    text: text.to_owned(),
+                    subtitle: subtitle.map(str::to_owned),
+                    style: title_style(style)?,
+                },
+            ))
+        })
         .await
     }
 
@@ -649,22 +652,18 @@ impl McpSession {
         text: &str,
         position: Option<&str>,
     ) -> AppResult<Value> {
-        let range = {
-            let open = self.inner.lock().await;
-            require_open(&open, identity)?;
-            require_edit(&open)?;
-            range_of(&open, from, to)?
-        };
-        self.edit(
-            identity,
-            Some((from, to)),
-            Op::AddCaption {
-                start: range.start,
-                end: range.end,
-                text: text.to_owned(),
-                position: caption_position(position)?,
-            },
-        )
+        self.edit(identity, |open| {
+            let range = range_of(open, from, to)?;
+            Ok((
+                Some((from, to)),
+                Op::AddCaption {
+                    start: range.start,
+                    end: range.end,
+                    text: text.to_owned(),
+                    position: caption_position(position)?,
+                },
+            ))
+        })
         .await
     }
 
@@ -673,11 +672,15 @@ impl McpSession {
         identity: &McpIdentity,
         kind: &str,
     ) -> AppResult<Value> {
-        let transition = transition_kind(kind)?;
+        // Parsed inside the plan, so an unopened session is told to open a
+        // project before it is told how to spell the transition.
         let mut out = self
-            .edit(identity, None, Op::SetTransition { transition })
+            .edit(identity, |_| {
+                let transition = transition_kind(kind)?;
+                Ok((None, Op::SetTransition { transition }))
+            })
             .await?;
-        out["transition"] = serde_json::to_value(transition)?;
+        out["transition"] = serde_json::to_value(transition_kind(kind)?)?;
         Ok(out)
     }
 
@@ -727,18 +730,23 @@ impl McpSession {
         }
     }
 
-    /// The shared body of every editing tool: move the cursor onto the words
-    /// about to change, dwell long enough for people watching to see it, then
-    /// append the operation as the bot and report the new document.
-    async fn edit(
-        &self,
-        identity: &McpIdentity,
-        selection: Option<(usize, usize)>,
-        op: Op,
-    ) -> AppResult<Value> {
+    /// The shared body of every editing tool: work out what to do from the
+    /// open project, move the cursor onto the words about to change, dwell
+    /// long enough for people watching to see it, then append the operation
+    /// as the bot and report the new document.
+    ///
+    /// `plan` runs under the same guard that the cursor and the report use,
+    /// so the word indices it returns cannot go stale: a concurrent
+    /// `open_project` either swaps the transcript before `plan` validates
+    /// against it, or waits until this call is finished.
+    async fn edit<F>(&self, identity: &McpIdentity, plan: F) -> AppResult<Value>
+    where
+        F: FnOnce(&Open) -> AppResult<(Option<(usize, usize)>, Op)>,
+    {
         let open = self.inner.lock().await;
         let project = require_open(&open, identity)?.clone();
         require_edit(&open)?;
+        let (selection, op) = plan(&open)?;
         if let Some((from, to)) = selection {
             self.move_cursor(&open, &project, from, to);
         }
@@ -778,7 +786,7 @@ impl McpSession {
         } else {
             Op::Undo { target_seq: target }
         };
-        self.edit(identity, None, op).await
+        self.edit(identity, |_| Ok((None, op))).await
     }
 
     /// `remove_fillers` and `tighten_pauses`: the engine's suggestions, minus
@@ -809,13 +817,11 @@ impl McpSession {
             // Nothing to do, so nothing moves: the cursor stays where it was.
             return Ok(json!({ "applied": 0, "message": which.nothing_found() }));
         }
-        let selection = {
-            let open = self.inner.lock().await;
-            touched_by(&open, &cuts)
-        };
         let applied = cuts.len();
         let mut out = self
-            .edit(identity, selection, Op::ApplyCuts { cuts })
+            .edit(identity, |open| {
+                Ok((touched_by(open, &cuts), Op::ApplyCuts { cuts }))
+            })
             .await?;
         out["applied"] = json!(applied);
         Ok(out)
@@ -824,7 +830,7 @@ impl McpSession {
     /// Put the agent's selection on `from..=to` and tell everyone watching.
     fn move_cursor(&self, open: &Open, project: &Project, from: usize, to: usize) {
         let state = PresenceState {
-            playhead: open.words[from].start,
+            playhead: open.words.get(from).map_or(0.0, |w| w.start),
             selection: Some([from, to]),
             caret: None,
             playing: false,
@@ -868,12 +874,14 @@ impl ServerHandler for McpSession {
              indices, inclusive. `find` locates words to work on and `look_at` \
              moves your cursor, which collaborators watching the project can see. \
              You appear to them as \"Claude\", a peer with its own colour, and your \
-             edits are yours to undo. Every editing tool — `cut`, \
+             edits are yours to undo. The editing tools are `cut`, \
              `remove_fillers`, `tighten_pauses`, `overdub`, `add_title`, \
-             `add_caption`, `set_transition`, `undo`, `redo` — moves your cursor \
-             to what it is about to change and pauses there, so each call takes \
-             about half a second; it then returns the new counts and the words \
-             it touched. `export` renders and waits. Indices are always the \
+             `add_caption`, `set_transition`, `undo` and `redo`. Each pauses \
+             about half a second before it applies, and the ones that work on a \
+             range of words move your cursor onto those words first — `undo`, \
+             `redo`, `set_transition` and `add_title` with `after: -1` have no \
+             range to point at, so they leave it where it is. All of them return \
+             the new counts and the words they touched. `export` renders and waits. Indices are always the \
              transcript's `i`, so call `get_transcript` again after an edit \
              rather than reusing stale ones.",
         )
@@ -925,13 +933,19 @@ fn already_cut(suggested: Range, edits: &[Edit]) -> bool {
 }
 
 /// The span of word indices `cuts` touches, for the cursor to cover.
+///
+/// A word is measured by the stretch it owns rather than by the time it is
+/// spoken: from the end of the word before it to the start of the word after
+/// it (or to the ends of the media). Pause cuts lie entirely *between* words,
+/// so on spoken time alone they would touch nothing at all and the cursor
+/// would never move; on owned stretches the words either side of a gap both
+/// count, which is what someone watching expects to see highlighted.
 fn touched_by(open: &Open, cuts: &[Range]) -> Option<(usize, usize)> {
     let mut span: Option<(usize, usize)> = None;
-    for (i, word) in open.words.iter().enumerate() {
-        if cuts
-            .iter()
-            .any(|c| word.start < c.end && word.end > c.start)
-        {
+    for i in 0..open.words.len() {
+        let from = if i == 0 { 0.0 } else { open.words[i - 1].end };
+        let to = open.words.get(i + 1).map_or(open.duration, |w| w.start);
+        if cuts.iter().any(|c| from < c.end && to > c.start) {
             span = Some(match span {
                 Some((lo, _)) => (lo, i),
                 None => (i, i),
@@ -976,10 +990,14 @@ fn transition_kind(name: &str) -> AppResult<Transition> {
 /// What every editing tool reports: the document's headline numbers after
 /// the edit, plus the words the edit landed on with their new status.
 fn report(open: &Open, doc: &DocState, touched: Option<(usize, usize)>) -> Value {
+    // `touched` comes from a plan validated under the same guard, so the
+    // range always fits; `get` rather than a slice so that a future caller
+    // that forgets gets an empty list instead of a panic.
     let words = match touched {
         Some((from, to)) => transcript(&open.words, open.speakers.as_deref(), &doc.edits)
-            [from..=to.min(open.words.len().saturating_sub(1))]
-            .to_vec(),
+            .get(from..=to)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default(),
         None => Vec::new(),
     };
     json!({
@@ -1221,6 +1239,13 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        // Even a tool whose arguments are wrong says what is actually wrong
+        // first: there is no project open.
+        let err = session
+            .tool_set_transition(&identity_for(&state, &ada).await, "wipe")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("open a project first"), "{err}");
     }
 
     #[tokio::test]
@@ -1474,10 +1499,79 @@ mod tests {
         let out = session.tool_tighten_pauses(&identity).await.unwrap();
         assert!(out["applied"].as_u64().unwrap() >= 1, "{out}");
         assert!(out["outputDuration"].as_f64().unwrap() < 10.0);
+        // A pause lies strictly between two words, so measuring words by the
+        // time they are spoken would light up nothing at all. The cursor has
+        // to land on the words either side of the gap, and the reply has to
+        // name them.
+        assert_eq!(
+            state.bus.peers(&project.id)[0].state.selection,
+            Some([0, 1]),
+            "the cursor must cover the words around the tightened pause"
+        );
+        let touched: Vec<&str> = out["touched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(touched, ["a", "b"]);
         // Applied once, the same suggestions are already covered.
         let again = session.tool_tighten_pauses(&identity).await.unwrap();
         assert_eq!(again["applied"], 0);
         assert_eq!(again["message"], "no long pauses found");
+    }
+
+    #[tokio::test]
+    async fn an_index_validated_against_a_swapped_transcript_is_a_400_not_a_panic() {
+        // Every editing tool now works out what to do inside `edit`, under the
+        // one guard that also moves the cursor and builds the report, so an
+        // index can never be checked against one transcript and used against
+        // another. Opening a shorter project is how that used to go wrong;
+        // here the plan simply sees the new, shorter word list.
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let long = owned_project(&state, &ada).await;
+        let short = owned_project(&state, &ada).await;
+        tokio::fs::write(
+            state
+                .config
+                .data_dir
+                .join(&short.media_id)
+                .join(crate::routes::WORDS_CACHE),
+            serde_json::to_vec(&[engine::Word {
+                id: "w0".into(),
+                text: "a".into(),
+                start: 0.0,
+                end: 0.5,
+            }])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &long.id)
+            .await
+            .unwrap();
+        session
+            .tool_open_project(&identity, &short.id)
+            .await
+            .unwrap();
+        // Word 2 existed in the project that was open a moment ago.
+        let err = session.tool_cut(&identity, 2, 2).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.to_string().contains("transcript of 1"), "{err}");
+        let err = session
+            .tool_add_caption(&identity, 2, 2, "x", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        let err = session
+            .tool_add_title(&identity, 2, "x", None, None, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("transcript of 1"), "{err}");
     }
 
     #[tokio::test]
@@ -1507,6 +1601,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("use none or dip"));
+        // A title before the start is `-1`; anything further back is a slip.
+        let err = session
+            .tool_add_title(&identity, -2, "x", None, None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.to_string().contains("use -1"), "{err}");
         // An index the transcript does not have is the server's own 400.
         let err = session.tool_cut(&identity, 0, 9).await.unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
