@@ -265,8 +265,8 @@ pub async fn members(
 }
 
 async fn list_members(db: &SqlitePool, project_id: &str) -> AppResult<Vec<Member>> {
-    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, u.color, m.role
+    let rows: Vec<(String, String, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT u.id, u.email, u.display_name, u.color, u.owner_id, m.role
          FROM project_members m JOIN users u ON u.id = m.user_id
          WHERE m.project_id = ? ORDER BY m.role, u.display_name",
     )
@@ -275,12 +275,13 @@ async fn list_members(db: &SqlitePool, project_id: &str) -> AppResult<Vec<Member
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, email, display_name, color, role)| Member {
+        .map(|(id, email, display_name, color, owner_id, role)| Member {
             user: User {
                 id,
                 email,
                 display_name,
                 color,
+                owner_id,
             },
             role: role_or_viewer(&role),
         })
@@ -347,7 +348,7 @@ pub async fn remove_member(
 /// startup for the admin user and after the first registration.
 pub async fn adopt_orphans(state: &Arc<AppState>, owner_id: &str) -> AppResult<()> {
     let owner: Option<User> =
-        sqlx::query_as("SELECT id, email, display_name, color FROM users WHERE id = ?")
+        sqlx::query_as("SELECT id, email, display_name, color, owner_id FROM users WHERE id = ?")
             .bind(owner_id)
             .fetch_optional(&state.db)
             .await?;

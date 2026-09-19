@@ -25,6 +25,9 @@ argon2 = "0.5"
 # rand_core's own `getrandom` feature, so `OsRng` isn't otherwise available.
 # Depending on password-hash directly unifies the feature across the graph.
 password-hash = { version = "0.5", features = ["getrandom"] }
+sha2 = "0.11"
+rand = "0.10"
+base64 = "0.23"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

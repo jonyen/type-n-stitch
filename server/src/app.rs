@@ -9,7 +9,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
-use crate::{auth, library, ops, projects, routes, ws, AppState};
+use crate::{auth, library, ops, projects, routes, tokens, ws, AppState};
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -19,6 +19,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
+        .route("/api/tokens", get(tokens::index).post(tokens::create))
+        .route("/api/tokens/{id}", axum::routing::delete(tokens::delete))
         .route("/api/projects", get(projects::list).post(routes::upload))
         .route("/api/projects/{id}", get(ops::get_project))
         .route("/api/projects/{id}/ops", post(ops::submit))

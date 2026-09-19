@@ -7,7 +7,7 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use axum::extract::{FromRequestParts, State};
-use axum::http::header::{COOKIE, SET_COOKIE};
+use axum::http::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use axum::http::request::Parts;
 use axum::response::{AppendHeaders, IntoResponse};
 use axum::Json;
@@ -35,6 +35,16 @@ pub struct User {
     pub email: String,
     pub display_name: String,
     pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+}
+
+impl User {
+    /// Whether this account acts on behalf of another user, e.g. an agent
+    /// authenticating with an API token minted by a human.
+    pub fn is_bot(&self) -> bool {
+        self.owner_id.is_some()
+    }
 }
 
 /// The signed-in user, or a 401.
@@ -47,9 +57,20 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, AppError> {
+        if let Some(bearer) = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+        {
+            return crate::tokens::verify(&state.db, bearer.trim())
+                .await?
+                .map(CurrentUser)
+                .ok_or_else(AppError::unauthorized);
+        }
         let token = session_token(parts).ok_or_else(AppError::unauthorized)?;
         let user: Option<User> = sqlx::query_as(
-            "SELECT u.id, u.email, u.display_name, u.color
+            "SELECT u.id, u.email, u.display_name, u.color, u.owner_id
              FROM sessions s JOIN users u ON u.id = s.user_id
              WHERE s.id = ? AND s.expires_at > ?",
         )
@@ -145,6 +166,7 @@ pub async fn create_user(
         email,
         display_name,
         color: color.to_owned(),
+        owner_id: None,
     };
     let inserted = sqlx::query(
         "INSERT INTO users (id, email, password_hash, display_name, color, created_at)
@@ -212,13 +234,13 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> AppResult<impl IntoResponse> {
-    let row: Option<(String, String, String, String, String)> = sqlx::query_as(
-        "SELECT id, email, display_name, color, password_hash FROM users WHERE email = ?",
+    let row: Option<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, email, display_name, color, password_hash, owner_id FROM users WHERE email = ?",
     )
     .bind(req.email.trim().to_ascii_lowercase())
     .fetch_optional(&state.db)
     .await?;
-    let Some((id, email, display_name, color, hash)) = row else {
+    let Some((id, email, display_name, color, hash, owner_id)) = row else {
         // Run a real (deliberately slow) verification against a dummy hash
         // so this branch takes about as long as a genuine wrong-password
         // failure below — the two 401s must be indistinguishable in timing,
@@ -235,6 +257,7 @@ pub async fn login(
         email,
         display_name,
         color,
+        owner_id,
     };
     Ok((AppendHeaders(set_cookie(&token, SESSION_SECS)), Json(user)))
 }

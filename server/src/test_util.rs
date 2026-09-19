@@ -94,6 +94,15 @@ pub async fn register(state: &Arc<AppState>, email: &str) -> String {
     cookie_of(&headers).expect("register sets a cookie")
 }
 
+/// Set an `Authorization: Bearer <token>` header on a request.
+pub fn with_bearer(mut req: Request<Body>, token: &str) -> Request<Body> {
+    req.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    req
+}
+
 /// Serve the app on an ephemeral port; returns `http://127.0.0.1:PORT`.
 pub async fn serve(state: &Arc<AppState>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

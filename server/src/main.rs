@@ -15,6 +15,7 @@ mod projects;
 mod routes;
 #[cfg(test)]
 mod test_util;
+mod tokens;
 mod tts;
 mod ws;
 
