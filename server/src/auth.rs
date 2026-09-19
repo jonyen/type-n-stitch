@@ -264,9 +264,10 @@ pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
     match inserted {
         Ok(_) => Ok(bot),
         // Another call for the same owner won the race between our SELECT
-        // and INSERT and already created the bot. Re-read it so both
-        // callers agree on one row instead of one of them surfacing a bare
-        // 500.
+        // and INSERT and already created the bot — `users_owner_unique`
+        // (migration 0003) makes that collide on `owner_id` even though
+        // the email is now random. Re-read it so both callers agree on one
+        // row instead of one of them surfacing a bare 500.
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
             let winner: Option<User> = sqlx::query_as(
                 "SELECT id, email, display_name, color, owner_id FROM users WHERE owner_id = ?",
@@ -276,10 +277,9 @@ pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
             .await?;
             match winner {
                 Some(bot) => Ok(bot.finish()),
-                // The insert conflicted (on the email's own uniqueness,
-                // now vanishingly unlikely with a random email) but no
-                // bot row exists for this owner. The client can plausibly
-                // succeed by simply retrying.
+                // The insert conflicted but no bot row exists for this
+                // owner — should not happen given the unique index above,
+                // but the client can plausibly succeed by simply retrying.
                 None => Err(AppError::conflict("bot account collided; try again")),
             }
         }
@@ -617,16 +617,12 @@ mod tests {
     }
 
     /// Several racing `ensure_bot` calls for the same owner all miss the
-    /// `SELECT ... WHERE owner_id = ?` before any of them has inserted.
-    /// With the bot email now a random UUID (not derived from `owner.id`),
-    /// two racing INSERTs no longer collide with each other on that email
-    /// the way they used to, so this can no longer force the
-    /// unique-violation recovery branch deterministically — that branch
-    /// now only fires on a genuine (near-impossible) email collision, and
-    /// stays in place as a backstop rather than the guarantee it used to
-    /// be. What this test still proves: no racer ever surfaces the bare
-    /// 500 the squatting bug caused, and every racer gets back *some*
-    /// valid bot row for the right owner.
+    /// `SELECT ... WHERE owner_id = ?` before any of them has inserted, so
+    /// only one INSERT can win — the bot email is now a random UUID, but
+    /// `users_owner_unique` (migration 0003) still makes every other
+    /// racer's INSERT collide on `owner_id`. Every caller must still get
+    /// back the same bot row instead of one of them surfacing a bare 500,
+    /// or two bot rows ending up minted for one owner.
     #[tokio::test]
     async fn ensure_bot_survives_a_concurrent_insert_race() {
         let (state, _d) = state().await;
@@ -643,10 +639,14 @@ mod tests {
             let owner = owner.clone();
             handles.push(tokio::spawn(async move { ensure_bot(&db, &owner).await }));
         }
+        let mut ids = Vec::new();
         for handle in handles {
             let bot = handle.await.unwrap().unwrap();
-            assert_eq!(bot.owner_id.as_deref(), Some(owner.id.as_str()));
-            assert_eq!(bot.display_name, "Claude");
+            ids.push(bot.id);
         }
+        assert!(
+            ids.iter().all(|id| *id == ids[0]),
+            "every racer should agree on one bot: {ids:?}"
+        );
     }
 }
