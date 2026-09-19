@@ -73,6 +73,7 @@ pub async fn verify(db: &SqlitePool, plaintext: &str) -> AppResult<Option<User>>
     .bind(hash(plaintext))
     .fetch_optional(db)
     .await?;
+    let user = user.map(User::finish);
     if user.is_some() {
         sqlx::query("UPDATE api_tokens SET last_used_at = ? WHERE token_hash = ?")
             .bind(now())

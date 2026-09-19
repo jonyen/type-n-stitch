@@ -82,6 +82,7 @@ export interface User {
   email: string;
   displayName: string;
   color: string;
+  bot?: boolean;
 }
 
 export type Role = 'owner' | 'editor' | 'commenter' | 'viewer';

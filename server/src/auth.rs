@@ -37,13 +37,26 @@ pub struct User {
     pub color: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
+    /// Whether this account acts on behalf of another user, e.g. an agent
+    /// authenticating with an API token minted by a human. Derived from
+    /// `owner_id` by [`User::finish`], never set directly; kept as an
+    /// explicit serialised field so clients don't need to infer it.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub bot: bool,
 }
 
 impl User {
-    /// Whether this account acts on behalf of another user, e.g. an agent
-    /// authenticating with an API token minted by a human.
+    /// Whether this account acts on behalf of another user.
     pub fn is_bot(&self) -> bool {
         self.owner_id.is_some()
+    }
+
+    /// Fills `bot` from `owner_id`. Every place a `User` is built or fetched
+    /// from the database must route through this so the two never diverge.
+    pub fn finish(mut self) -> Self {
+        self.bot = self.owner_id.is_some();
+        self
     }
 }
 
@@ -78,7 +91,9 @@ impl FromRequestParts<Arc<AppState>> for CurrentUser {
         .bind(now())
         .fetch_optional(&state.db)
         .await?;
-        user.map(CurrentUser).ok_or_else(AppError::unauthorized)
+        user.map(User::finish)
+            .map(CurrentUser)
+            .ok_or_else(AppError::unauthorized)
     }
 }
 
@@ -167,7 +182,9 @@ pub async fn create_user(
         display_name,
         color: color.to_owned(),
         owner_id: None,
-    };
+        bot: false,
+    }
+    .finish();
     let inserted = sqlx::query(
         "INSERT INTO users (id, email, password_hash, display_name, color, created_at)
          VALUES (?, ?, ?, ?, ?, ?)",
@@ -187,6 +204,49 @@ pub async fn create_user(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Creates (or finds) the bot user an owner's agents act as. Idempotent:
+/// repeat calls for the same owner return the same row. Bots have no
+/// password (`password_hash = ''`) and can never log in — see `login`.
+#[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
+pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
+    let existing: Option<User> = sqlx::query_as(
+        "SELECT id, email, display_name, color, owner_id FROM users WHERE owner_id = ?",
+    )
+    .bind(&owner.id)
+    .fetch_optional(db)
+    .await?;
+    if let Some(bot) = existing {
+        return Ok(bot.finish());
+    }
+    let color = if owner.color == "#7c5cd6" {
+        "#3fb3b3"
+    } else {
+        "#7c5cd6"
+    };
+    let bot = User {
+        id: Uuid::new_v4().to_string(),
+        email: format!("agent+{}@local", owner.id),
+        display_name: "Claude".to_owned(),
+        color: color.to_owned(),
+        owner_id: Some(owner.id.clone()),
+        bot: false,
+    }
+    .finish();
+    sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name, color, created_at, owner_id)
+         VALUES (?, ?, '', ?, ?, ?, ?)",
+    )
+    .bind(&bot.id)
+    .bind(&bot.email)
+    .bind(&bot.display_name)
+    .bind(&bot.color)
+    .bind(now())
+    .bind(&owner.id)
+    .execute(db)
+    .await?;
+    Ok(bot)
 }
 
 async fn create_session(db: &SqlitePool, user_id: &str) -> AppResult<String> {
@@ -248,6 +308,12 @@ pub async fn login(
         verify_password(&req.password, &DUMMY_HASH);
         return Err(AppError::unauthorized());
     };
+    if owner_id.is_some() {
+        // Bots have no password of their own; they authenticate only via
+        // the owner's API token. Reject before verifying, so a bot's
+        // `password_hash = ''` never gets a chance at argon2 verification.
+        return Err(AppError::unauthorized());
+    }
     if !verify_password(&req.password, &hash) {
         return Err(AppError::unauthorized());
     }
@@ -258,7 +324,9 @@ pub async fn login(
         display_name,
         color,
         owner_id,
-    };
+        bot: false,
+    }
+    .finish();
     Ok((AppendHeaders(set_cookie(&token, SESSION_SECS)), Json(user)))
 }
 
@@ -296,6 +364,8 @@ mod tests {
     use axum::http::{Method, StatusCode};
     use serde_json::json;
 
+    use super::ensure_bot;
+    use crate::auth::User;
     use crate::test_util::{app, call, cookie_of, json_req, register, state};
 
     #[tokio::test]
@@ -453,5 +523,34 @@ mod tests {
         )
         .await;
         assert_eq!(body["needsSetup"], false);
+    }
+
+    #[tokio::test]
+    async fn ensure_bot_is_idempotent_and_bots_cannot_log_in() {
+        let (state, _d) = state().await;
+        let cookie = register(&state, "ada@example.com").await;
+        let (_, me, _) = call(
+            app(&state),
+            json_req(Method::GET, "/api/me", Some(&cookie), None),
+        )
+        .await;
+        let owner: User = serde_json::from_value(me).unwrap();
+        let a = ensure_bot(&state.db, &owner).await.unwrap();
+        let b = ensure_bot(&state.db, &owner).await.unwrap();
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.display_name, "Claude");
+        assert_eq!(a.owner_id.as_deref(), Some(owner.id.as_str()));
+        assert_ne!(a.color, owner.color);
+        let (status, _, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                "/api/auth/login",
+                None,
+                Some(json!({ "email": a.email, "password": "anything-8" })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

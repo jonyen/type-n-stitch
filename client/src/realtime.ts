@@ -8,6 +8,7 @@ export interface PeerInfo {
   id: string;
   displayName: string;
   color: string;
+  bot?: boolean;
 }
 
 export interface PresenceState {

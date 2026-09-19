@@ -50,6 +50,29 @@ impl Role {
         matches!(self, Role::Owner | Role::Editor)
     }
 
+    /// Ranks roles from most to least privileged, for capping a bot's
+    /// membership at the owner's role.
+    #[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
+    fn rank(self) -> u8 {
+        match self {
+            Role::Owner => 0,
+            Role::Editor => 1,
+            Role::Commenter => 2,
+            Role::Viewer => 3,
+        }
+    }
+
+    /// The role a bot may hold given its owner's role: never above editor,
+    /// otherwise the owner's own role.
+    #[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
+    fn cap_for_bot(self) -> Role {
+        if self.rank() < Role::Editor.rank() {
+            Role::Editor
+        } else {
+            self
+        }
+    }
+
     pub fn can_manage(self) -> bool {
         self == Role::Owner
     }
@@ -282,7 +305,9 @@ async fn list_members(db: &SqlitePool, project_id: &str) -> AppResult<Vec<Member
                 display_name,
                 color,
                 owner_id,
-            },
+                bot: false,
+            }
+            .finish(),
             role: role_or_viewer(&role),
         })
         .collect())
@@ -326,6 +351,29 @@ pub async fn add_member(
     Ok(Json(list_members(&state.db, &access.project.id).await?))
 }
 
+/// Adds or updates a bot's membership on a project, capped at editor even
+/// if its owner is the project's owner. Idempotent: re-calling with a new
+/// `owner_role` updates the stored role and returns the (capped) result.
+#[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
+pub async fn ensure_bot_member(
+    db: &SqlitePool,
+    project_id: &str,
+    bot_id: &str,
+    owner_role: Role,
+) -> AppResult<Role> {
+    let role = owner_role.cap_for_bot();
+    sqlx::query(
+        "INSERT INTO project_members (project_id, user_id, role) VALUES (?, ?, ?)
+         ON CONFLICT (project_id, user_id) DO UPDATE SET role = excluded.role",
+    )
+    .bind(project_id)
+    .bind(bot_id)
+    .bind(role.as_str())
+    .execute(db)
+    .await?;
+    Ok(role)
+}
+
 /// `DELETE /api/projects/:id/members/:user_id`.
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
@@ -352,7 +400,9 @@ pub async fn adopt_orphans(state: &Arc<AppState>, owner_id: &str) -> AppResult<(
             .bind(owner_id)
             .fetch_optional(&state.db)
             .await?;
-    let Some(owner) = owner else { return Ok(()) };
+    let Some(owner) = owner.map(User::finish) else {
+        return Ok(());
+    };
     let mut entries = tokio::fs::read_dir(&state.config.data_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let dir = entry.path();
@@ -607,5 +657,49 @@ mod tests {
         )
         .await;
         assert_eq!(list.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bot_membership_is_capped_at_editor_and_listed_with_a_badge() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let (_, me, _) = call(
+            app(&state),
+            json_req(Method::GET, "/api/me", Some(&ada), None),
+        )
+        .await;
+        let owner: User = serde_json::from_value(me).unwrap();
+        let bot = crate::auth::ensure_bot(&state.db, &owner).await.unwrap();
+        assert_eq!(
+            ensure_bot_member(&state.db, &project.id, &bot.id, Role::Owner)
+                .await
+                .unwrap(),
+            Role::Editor
+        );
+        assert_eq!(
+            ensure_bot_member(&state.db, &project.id, &bot.id, Role::Viewer)
+                .await
+                .unwrap(),
+            Role::Viewer
+        );
+        let (_, members, _) = call(
+            app(&state),
+            json_req(
+                Method::GET,
+                &format!("/api/projects/{}/members", project.id),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        let claude = members
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["displayName"] == "Claude")
+            .unwrap();
+        assert_eq!(claude["bot"], true);
+        assert_eq!(claude["role"], "viewer");
     }
 }

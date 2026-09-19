@@ -19,6 +19,8 @@ pub struct PeerInfo {
     pub id: String,
     pub display_name: String,
     pub color: String,
+    #[serde(default)]
+    pub bot: bool,
 }
 
 impl From<&User> for PeerInfo {
@@ -27,6 +29,7 @@ impl From<&User> for PeerInfo {
             id: u.id.clone(),
             display_name: u.display_name.clone(),
             color: u.color.clone(),
+            bot: u.is_bot(),
         }
     }
 }
@@ -250,6 +253,7 @@ mod tests {
             id: format!("u-{n}"),
             display_name: n.to_owned(),
             color: "#123456".into(),
+            bot: false,
         }
     }
 
