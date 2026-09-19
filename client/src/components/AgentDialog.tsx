@@ -62,9 +62,9 @@ export function AgentDialog({ onCancel }: Props) {
   return (
     <div
       className="modal-backdrop"
-      onClick={onCancel}
+      onClick={busy || minted ? undefined : onCancel}
       onKeyDown={(e) => {
-        if (e.key === 'Escape') onCancel();
+        if (e.key === 'Escape' && !busy && !minted) onCancel();
       }}
     >
       <div className="modal agent-dialog" onClick={(e) => e.stopPropagation()}>
@@ -126,12 +126,14 @@ export function AgentDialog({ onCancel }: Props) {
           )}
         </div>
 
-        <div className="actions">
-          <span className="spacer" />
-          <button type="button" onClick={onCancel}>
-            Done
-          </button>
-        </div>
+        {!minted && (
+          <div className="actions">
+            <span className="spacer" />
+            <button type="button" onClick={onCancel}>
+              Done
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
