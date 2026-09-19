@@ -184,9 +184,6 @@ pub async fn transcribe(
 /// Transcript words plus speaker labels for a media item, tolerating a
 /// diarization failure the way the client does: labels come back `None` and
 /// the transcript is still usable on its own.
-///
-/// Unused until the MCP tools (a later task) call it directly.
-#[allow(dead_code)]
 pub async fn transcript_for(
     state: &AppState,
     media_id: &str,

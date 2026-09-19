@@ -52,7 +52,6 @@ impl Role {
 
     /// Ranks roles from most to least privileged, for capping a bot's
     /// membership at the owner's role.
-    #[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
     fn rank(self) -> u8 {
         match self {
             Role::Owner => 0,
@@ -64,7 +63,6 @@ impl Role {
 
     /// The role a bot may hold given its owner's role: never above editor,
     /// otherwise the owner's own role.
-    #[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
     fn cap_for_bot(self) -> Role {
         if self.rank() < Role::Editor.rank() {
             Role::Editor
@@ -360,7 +358,6 @@ pub async fn add_member(
 /// Adds or updates a bot's membership on a project, capped at editor even
 /// if its owner is the project's owner. Idempotent: re-calling with a new
 /// `owner_role` updates the stored role and returns the (capped) result.
-#[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
 pub async fn ensure_bot_member(
     db: &SqlitePool,
     project_id: &str,

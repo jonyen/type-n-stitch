@@ -2051,8 +2051,10 @@ mod tests {
             .await
             .unwrap();
         // presence (selection) then doc — and crucially no `left` in between,
-        // which is what proves rmcp kept one session across both calls rather
-        // than building a fresh handler per request.
+        // which is what proves the owner-keyed `Agents` map kept the peer
+        // alive across both calls. rmcp itself builds a fresh handler per
+        // request under this lifecycle; it's our map, not rmcp's session,
+        // that's being exercised here.
         let mut saw_doc = false;
         for _ in 0..4 {
             let f = crate::ws::tests_support::next_json(&mut ws).await;
