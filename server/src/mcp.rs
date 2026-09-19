@@ -792,9 +792,8 @@ impl McpSession {
         format: Option<&str>,
     ) -> AppResult<Value> {
         // The guard is released before the poll loop: a ten-minute render
-        // must not hold the session shut.
-        // The handle is held for the whole call, so even a slow one outlives
-        // the reaper rather than losing its project halfway through.
+        // must not hold the agent shut. The handle outlives it, so the
+        // project is still open when the render finishes.
         let agent = self.agent(identity);
         let project = {
             let open = agent.lock().await;
@@ -818,6 +817,9 @@ impl McpSession {
                 Some(ExportJob::Error { message, .. }) => return Err(AppError::upstream(message)),
                 _ => {}
             }
+            // A render can take as long as the idle timeout, so say we are
+            // still here: waiting for ffmpeg is not going quiet.
+            self.agent(identity);
             if Instant::now() >= deadline {
                 // Still rendering: hand back the id rather than hold the call
                 // open forever. `export` again later to pick it up.
