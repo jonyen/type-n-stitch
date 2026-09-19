@@ -44,3 +44,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
 tokio-tungstenite = "0.30"
+# rmcp's streamable-HTTP client transport is implemented for reqwest 0.13's
+# `Client`, not the 0.12 the server itself speaks, so the end-to-end test
+# names that version explicitly rather than the one in `[dependencies]`.
+reqwest13 = { package = "reqwest", version = "0.13", default-features = false }

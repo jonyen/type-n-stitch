@@ -14,13 +14,14 @@
 //! same wording the browser does — and renders the JSON.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
 use axum::http::header;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use engine::types::Word;
+use engine::types::{CaptionPos, Range, TitleStyle, Transition, Word};
+use engine::{Edit, Op, EPS};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -39,19 +40,34 @@ use uuid::Uuid;
 use crate::auth::{ensure_bot, User};
 use crate::bus::{PeerInfo, PresenceState, ServerMsg, Subscription};
 use crate::error::{AppError, AppResult};
-use crate::mcp_tools::{find_ranges, transcript};
+use crate::mcp_tools::{find_ranges, transcript, word_range};
+use crate::ops::{ClientOp, DocState};
 use crate::projects::{ensure_bot_member, find_project, member_role, Project, Role};
+use crate::routes::ExportJob;
 use crate::{ops, projects, routes, tokens, AppState};
 
 /// How long an editing tool leaves the agent's cursor on the range it is
 /// about to change, so people watching see where the edit came from. Tests
 /// do not wait.
 #[cfg(not(test))]
-#[allow(dead_code)] // The editing tools that dwell land with the next task.
 pub const DWELL: Duration = Duration::from_millis(400);
 #[cfg(test)]
-#[allow(dead_code)]
 pub const DWELL: Duration = Duration::ZERO;
+
+/// How often `export` asks whether ffmpeg has finished, and how long it
+/// keeps asking before handing the job id back so a later call can resume.
+/// Tests poll fast and give up early: their render fails immediately.
+#[cfg(not(test))]
+const EXPORT_POLL: Duration = Duration::from_millis(500);
+#[cfg(not(test))]
+const EXPORT_CAP: Duration = Duration::from_secs(600);
+#[cfg(test)]
+const EXPORT_POLL: Duration = Duration::from_millis(10);
+#[cfg(test)]
+const EXPORT_CAP: Duration = Duration::from_secs(2);
+
+/// How long a title card stays on screen when the agent does not say.
+const TITLE_SECONDS: f64 = 3.0;
 
 /// An MCP session with no traffic for this long is dropped, which releases
 /// the agent's subscription and clears its cursor from everyone's screen.
@@ -144,6 +160,63 @@ pub struct LookAtArgs {
     pub to: usize,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CutArgs {
+    /// First word to delete, from the transcript's `i`.
+    pub from: usize,
+    /// Last word to delete, inclusive.
+    pub to: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OverdubArgs {
+    /// First word to replace, from the transcript's `i`.
+    pub from: usize,
+    /// Last word to replace, inclusive.
+    pub to: usize,
+    /// What the speaker should say instead.
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddTitleArgs {
+    /// The title lands just after this word, from the transcript's `i`.
+    /// Use `-1` for a title before the first word.
+    pub after: i64,
+    /// The headline.
+    pub text: String,
+    /// A smaller second line, if you want one.
+    pub subtitle: Option<String>,
+    /// `dark`, `light` or `accent`; `dark` when omitted.
+    pub style: Option<String>,
+    /// Seconds the card stays on screen; 3 when omitted.
+    pub duration: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddCaptionArgs {
+    /// First word the caption covers, from the transcript's `i`.
+    pub from: usize,
+    /// Last word it covers, inclusive.
+    pub to: usize,
+    /// The caption text.
+    pub text: String,
+    /// `bottomLeft`, `bottomCenter` or `topLeft`; `bottomLeft` when omitted.
+    pub position: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetTransitionArgs {
+    /// `none` for a hard cut, or `dip` to dip through black at every join.
+    pub kind: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportArgs {
+    /// `mp4`, `mp3` or `wav`; the source's own kind when omitted.
+    pub format: Option<String>,
+}
+
 #[tool_router]
 impl McpSession {
     #[tool(description = "Every project you can open, with your role and its duration.")]
@@ -204,6 +277,150 @@ impl McpSession {
     ) -> Result<CallToolResult, McpError> {
         rendered(
             self.tool_look_at(&identity_of(&ctx)?, args.from, args.to)
+                .await,
+        )
+    }
+
+    #[tool(
+        description = "Delete words `from`..`to` (inclusive transcript indices) \
+                       from the video, exactly as pressing Delete on that \
+                       selection would. Moves your cursor there first, so it \
+                       takes about half a second. Returns the new edit counts \
+                       and the words it touched."
+    )]
+    async fn cut(
+        &self,
+        Parameters(args): Parameters<CutArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_cut(&identity_of(&ctx)?, args.from, args.to).await)
+    }
+
+    #[tool(
+        description = "Cut every filler word (\"um\", \"you know\") the engine \
+                       finds, in one operation. Returns `applied: 0` with a \
+                       message when there is nothing left to remove."
+    )]
+    async fn remove_fillers(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_remove_fillers(&identity_of(&ctx)?).await)
+    }
+
+    #[tool(description = "Shorten every long silence the engine finds, in one \
+                       operation. Returns `applied: 0` with a message when \
+                       there is nothing left to tighten.")]
+    async fn tighten_pauses(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_tighten_pauses(&identity_of(&ctx)?).await)
+    }
+
+    #[tool(description = "Replace what is said over words `from`..`to` with \
+                       synthesized speech saying `text`. Needs the voice \
+                       service; the picture is unchanged.")]
+    async fn overdub(
+        &self,
+        Parameters(args): Parameters<OverdubArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(
+            self.tool_overdub(&identity_of(&ctx)?, args.from, args.to, &args.text)
+                .await,
+        )
+    }
+
+    #[tool(
+        description = "Insert a full-screen title card just after word `after` \
+                       (a transcript index; `-1` puts it before the first word). \
+                       `style` is dark, light or accent; `duration` is seconds, \
+                       3 by default. The output gets longer by `duration`."
+    )]
+    async fn add_title(
+        &self,
+        Parameters(args): Parameters<AddTitleArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(
+            self.tool_add_title(
+                &identity_of(&ctx)?,
+                args.after,
+                &args.text,
+                args.subtitle.as_deref(),
+                args.style.as_deref(),
+                args.duration,
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Draw text over the picture while words `from`..`to` play. \
+                       `position` is bottomLeft, bottomCenter or topLeft; \
+                       bottomLeft by default. The output length is unchanged."
+    )]
+    async fn add_caption(
+        &self,
+        Parameters(args): Parameters<AddCaptionArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(
+            self.tool_add_caption(
+                &identity_of(&ctx)?,
+                args.from,
+                args.to,
+                &args.text,
+                args.position.as_deref(),
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "How the pieces either side of every cut meet: `none` for \
+                       a hard cut, `dip` to dip through black."
+    )]
+    async fn set_transition(
+        &self,
+        Parameters(args): Parameters<SetTransitionArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(
+            self.tool_set_transition(&identity_of(&ctx)?, &args.kind)
+                .await,
+        )
+    }
+
+    #[tool(
+        description = "Undo your own most recent edit. Other people's edits are \
+                       theirs to undo; this fails with \"nothing to undo\" when \
+                       you have none left."
+    )]
+    async fn undo(&self, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_undo(&identity_of(&ctx)?).await)
+    }
+
+    #[tool(description = "Redo the edit you last undid.")]
+    async fn redo(&self, ctx: RequestContext<RoleServer>) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_redo(&identity_of(&ctx)?).await)
+    }
+
+    #[tool(
+        description = "Render the edited project and wait for it. `format` is \
+                       mp4, mp3 or wav; the source's own kind by default. \
+                       Returns `{ url, duration, bytes }`, or the job id with \
+                       `pending: true` if the render is still going after ten \
+                       minutes."
+    )]
+    async fn export(
+        &self,
+        Parameters(args): Parameters<ExportArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(
+            self.tool_export(&identity_of(&ctx)?, args.format.as_deref())
                 .await,
         )
     }
@@ -317,6 +534,295 @@ impl McpSession {
         let open = self.inner.lock().await;
         let project = require_open(&open, identity)?;
         let words = words_in(&open, from, to)?;
+        self.move_cursor(&open, project, from, to);
+        Ok(json!({ "from": from, "to": to, "text": words }))
+    }
+
+    pub(crate) async fn tool_cut(
+        &self,
+        identity: &McpIdentity,
+        from: usize,
+        to: usize,
+    ) -> AppResult<Value> {
+        let range = {
+            let open = self.inner.lock().await;
+            require_open(&open, identity)?;
+            require_edit(&open)?;
+            range_of(&open, from, to)?
+        };
+        self.edit(
+            identity,
+            Some((from, to)),
+            Op::Cut {
+                start: range.start,
+                end: range.end,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn tool_remove_fillers(&self, identity: &McpIdentity) -> AppResult<Value> {
+        self.apply_suggestions(identity, Suggestion::Fillers).await
+    }
+
+    pub(crate) async fn tool_tighten_pauses(&self, identity: &McpIdentity) -> AppResult<Value> {
+        self.apply_suggestions(identity, Suggestion::Pauses).await
+    }
+
+    pub(crate) async fn tool_overdub(
+        &self,
+        identity: &McpIdentity,
+        from: usize,
+        to: usize,
+        text: &str,
+    ) -> AppResult<Value> {
+        let (project, range) = {
+            let open = self.inner.lock().await;
+            let project = require_open(&open, identity)?.clone();
+            require_edit(&open)?;
+            let range = range_of(&open, from, to)?;
+            (project, range)
+        };
+        // Synthesis is the slow part and can fail upstream; do it before the
+        // cursor moves, so a failure never leaves a phantom selection.
+        let audio = routes::overdub_for(&self.state, &project.media_id, text).await?;
+        self.edit(
+            identity,
+            Some((from, to)),
+            Op::Overdub {
+                start: range.start,
+                end: range.end,
+                text: text.to_owned(),
+                audio_url: audio.audio_url,
+                audio_duration: audio.duration,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn tool_add_title(
+        &self,
+        identity: &McpIdentity,
+        after: i64,
+        text: &str,
+        subtitle: Option<&str>,
+        style: Option<&str>,
+        duration: Option<f64>,
+    ) -> AppResult<Value> {
+        let (at, selection) = {
+            let open = self.inner.lock().await;
+            require_open(&open, identity)?;
+            require_edit(&open)?;
+            // `-1` is "before the first word", which is the media's start.
+            if after < 0 {
+                (0.0, None)
+            } else {
+                let i = after as usize;
+                let word = open.words.get(i).ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "no word {i} in a transcript of {}",
+                        open.words.len()
+                    ))
+                })?;
+                (word.end, Some((i, i)))
+            }
+        };
+        self.edit(
+            identity,
+            selection,
+            Op::AddTitle {
+                at,
+                duration: duration.unwrap_or(TITLE_SECONDS),
+                text: text.to_owned(),
+                subtitle: subtitle.map(str::to_owned),
+                style: title_style(style)?,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn tool_add_caption(
+        &self,
+        identity: &McpIdentity,
+        from: usize,
+        to: usize,
+        text: &str,
+        position: Option<&str>,
+    ) -> AppResult<Value> {
+        let range = {
+            let open = self.inner.lock().await;
+            require_open(&open, identity)?;
+            require_edit(&open)?;
+            range_of(&open, from, to)?
+        };
+        self.edit(
+            identity,
+            Some((from, to)),
+            Op::AddCaption {
+                start: range.start,
+                end: range.end,
+                text: text.to_owned(),
+                position: caption_position(position)?,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn tool_set_transition(
+        &self,
+        identity: &McpIdentity,
+        kind: &str,
+    ) -> AppResult<Value> {
+        let transition = transition_kind(kind)?;
+        let mut out = self
+            .edit(identity, None, Op::SetTransition { transition })
+            .await?;
+        out["transition"] = serde_json::to_value(transition)?;
+        Ok(out)
+    }
+
+    pub(crate) async fn tool_undo(&self, identity: &McpIdentity) -> AppResult<Value> {
+        self.step(identity, false).await
+    }
+
+    pub(crate) async fn tool_redo(&self, identity: &McpIdentity) -> AppResult<Value> {
+        self.step(identity, true).await
+    }
+
+    pub(crate) async fn tool_export(
+        &self,
+        identity: &McpIdentity,
+        format: Option<&str>,
+    ) -> AppResult<Value> {
+        // The guard is released before the poll loop: a ten-minute render
+        // must not hold the session shut.
+        let project = {
+            let open = self.inner.lock().await;
+            let project = require_open(&open, identity)?.clone();
+            require_edit(&open)?;
+            project
+        };
+        let started = routes::start_export(&self.state, &project, format).await?;
+        let deadline = Instant::now() + EXPORT_CAP;
+        loop {
+            match routes::export_job(&self.state, &project.media_id, &started.job_id) {
+                Some(ExportJob::Done {
+                    url,
+                    duration,
+                    bytes,
+                    ..
+                }) => {
+                    return Ok(json!({ "url": url, "duration": duration, "bytes": bytes }));
+                }
+                // The job's own words, the same text the browser would show.
+                Some(ExportJob::Error { message, .. }) => return Err(AppError::upstream(message)),
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                // Still rendering: hand back the id rather than hold the call
+                // open forever. `export` again later to pick it up.
+                return Ok(json!({ "jobId": started.job_id, "pending": true }));
+            }
+            tokio::time::sleep(EXPORT_POLL).await;
+        }
+    }
+
+    /// The shared body of every editing tool: move the cursor onto the words
+    /// about to change, dwell long enough for people watching to see it, then
+    /// append the operation as the bot and report the new document.
+    async fn edit(
+        &self,
+        identity: &McpIdentity,
+        selection: Option<(usize, usize)>,
+        op: Op,
+    ) -> AppResult<Value> {
+        let open = self.inner.lock().await;
+        let project = require_open(&open, identity)?.clone();
+        require_edit(&open)?;
+        if let Some((from, to)) = selection {
+            self.move_cursor(&open, &project, from, to);
+        }
+        tokio::time::sleep(DWELL).await;
+        let doc = ops::apply_ops(
+            &self.state,
+            &project,
+            &identity.bot,
+            vec![ClientOp {
+                op_id: Uuid::new_v4().to_string(),
+                op,
+            }],
+        )
+        .await?;
+        Ok(report(&open, &doc, selection))
+    }
+
+    /// `undo` and `redo` share everything but which target they look up.
+    async fn step(&self, identity: &McpIdentity, redo: bool) -> AppResult<Value> {
+        let project = {
+            let open = self.inner.lock().await;
+            let project = require_open(&open, identity)?.clone();
+            require_edit(&open)?;
+            project
+        };
+        let doc = ops::doc_state(&self.state, &project, &identity.bot).await?;
+        let target = if redo { doc.redoable } else { doc.undoable };
+        let target = target.ok_or_else(|| {
+            AppError::bad_request(if redo {
+                "nothing to redo"
+            } else {
+                "nothing to undo"
+            })
+        })?;
+        let op = if redo {
+            Op::Redo { target_seq: target }
+        } else {
+            Op::Undo { target_seq: target }
+        };
+        self.edit(identity, None, op).await
+    }
+
+    /// `remove_fillers` and `tighten_pauses`: the engine's suggestions, minus
+    /// the ones an existing cut already covers, applied as one operation.
+    async fn apply_suggestions(
+        &self,
+        identity: &McpIdentity,
+        which: Suggestion,
+    ) -> AppResult<Value> {
+        let project = {
+            let open = self.inner.lock().await;
+            let project = require_open(&open, identity)?.clone();
+            require_edit(&open)?;
+            project
+        };
+        let suggestions = routes::suggest_for(&self.state, &project.media_id, false).await?;
+        let suggested = match which {
+            Suggestion::Fillers => suggestions.fillers,
+            Suggestion::Pauses => suggestions.pauses,
+        };
+        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
+        let cuts: Vec<Range> = suggested
+            .iter()
+            .map(Edit::range)
+            .filter(|s| !already_cut(*s, &doc.edits))
+            .collect();
+        if cuts.is_empty() {
+            // Nothing to do, so nothing moves: the cursor stays where it was.
+            return Ok(json!({ "applied": 0, "message": which.nothing_found() }));
+        }
+        let selection = {
+            let open = self.inner.lock().await;
+            touched_by(&open, &cuts)
+        };
+        let applied = cuts.len();
+        let mut out = self
+            .edit(identity, selection, Op::ApplyCuts { cuts })
+            .await?;
+        out["applied"] = json!(applied);
+        Ok(out)
+    }
+
+    /// Put the agent's selection on `from..=to` and tell everyone watching.
+    fn move_cursor(&self, open: &Open, project: &Project, from: usize, to: usize) {
         let state = PresenceState {
             playhead: open.words[from].start,
             selection: Some([from, to]),
@@ -332,7 +838,22 @@ impl McpSession {
                 .bus
                 .publish(&project.id, ServerMsg::Presence(peer));
         }
-        Ok(json!({ "from": from, "to": to, "text": words }))
+    }
+}
+
+/// Which half of the engine's suggestions a tool applies.
+#[derive(Clone, Copy)]
+enum Suggestion {
+    Fillers,
+    Pauses,
+}
+
+impl Suggestion {
+    fn nothing_found(self) -> &'static str {
+        match self {
+            Suggestion::Fillers => "no fillers found",
+            Suggestion::Pauses => "no long pauses found",
+        }
     }
 }
 
@@ -347,7 +868,14 @@ impl ServerHandler for McpSession {
              indices, inclusive. `find` locates words to work on and `look_at` \
              moves your cursor, which collaborators watching the project can see. \
              You appear to them as \"Claude\", a peer with its own colour, and your \
-             edits are yours to undo.",
+             edits are yours to undo. Every editing tool — `cut`, \
+             `remove_fillers`, `tighten_pauses`, `overdub`, `add_title`, \
+             `add_caption`, `set_transition`, `undo`, `redo` — moves your cursor \
+             to what it is about to change and pauses there, so each call takes \
+             about half a second; it then returns the new counts and the words \
+             it touched. `export` renders and waits. Indices are always the \
+             transcript's `i`, so call `get_transcript` again after an edit \
+             rather than reusing stale ones.",
         )
     }
 }
@@ -364,6 +892,105 @@ fn require_open<'a>(open: &'a Open, identity: &McpIdentity) -> AppResult<&'a Pro
         // anything, and must not inherit the previous agent's project.
         _ => Err(AppError::bad_request("open a project first")),
     }
+}
+
+/// This session's bot may edit the open project.
+fn require_edit(open: &Open) -> AppResult<()> {
+    match open.role {
+        // The same words `ProjectAccess::require_edit` gives the browser.
+        Some(role) if role.can_edit() => Ok(()),
+        _ => Err(AppError::forbidden(
+            "you can view this project but not edit it",
+        )),
+    }
+}
+
+/// The source range words `from..=to` own, or the server's own 400.
+fn range_of(open: &Open, from: usize, to: usize) -> AppResult<Range> {
+    word_range(&open.words, from, to, open.duration).ok_or_else(|| {
+        AppError::bad_request(format!(
+            "no words {from}..{to} in a transcript of {}",
+            open.words.len()
+        ))
+    })
+}
+
+/// A suggested cut an existing cut already swallows, which is the same rule
+/// the client's `pending` uses so counts fall to zero once applied.
+fn already_cut(suggested: Range, edits: &[Edit]) -> bool {
+    edits.iter().filter(|e| e.is_cut()).any(|e| {
+        let cut = e.range();
+        cut.start <= suggested.start + EPS && cut.end >= suggested.end - EPS
+    })
+}
+
+/// The span of word indices `cuts` touches, for the cursor to cover.
+fn touched_by(open: &Open, cuts: &[Range]) -> Option<(usize, usize)> {
+    let mut span: Option<(usize, usize)> = None;
+    for (i, word) in open.words.iter().enumerate() {
+        if cuts
+            .iter()
+            .any(|c| word.start < c.end && word.end > c.start)
+        {
+            span = Some(match span {
+                Some((lo, _)) => (lo, i),
+                None => (i, i),
+            });
+        }
+    }
+    span
+}
+
+fn title_style(name: Option<&str>) -> AppResult<TitleStyle> {
+    match name.unwrap_or("dark") {
+        "dark" => Ok(TitleStyle::Dark),
+        "light" => Ok(TitleStyle::Light),
+        "accent" => Ok(TitleStyle::Accent),
+        other => Err(AppError::bad_request(format!(
+            "unknown title style {other}: use dark, light or accent"
+        ))),
+    }
+}
+
+fn caption_position(name: Option<&str>) -> AppResult<CaptionPos> {
+    match name.unwrap_or("bottomLeft") {
+        "bottomLeft" => Ok(CaptionPos::BottomLeft),
+        "bottomCenter" => Ok(CaptionPos::BottomCenter),
+        "topLeft" => Ok(CaptionPos::TopLeft),
+        other => Err(AppError::bad_request(format!(
+            "unknown caption position {other}: use bottomLeft, bottomCenter or topLeft"
+        ))),
+    }
+}
+
+fn transition_kind(name: &str) -> AppResult<Transition> {
+    match name {
+        "none" => Ok(Transition::None),
+        "dip" => Ok(Transition::Dip),
+        other => Err(AppError::bad_request(format!(
+            "unknown transition {other}: use none or dip"
+        ))),
+    }
+}
+
+/// What every editing tool reports: the document's headline numbers after
+/// the edit, plus the words the edit landed on with their new status.
+fn report(open: &Open, doc: &DocState, touched: Option<(usize, usize)>) -> Value {
+    let words = match touched {
+        Some((from, to)) => transcript(&open.words, open.speakers.as_deref(), &doc.edits)
+            [from..=to.min(open.words.len().saturating_sub(1))]
+            .to_vec(),
+        None => Vec::new(),
+    };
+    json!({
+        "headSeq": doc.head_seq,
+        "outputDuration": engine::output_duration(&engine::timeline(open.duration, &doc.edits)),
+        "cuts": doc.edits.iter().filter(|e| matches!(e, Edit::Cut { .. })).count(),
+        "overdubs": doc.edits.iter().filter(|e| matches!(e, Edit::Overdub { .. })).count(),
+        "undoable": doc.undoable.is_some(),
+        "redoable": doc.redoable.is_some(),
+        "touched": words,
+    })
 }
 
 /// The words `from..=to`, rejecting a range the transcript does not have.
@@ -406,13 +1033,23 @@ fn rendered(result: AppResult<Value>) -> Result<CallToolResult, McpError> {
 }
 
 /// The MCP transport, one session per connected agent.
+///
+/// rmcp keeps a session only for a client that opens with `initialize`;
+/// a client on the stateless discover lifecycle gets a fresh handler per
+/// request, so its second call sees no open project and is told to "open a
+/// project first".
 pub fn mcp_service(state: Arc<AppState>) -> StreamableHttpService<McpSession, LocalSessionManager> {
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(IDLE_TIMEOUT);
     StreamableHttpService::new(
         move || Ok(McpSession::new(state.clone())),
         Arc::new(sessions),
-        StreamableHttpServerConfig::default(),
+        // rmcp's default only accepts a loopback `Host`, which is DNS-rebinding
+        // protection for an unauthenticated local server. This endpoint is
+        // Bearer-authenticated, so a rebound page cannot forge the header, and
+        // the demo is reached through the Vite proxy or over a tailnet, where
+        // the `Host` is not loopback and the default would 403 every request.
+        StreamableHttpServerConfig::default().disable_allowed_hosts(),
     )
 }
 
@@ -422,7 +1059,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::test_util::{app, call, json_req, me, owned_project, register, state, with_bearer};
+    use crate::test_util::{
+        add_member, app, call, json_req, me, owned_project, register, serve, state, with_bearer,
+    };
 
     async fn identity_for(state: &Arc<AppState>, cookie: &str) -> McpIdentity {
         let owner = me(state, cookie).await;
@@ -438,11 +1077,21 @@ mod tests {
         assert_eq!(
             names,
             [
+                "add_caption",
+                "add_title",
+                "cut",
+                "export",
                 "find",
                 "get_transcript",
                 "list_projects",
                 "look_at",
-                "open_project"
+                "open_project",
+                "overdub",
+                "redo",
+                "remove_fillers",
+                "set_transition",
+                "tighten_pauses",
+                "undo"
             ]
         );
     }
@@ -659,5 +1308,369 @@ mod tests {
             ensure_bot(&state.db, &owner).await.unwrap().display_name,
             "Claude"
         );
+    }
+
+    #[tokio::test]
+    async fn cut_moves_presence_then_appends_and_reports_touched_words() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let out = session.tool_cut(&identity, 1, 1).await.unwrap();
+        assert_eq!(out["headSeq"], 1);
+        assert_eq!(out["touched"][0]["status"], "cut");
+        assert_eq!(
+            state.bus.peers(&project.id)[0].state.selection,
+            Some([1, 1])
+        );
+        let (_, got, _) = call(
+            app(&state),
+            json_req(
+                Method::GET,
+                &format!("/api/projects/{}", project.id),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            got["doc"]["edits"][0],
+            json!({ "kind": "cut", "start": 1.0, "end": 2.0 })
+        );
+        // The bot's undo is its own.
+        let out = session.tool_undo(&identity).await.unwrap();
+        assert_eq!(out["cuts"], 0);
+        assert!(session
+            .tool_undo(&identity)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("nothing to undo"));
+        // And what it undid, it can redo.
+        let out = session.tool_redo(&identity).await.unwrap();
+        assert_eq!(out["cuts"], 1);
+    }
+
+    #[tokio::test]
+    async fn viewer_bot_cannot_edit_and_gets_the_403_text() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let bob = register(&state, "bob@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        add_member(&state, &ada, &project.id, "bob@example.com", "viewer").await;
+        let identity = identity_for(&state, &bob).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let err = session.tool_cut(&identity, 0, 0).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.to_string(), "you can view this project but not edit it");
+        // Nothing moved: a refused edit leaves no cursor behind.
+        assert_eq!(state.bus.peers(&project.id)[0].state.selection, None);
+    }
+
+    #[tokio::test]
+    async fn title_caption_transition_and_suggestions() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        session
+            .tool_add_title(&identity, -1, "Intro", None, None, None)
+            .await
+            .unwrap();
+        session
+            .tool_add_title(
+                &identity,
+                0,
+                "Part two",
+                Some("sub"),
+                Some("accent"),
+                Some(2.0),
+            )
+            .await
+            .unwrap();
+        session
+            .tool_add_caption(&identity, 1, 2, "Ada", Some("topLeft"))
+            .await
+            .unwrap();
+        let out = session.tool_set_transition(&identity, "dip").await.unwrap();
+        assert_eq!(out["transition"], "dip");
+        let (_, got, _) = call(
+            app(&state),
+            json_req(
+                Method::GET,
+                &format!("/api/projects/{}", project.id),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        let kinds: Vec<&str> = got["doc"]["edits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["title", "title", "caption"]);
+        assert_eq!(got["doc"]["edits"][1]["at"], 0.5); // after word 0 (end 0.5)
+        assert_eq!(got["doc"]["edits"][1]["style"], "accent");
+        assert_eq!(got["doc"]["edits"][2]["position"], "topLeft");
+        // Suggestions on the seeded words: no fillers, so a no-op with a clear message.
+        let out = session.tool_remove_fillers(&identity).await.unwrap();
+        assert_eq!(out["applied"], 0);
+        assert_eq!(out["message"], "no fillers found");
+    }
+
+    #[tokio::test]
+    async fn tighten_pauses_cuts_the_gaps_and_then_finds_nothing_left() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        // The seeded words are a second apart, which is no pause at all;
+        // push the second one out so there is a silence worth tightening.
+        let words = vec![
+            engine::Word {
+                id: "w0".into(),
+                text: "a".into(),
+                start: 0.0,
+                end: 0.5,
+            },
+            engine::Word {
+                id: "w1".into(),
+                text: "b".into(),
+                start: 5.0,
+                end: 5.5,
+            },
+        ];
+        tokio::fs::write(
+            state
+                .config
+                .data_dir
+                .join(&project.media_id)
+                .join(crate::routes::WORDS_CACHE),
+            serde_json::to_vec(&words).unwrap(),
+        )
+        .await
+        .unwrap();
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let out = session.tool_tighten_pauses(&identity).await.unwrap();
+        assert!(out["applied"].as_u64().unwrap() >= 1, "{out}");
+        assert!(out["outputDuration"].as_f64().unwrap() < 10.0);
+        // Applied once, the same suggestions are already covered.
+        let again = session.tool_tighten_pauses(&identity).await.unwrap();
+        assert_eq!(again["applied"], 0);
+        assert_eq!(again["message"], "no long pauses found");
+    }
+
+    #[tokio::test]
+    async fn bad_style_position_and_transition_names_are_400s() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let err = session
+            .tool_add_title(&identity, 0, "x", None, Some("neon"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.to_string().contains("dark, light or accent"));
+        let err = session
+            .tool_add_caption(&identity, 0, 0, "x", Some("middle"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        let err = session
+            .tool_set_transition(&identity, "wipe")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("use none or dip"));
+        // An index the transcript does not have is the server's own 400.
+        let err = session.tool_cut(&identity, 0, 9).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.to_string().contains("transcript of 3"));
+    }
+
+    #[tokio::test]
+    async fn overdub_surfaces_the_upstream_failure() {
+        // No VoiceStudio is reachable from a test, so the tool must pass the
+        // synthesis failure through rather than swallow it.
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let err = session
+            .tool_overdub(&identity, 1, 1, "hello there")
+            .await
+            .unwrap_err();
+        assert!(err.status().is_server_error(), "{err}");
+        // Nothing was appended, and the cursor never moved.
+        let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
+        assert!(doc.edits.is_empty());
+        assert_eq!(state.bus.peers(&project.id)[0].state.selection, None);
+        // Empty text is rejected before anything is synthesized at all.
+        let err = session
+            .tool_overdub(&identity, 1, 1, "  ")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "overdub text is empty");
+    }
+
+    #[tokio::test]
+    async fn export_polls_to_completion_or_returns_the_job() {
+        // seed_media has no real source, so ffmpeg fails fast: assert the tool
+        // surfaces the job error text.
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let err = session.tool_export(&identity, None).await.unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("ffmpeg")
+                || err.to_string().contains("export failed"),
+            "{err}"
+        );
+        // An unknown format never starts a job at all.
+        let err = session
+            .tool_export(&identity, Some("gif"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "unknown format gif");
+    }
+
+    #[tokio::test]
+    async fn end_to_end_over_streamable_http_with_a_browser_peer_watching() {
+        use rmcp::model::CallToolRequestParams;
+        use rmcp::ServiceExt;
+
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let (_, body, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                "/api/tokens",
+                Some(&ada),
+                Some(json!({ "label": "t" })),
+            ),
+        )
+        .await;
+        let token = body["token"].as_str().unwrap().to_owned();
+        let base = serve(&state).await;
+
+        // A browser-style peer.
+        let mut ws = crate::ws::tests_support::connect(&base, &project.id, &ada)
+            .await
+            .unwrap();
+        crate::ws::tests_support::next_json(&mut ws).await; // hello
+        crate::ws::tests_support::next_json(&mut ws).await; // ada's own presence echo
+
+        // The agent.
+        let client = reqwest13::Client::builder()
+            .default_headers({
+                let mut h = reqwest13::header::HeaderMap::new();
+                h.insert(
+                    reqwest13::header::AUTHORIZATION,
+                    format!("Bearer {token}").parse().unwrap(),
+                );
+                h
+            })
+            .build()
+            .unwrap();
+        let transport = rmcp::transport::StreamableHttpClientTransport::with_client(
+            client,
+            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                format!("{base}/mcp"),
+            ),
+        );
+        let agent = ().serve(transport).await.unwrap();
+        let tools = agent.list_tools(Default::default()).await.unwrap();
+        assert!(tools.tools.iter().any(|t| t.name == "cut"));
+        agent
+            .call_tool(
+                CallToolRequestParams::new("open_project")
+                    .with_arguments(rmcp::object!({ "project_id": project.id })),
+            )
+            .await
+            .unwrap();
+        let joined = crate::ws::tests_support::next_json(&mut ws).await;
+        assert_eq!(joined["t"], "presence");
+        assert_eq!(joined["user"]["displayName"], "Claude");
+        let bot_conn = joined["connId"].as_str().unwrap().to_owned();
+
+        agent
+            .call_tool(
+                CallToolRequestParams::new("cut")
+                    .with_arguments(rmcp::object!({ "from": 1, "to": 1 })),
+            )
+            .await
+            .unwrap();
+        // presence (selection) then doc — and crucially no `left` in between,
+        // which is what proves rmcp kept one session across both calls rather
+        // than building a fresh handler per request.
+        let mut saw_doc = false;
+        for _ in 0..4 {
+            let f = crate::ws::tests_support::next_json(&mut ws).await;
+            assert_ne!(f["t"], "left", "the agent's peer churned between calls");
+            if f["t"] == "doc" {
+                assert_eq!(f["headSeq"], 1);
+                saw_doc = true;
+                break;
+            }
+        }
+        assert!(saw_doc);
+        assert_eq!(state.bus.peers(&project.id).len(), 2);
+
+        agent.cancel().await.unwrap();
+        let left = loop {
+            let f = crate::ws::tests_support::next_json(&mut ws).await;
+            if f["t"] == "left" {
+                break f;
+            }
+        };
+        assert_eq!(left["connId"], bot_conn);
+
+        // Without a token the endpoint is closed.
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/mcp"))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
     }
 }

@@ -156,3 +156,24 @@ pub async fn serve(state: &Arc<AppState>) -> String {
     });
     format!("http://{addr}")
 }
+
+/// Add `email` to `project` with `role`, as the owner behind `cookie`.
+pub async fn add_member(
+    state: &Arc<AppState>,
+    cookie: &str,
+    project: &str,
+    email: &str,
+    role: &str,
+) {
+    let (status, body, _) = call(
+        app(state),
+        json_req(
+            Method::POST,
+            &format!("/api/projects/{project}/members"),
+            Some(cookie),
+            Some(json!({ "email": email, "role": role })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "add_member: {body}");
+}

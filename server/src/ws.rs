@@ -218,30 +218,28 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
     let _ = tokio::time::timeout(SEND_TIMEOUT, sink.close()).await;
 }
 
+/// WebSocket test plumbing, shared with `mcp.rs`'s end-to-end test: a
+/// browser-style peer that connects to a project and reads its frames.
 #[cfg(test)]
-mod tests {
-    use axum::http::{Method, StatusCode};
-    use futures_util::{SinkExt, StreamExt};
-    use serde_json::{json, Value};
+pub(crate) mod tests_support {
+    use std::time::Duration;
+
+    use futures_util::StreamExt;
+    use serde_json::Value;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    use tokio_tungstenite::tungstenite::http::header::COOKIE;
+    use tokio_tungstenite::tungstenite::http::header::{COOKIE, ORIGIN};
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
-    use super::*;
-    use crate::projects::create_project;
-    use crate::projects::test_support::seed_media;
-    use crate::test_util::{app, call, json_req, register, serve, state};
+    pub(crate) type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-    type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
-    async fn connect(base: &str, project: &str, cookie: &str) -> Result<Socket, u16> {
+    pub(crate) async fn connect(base: &str, project: &str, cookie: &str) -> Result<Socket, u16> {
         connect_from(base, project, cookie, None).await
     }
 
     /// `origin` rides along as the `Origin` header when given, the way a
     /// browser sends it; `None` is a plain non-browser client.
-    async fn connect_from(
+    pub(crate) async fn connect_from(
         base: &str,
         project: &str,
         cookie: &str,
@@ -263,7 +261,7 @@ mod tests {
         }
     }
 
-    async fn next_json(socket: &mut Socket) -> Value {
+    pub(crate) async fn next_json(socket: &mut Socket) -> Value {
         loop {
             match tokio::time::timeout(Duration::from_secs(3), socket.next())
                 .await
@@ -277,6 +275,20 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{Method, StatusCode};
+    use futures_util::SinkExt;
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
+
+    use super::tests_support::{connect, connect_from, next_json};
+    use super::*;
+    use crate::projects::create_project;
+    use crate::projects::test_support::seed_media;
+    use crate::test_util::{app, call, json_req, register, serve, state};
 
     /// Ada owns a 10 s project; bob has `role` (None = not a member).
     async fn setup(

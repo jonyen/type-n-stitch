@@ -43,7 +43,6 @@ pub fn transcript(
 /// next word's start, or to the end of the media for the last word. This is
 /// the same rule the client's `rangeForWords` uses, so an agent's cut lands
 /// exactly where a person's Delete would.
-#[allow(dead_code)] // Used by the editing tools, which land with the next task.
 pub fn word_range(words: &[Word], from: usize, to: usize, duration: f64) -> Option<Range> {
     if from > to || to >= words.len() {
         return None;
