@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
 use crate::ops::load_doc;
-use crate::projects::{create_project, summary, ProjectAccess, ProjectSummary};
+use crate::projects::{create_project, summary, Project, ProjectAccess, ProjectSummary};
 use crate::{media, tts, AppState};
 
 const ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "m4a", "mp4", "mov", "aac", "ogg", "webm"];
@@ -181,6 +181,21 @@ pub async fn transcribe(
     Ok(Json(Transcript { words }))
 }
 
+/// Transcript words plus speaker labels for a media item, tolerating a
+/// diarization failure the way the client does: labels come back `None` and
+/// the transcript is still usable on its own.
+///
+/// Unused until the MCP tools (a later task) call it directly.
+#[allow(dead_code)]
+pub async fn transcript_for(
+    state: &AppState,
+    media_id: &str,
+) -> AppResult<(Vec<Word>, Option<Speakers>)> {
+    let words = transcribe_item(state, media_id).await?;
+    let speakers = speakers_item(state, media_id).await.ok();
+    Ok((words, speakers))
+}
+
 /// Words for a media item, running whisper.cpp only if nothing is cached.
 pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>> {
     let dir = media_dir(state, id)?;
@@ -211,14 +226,14 @@ pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>>
     Ok(words)
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Speakers {
     /// Number of distinct speakers found.
-    count: u32,
+    pub count: u32,
     /// Speaker index for each transcript word, parallel to the word list.
-    words: Vec<Option<u32>>,
-    turns: Vec<SpeakerTurn>,
+    pub words: Vec<Option<u32>>,
+    pub turns: Vec<SpeakerTurn>,
 }
 
 /// Speaker cache file. Bump the version when diarization settings change.
@@ -342,8 +357,8 @@ pub struct SuggestRequest {
 
 #[derive(Serialize)]
 pub struct Suggestions {
-    fillers: Vec<Edit>,
-    pauses: Vec<Edit>,
+    pub fillers: Vec<Edit>,
+    pub pauses: Vec<Edit>,
 }
 
 /// `POST /api/projects/:id/suggest` — filler-word and long-pause cuts the
@@ -356,24 +371,37 @@ pub async fn suggest(
 ) -> AppResult<Json<Suggestions>> {
     access.require_edit()?;
     let id = access.project.media_id.clone();
-    let dir = media_dir(&state, &id)?;
+    let two_word_fillers = body.is_some_and(|Json(b)| b.two_word_fillers);
+    suggest_for(&state, &id, two_word_fillers).await.map(Json)
+}
+
+/// Filler-word and long-pause cut suggestions for a media item.
+pub async fn suggest_for(
+    state: &AppState,
+    media_id: &str,
+    two_word: bool,
+) -> AppResult<Suggestions> {
+    let dir = media_dir(state, media_id)?;
     let meta = read_meta(&dir).await?;
     let words = read_words(&dir).await?;
     let opts = SuggestOptions {
-        two_word_fillers: body.is_some_and(|Json(b)| b.two_word_fillers),
+        two_word_fillers: two_word,
         ..SuggestOptions::default()
     };
     let pauses = match read_silences(&dir, meta.duration).await {
         Ok(silences) => silence_pause_cuts(&silences, meta.duration, &opts),
         Err(e) => {
-            tracing::warn!(id, "silence detection failed, using word gaps: {e:#}");
+            tracing::warn!(
+                id = media_id,
+                "silence detection failed, using word gaps: {e:#}"
+            );
             pause_cuts(&words, &opts)
         }
     };
-    Ok(Json(Suggestions {
+    Ok(Suggestions {
         fillers: filler_cuts(&words, meta.duration, &opts),
         pauses,
-    }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -384,8 +412,8 @@ pub struct OverdubRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverdubResponse {
-    audio_url: String,
-    duration: f64,
+    pub audio_url: String,
+    pub duration: f64,
 }
 
 /// `POST /api/projects/:id/overdub` — synthesize replacement speech.
@@ -396,8 +424,18 @@ pub async fn overdub(
 ) -> AppResult<Json<OverdubResponse>> {
     access.require_edit()?;
     let id = access.project.media_id.clone();
-    let dir = media_dir(&state, &id)?;
-    let text = req.text.trim();
+    overdub_for(&state, &id, &req.text).await.map(Json)
+}
+
+/// Synthesize replacement speech for a media item, writing the audio into
+/// its directory and returning its URL and duration.
+pub async fn overdub_for(
+    state: &AppState,
+    media_id: &str,
+    text: &str,
+) -> AppResult<OverdubResponse> {
+    let dir = media_dir(state, media_id)?;
+    let text = text.trim();
     if text.is_empty() {
         return Err(AppError::bad_request("overdub text is empty"));
     }
@@ -413,11 +451,11 @@ pub async fn overdub(
     let duration = media::duration(&wav)
         .await
         .map_err(|e| AppError::upstream(format!("synthesized audio unreadable: {e:#}")))?;
-    tracing::info!(id, duration, "overdub synthesized");
-    Ok(Json(OverdubResponse {
-        audio_url: format!("/data/{id}/{name}"),
+    tracing::info!(id = media_id, duration, "overdub synthesized");
+    Ok(OverdubResponse {
+        audio_url: format!("/data/{media_id}/{name}"),
         duration,
-    }))
+    })
 }
 
 #[derive(Default, Deserialize)]
@@ -429,9 +467,9 @@ pub struct ExportRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportStarted {
-    job_id: String,
+    pub job_id: String,
     /// Planned output length in seconds, for the client's progress bar.
-    planned: f64,
+    pub planned: f64,
 }
 
 /// One export, from the moment ffmpeg starts until the client has read the
@@ -590,9 +628,22 @@ pub async fn export(
     body: Option<Json<ExportRequest>>,
 ) -> AppResult<Json<ExportStarted>> {
     access.require_edit()?;
-    let req = body.map(|Json(b)| b).unwrap_or_default();
-    let id = access.project.media_id.clone();
-    let dir = media_dir(&state, &id)?;
+    let format = body.and_then(|Json(b)| b.format);
+    start_export(&state, &access.project, format.as_deref())
+        .await
+        .map(Json)
+}
+
+/// Fold the log, plan the render and start ffmpeg in the background for
+/// `project`, returning a job id to poll. `format` overrides the source
+/// kind's default (`mp4`, `mp3` or `wav`).
+pub async fn start_export(
+    state: &Arc<AppState>,
+    project: &Project,
+    format: Option<&str>,
+) -> AppResult<ExportStarted> {
+    let id = project.media_id.clone();
+    let dir = media_dir(state, &id)?;
     let mut meta = read_meta(&dir).await?;
     if meta.kind == MediaKind::Video && meta.video.is_none() {
         // Media probed before dimensions were recorded: probe once more and
@@ -613,7 +664,7 @@ pub async fn export(
             ),
         }
     }
-    let (_, doc) = load_doc(&state, &access.project.id).await?;
+    let (_, doc) = load_doc(state, &project.id).await?;
     // A title or caption with nothing but whitespace draws nothing; dropping
     // it here keeps the planner from asking for an image that would be blank.
     // `validate` rejects blank text on the way in, so this only catches
@@ -626,7 +677,7 @@ pub async fn export(
             _ => true,
         })
         .collect();
-    let format = match req.format.as_deref() {
+    let format = match format {
         None => OutputFormat::for_kind(meta.kind),
         Some("mp4") => OutputFormat::Mp4,
         Some("mp3") => OutputFormat::Mp3,
@@ -677,7 +728,7 @@ pub async fn export(
 
     let job_id = Uuid::new_v4().to_string();
     set_job(
-        &state,
+        state,
         &job_id,
         ExportJob::Running {
             media_id: id.clone(),
@@ -731,7 +782,7 @@ pub async fn export(
         set_job(&task_state, &task_job, job);
     });
 
-    Ok(Json(ExportStarted { job_id, planned }))
+    Ok(ExportStarted { job_id, planned })
 }
 
 /// `GET /api/projects/:id/export/:job/progress` — poll an export.
@@ -741,13 +792,18 @@ pub async fn export_progress(
     UrlPath((_, job_id)): UrlPath<(String, String)>,
 ) -> AppResult<Json<ExportJob>> {
     let id = access.project.media_id;
-    let job = state
+    export_job(&state, &id, &job_id)
+        .map(Json)
+        .ok_or_else(|| AppError::not_found(format!("no export job {job_id}")))
+}
+
+/// The export job `job_id` for `media_id`, if one exists and belongs to it.
+pub fn export_job(state: &AppState, media_id: &str, job_id: &str) -> Option<ExportJob> {
+    state
         .jobs
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(&job_id)
-        .filter(|j| j.media_id() == id)
+        .get(job_id)
+        .filter(|j| j.media_id() == media_id)
         .cloned()
-        .ok_or_else(|| AppError::not_found(format!("no export job {job_id}")))?;
-    Ok(Json(job))
 }

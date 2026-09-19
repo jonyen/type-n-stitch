@@ -1,13 +1,50 @@
 //! Edit-list math: turning a list of cuts and overdubs into a timeline and
 //! mapping times between the source and the rendered output.
 
-use crate::types::{Edit, Range, Transition};
+use serde::{Deserialize, Serialize};
+
+use crate::types::{Edit, Range, Transition, Word};
 
 /// Two ranges closer than this are treated as touching.
 pub const EPS: f64 = 1e-6;
 
 /// Length of a dip-to-black on either side of a join.
 pub const FADE: f64 = 0.25;
+
+/// A transcript word's fate under the current edit list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WordStatus {
+    Kept,
+    Cut,
+    Overdub,
+}
+
+/// Whether `r` fully covers `w`, with `EPS` slack on both edges — mirrors the
+/// client's `covers` in `client/src/editlist.ts`.
+fn covers(r: Range, w: &Word) -> bool {
+    r.start <= w.start + EPS && r.end >= w.end - EPS
+}
+
+/// A word's status under `edits`: an `Overdub` covering it wins, then a
+/// `Cut`, else it is kept. Titles and captions never affect status.
+pub fn word_status(word: &Word, edits: &[Edit]) -> WordStatus {
+    let overdubbed = edits.iter().any(|e| match e {
+        Edit::Overdub { .. } => covers(e.range(), word),
+        _ => false,
+    });
+    if overdubbed {
+        return WordStatus::Overdub;
+    }
+    let cut = edits.iter().any(|e| match e {
+        Edit::Cut { .. } => covers(e.range(), word),
+        _ => false,
+    });
+    if cut {
+        return WordStatus::Cut;
+    }
+    WordStatus::Kept
+}
 
 /// One piece of the rendered output, in order.
 #[derive(Debug, Clone, PartialEq)]
@@ -370,6 +407,27 @@ mod tests {
 
     fn kinds(tl: &[Segment]) -> Vec<&SegmentKind> {
         tl.iter().map(|s| &s.kind).collect()
+    }
+
+    #[test]
+    fn word_status_mirrors_the_client() {
+        let w = crate::types::Word {
+            id: "w".into(),
+            text: "x".into(),
+            start: 1.0,
+            end: 1.5,
+        };
+        assert_eq!(word_status(&w, &[]), WordStatus::Kept);
+        assert_eq!(word_status(&w, &[cut(0.5, 2.0)]), WordStatus::Cut);
+        assert_eq!(
+            word_status(&w, &[cut(0.5, 2.0), overdub(1.0, 1.5, 1.0)]),
+            WordStatus::Overdub
+        );
+        assert_eq!(
+            word_status(&w, &[cut(1.2, 2.0)]),
+            WordStatus::Kept,
+            "partial cover is not cut"
+        );
     }
 
     #[test]
