@@ -28,9 +28,19 @@ password-hash = { version = "0.5", features = ["getrandom"] }
 sha2 = "0.11"
 rand = "0.10"
 base64 = "0.23"
+# One entry for both roles: Cargo unifies features across dev and normal
+# dependencies anyway, and the client side is only used by tests.
+rmcp = { version = "3.4", features = [
+    "server",
+    "client",
+    "macros",
+    "transport-streamable-http-server",
+    "transport-streamable-http-client-reqwest",
+] }
+schemars = "1"
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
 tokio-tungstenite = "0.30"

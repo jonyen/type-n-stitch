@@ -165,7 +165,7 @@ pub struct Transcript {
 
 /// Transcript cache file. Bump the version when the whisper invocation changes
 /// in a way that alters the words (v2: disfluency prompt keeps "um"/"uh").
-const WORDS_CACHE: &str = "words-v2.json";
+pub(crate) const WORDS_CACHE: &str = "words-v2.json";
 
 /// `POST /api/projects/:id/transcribe` — whisper.cpp word timestamps (cached).
 ///

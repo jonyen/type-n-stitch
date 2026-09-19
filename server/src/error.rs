@@ -79,6 +79,17 @@ impl AppError {
     }
 }
 
+/// The message a client would see, so callers that are not HTTP handlers —
+/// the MCP tools — can pass the server's own wording straight through.
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.index {
+            Some(index) => write!(f, "{} (at {index})", self.message),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
 impl<E: Into<anyhow::Error>> From<E> for AppError {
     fn from(err: E) -> Self {
         let err: anyhow::Error = err.into();

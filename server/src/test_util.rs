@@ -11,7 +11,9 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+use crate::auth::User;
 use crate::config::Config;
+use crate::projects::{create_project, test_support::seed_media, Project};
 use crate::{app, bus, db, AppState};
 
 /// A state whose data dir and database live in a fresh temp dir.
@@ -101,6 +103,47 @@ pub fn with_bearer(mut req: Request<Body>, token: &str) -> Request<Body> {
         format!("Bearer {token}").parse().unwrap(),
     );
     req
+}
+
+/// The signed-in user behind a session cookie.
+pub async fn me(state: &Arc<AppState>, cookie: &str) -> User {
+    let (_, me, _) = call(
+        app(state),
+        json_req(Method::GET, "/api/me", Some(cookie), None),
+    )
+    .await;
+    serde_json::from_value(me).unwrap()
+}
+
+/// A project called "Clip" owned by `cookie`'s user, over ten seconds of
+/// fake media whose transcript cache is pre-seeded with the three words
+/// "a b c" at 0, 1 and 2 seconds — so nothing ever shells out to whisper.
+pub async fn owned_project(state: &Arc<AppState>, cookie: &str) -> Project {
+    let media_id = seed_media(state, 10.0).await;
+    let words: Vec<engine::Word> = ["a", "b", "c"]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| engine::Word {
+            id: format!("w{i}"),
+            text: (*text).to_owned(),
+            start: i as f64,
+            end: i as f64 + 0.5,
+        })
+        .collect();
+    tokio::fs::write(
+        state
+            .config
+            .data_dir
+            .join(&media_id)
+            .join(crate::routes::WORDS_CACHE),
+        serde_json::to_vec(&words).unwrap(),
+    )
+    .await
+    .unwrap();
+    let owner = me(state, cookie).await;
+    create_project(&state.db, &owner, &media_id, "Clip")
+        .await
+        .unwrap()
 }
 
 /// Serve the app on an ephemeral port; returns `http://127.0.0.1:PORT`.

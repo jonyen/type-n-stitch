@@ -9,7 +9,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
-use crate::{auth, library, ops, projects, routes, tokens, ws, AppState};
+use crate::{auth, library, mcp, ops, projects, routes, tokens, ws, AppState};
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -45,6 +45,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/library", get(library::list))
         .route("/api/library/{slug}", post(library::open))
+        // The MCP transport is a plain tower service; Bearer authentication
+        // runs as a router layer so rmcp never sees an anonymous request.
+        .nest_service(
+            "/mcp",
+            Router::new()
+                .fallback_service(mcp::mcp_service(state.clone()))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    mcp::bearer_layer,
+                )),
+        )
         .nest_service("/data", ServeDir::new(&state.config.data_dir))
         .nest_service("/fonts", ServeDir::new(&state.config.fonts_dir))
         .nest_service(

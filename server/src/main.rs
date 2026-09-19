@@ -9,6 +9,8 @@ mod config;
 mod db;
 mod error;
 mod library;
+mod mcp;
+mod mcp_tools;
 mod media;
 mod ops;
 mod projects;

@@ -238,12 +238,18 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     CurrentUser(user): CurrentUser,
 ) -> AppResult<Json<Vec<ProjectSummary>>> {
+    Ok(Json(summaries(&state, &user.id).await?))
+}
+
+/// Every project `user_id` is a member of, newest first. Shared by the HTTP
+/// route and the MCP `list_projects` tool.
+pub(crate) async fn summaries(state: &AppState, user_id: &str) -> AppResult<Vec<ProjectSummary>> {
     let rows: Vec<(String, String, String, String, i64, String)> = sqlx::query_as(
         "SELECT p.id, p.media_id, p.owner_id, p.title, p.created_at, m.role
          FROM projects p JOIN project_members m ON m.project_id = p.id
          WHERE m.user_id = ? ORDER BY p.created_at DESC",
     )
-    .bind(&user.id)
+    .bind(user_id)
     .fetch_all(&state.db)
     .await?;
     let mut out = Vec::with_capacity(rows.len());
@@ -257,7 +263,7 @@ pub async fn list(
         };
         let role = role_or_viewer(&role);
         // A project whose media directory vanished is skipped, not fatal.
-        match summary(&state, &project, role).await {
+        match summary(state, &project, role).await {
             Ok(s) => out.push(s),
             Err(e) => {
                 tracing::warn!(
@@ -268,7 +274,7 @@ pub async fn list(
             }
         }
     }
-    Ok(Json(out))
+    Ok(out)
 }
 
 #[derive(Serialize)]
@@ -465,7 +471,7 @@ mod tests {
 
     use super::test_support::seed_media;
     use super::*;
-    use crate::test_util::{app, call, json_req, register, state};
+    use crate::test_util::{app, call, json_req, owned_project, register, state};
 
     async fn user_id(state: &Arc<AppState>, cookie: &str) -> String {
         let (_, me, _) = call(
@@ -474,19 +480,6 @@ mod tests {
         )
         .await;
         me["id"].as_str().unwrap().to_owned()
-    }
-
-    async fn owned_project(state: &Arc<AppState>, cookie: &str) -> Project {
-        let media_id = seed_media(state, 10.0).await;
-        let (_, me, _) = call(
-            app(state),
-            json_req(Method::GET, "/api/me", Some(cookie), None),
-        )
-        .await;
-        let owner: User = serde_json::from_value(me).unwrap();
-        create_project(&state.db, &owner, &media_id, "Clip")
-            .await
-            .unwrap()
     }
 
     #[tokio::test]
