@@ -65,6 +65,16 @@ impl AppError {
         }
     }
 
+    /// The request collided with concurrent state (e.g. a unique-key race)
+    /// and the client can plausibly succeed by retrying.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+            index: None,
+        }
+    }
+
     /// A bad request that names which entry of a batch was rejected.
     pub fn bad_request_at(index: usize, message: impl Into<String>) -> Self {
         Self {

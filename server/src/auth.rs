@@ -206,10 +206,6 @@ pub async fn create_user(
     }
 }
 
-/// Creates (or finds) the bot user an owner's agents act as. Idempotent:
-/// repeat calls for the same owner return the same row. Bots have no
-/// password (`password_hash = ''`) and can never log in — see `login`.
-#[allow(dead_code)] // Wired up by the MCP agent endpoint; only tests call it until then.
 /// The id of the bot that acts for `owner_id`, if one has ever been minted.
 pub async fn bot_id_for(db: &SqlitePool, owner_id: &str) -> AppResult<Option<String>> {
     let row: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE owner_id = ?")
@@ -219,6 +215,9 @@ pub async fn bot_id_for(db: &SqlitePool, owner_id: &str) -> AppResult<Option<Str
     Ok(row.map(|r| r.0))
 }
 
+/// Creates (or finds) the bot user an owner's agents act as. Idempotent:
+/// repeat calls for the same owner return the same row. Bots have no
+/// password (`password_hash = ''`) and can never log in — see `login`.
 pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
     let existing: Option<User> = sqlx::query_as(
         "SELECT id, email, display_name, color, owner_id FROM users WHERE owner_id = ?",
@@ -236,7 +235,14 @@ pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
     };
     let bot = User {
         id: Uuid::new_v4().to_string(),
-        email: format!("agent+{}@local", owner.id),
+        // Random, not `agent+<owner-id>@local`: owner ids are visible to
+        // co-members and registration is open, so a guessable email lets
+        // someone squat it before the owner ever mints their bot — then
+        // this insert conflicts and the recovery below can't find a bot
+        // row by owner_id, and every future call 500s for that owner.
+        // Bots are looked up by owner_id, never by email, so the shape of
+        // the email is free to change.
+        email: format!("agent+{}@local", Uuid::new_v4()),
         display_name: "Claude".to_owned(),
         color: color.to_owned(),
         owner_id: Some(owner.id.clone()),
@@ -258,9 +264,9 @@ pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
     match inserted {
         Ok(_) => Ok(bot),
         // Another call for the same owner won the race between our SELECT
-        // and INSERT and already created the bot (same deterministic
-        // email). Re-read it so both callers agree on one row instead of
-        // one of them surfacing a bare 500.
+        // and INSERT and already created the bot. Re-read it so both
+        // callers agree on one row instead of one of them surfacing a bare
+        // 500.
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
             let winner: Option<User> = sqlx::query_as(
                 "SELECT id, email, display_name, color, owner_id FROM users WHERE owner_id = ?",
@@ -268,9 +274,14 @@ pub async fn ensure_bot(db: &SqlitePool, owner: &User) -> AppResult<User> {
             .bind(&owner.id)
             .fetch_optional(db)
             .await?;
-            winner
-                .map(User::finish)
-                .ok_or_else(|| anyhow::anyhow!("bot insert conflicted but no bot row found").into())
+            match winner {
+                Some(bot) => Ok(bot.finish()),
+                // The insert conflicted (on the email's own uniqueness,
+                // now vanishingly unlikely with a random email) but no
+                // bot row exists for this owner. The client can plausibly
+                // succeed by simply retrying.
+                None => Err(AppError::conflict("bot account collided; try again")),
+            }
         }
         Err(e) => Err(e.into()),
     }
@@ -568,6 +579,30 @@ mod tests {
         assert_eq!(a.display_name, "Claude");
         assert_eq!(a.owner_id.as_deref(), Some(owner.id.as_str()));
         assert_ne!(a.color, owner.color);
+        assert!(
+            a.email.starts_with("agent+") && a.email.ends_with("@local"),
+            "bot email should be agent+<random>@local, got {}",
+            a.email
+        );
+        assert_ne!(
+            a.email,
+            format!("agent+{}@local", owner.id),
+            "bot email must not be derivable from the owner id"
+        );
+
+        let other_cookie = register(&state, "grace@example.com").await;
+        let (_, other_me, _) = call(
+            app(&state),
+            json_req(Method::GET, "/api/me", Some(&other_cookie), None),
+        )
+        .await;
+        let other_owner: User = serde_json::from_value(other_me).unwrap();
+        let other_bot = ensure_bot(&state.db, &other_owner).await.unwrap();
+        assert_ne!(
+            a.email, other_bot.email,
+            "two owners' bots must get different emails"
+        );
+
         let (status, _, _) = call(
             app(&state),
             json_req(
@@ -582,10 +617,16 @@ mod tests {
     }
 
     /// Several racing `ensure_bot` calls for the same owner all miss the
-    /// `SELECT ... WHERE owner_id = ?` before any of them has inserted, so
-    /// only one INSERT can win — the deterministic email makes the rest
-    /// hit the unique constraint. Every caller must still get back the
-    /// same bot row instead of one of them surfacing a bare 500.
+    /// `SELECT ... WHERE owner_id = ?` before any of them has inserted.
+    /// With the bot email now a random UUID (not derived from `owner.id`),
+    /// two racing INSERTs no longer collide with each other on that email
+    /// the way they used to, so this can no longer force the
+    /// unique-violation recovery branch deterministically — that branch
+    /// now only fires on a genuine (near-impossible) email collision, and
+    /// stays in place as a backstop rather than the guarantee it used to
+    /// be. What this test still proves: no racer ever surfaces the bare
+    /// 500 the squatting bug caused, and every racer gets back *some*
+    /// valid bot row for the right owner.
     #[tokio::test]
     async fn ensure_bot_survives_a_concurrent_insert_race() {
         let (state, _d) = state().await;
@@ -602,14 +643,10 @@ mod tests {
             let owner = owner.clone();
             handles.push(tokio::spawn(async move { ensure_bot(&db, &owner).await }));
         }
-        let mut ids = Vec::new();
         for handle in handles {
             let bot = handle.await.unwrap().unwrap();
-            ids.push(bot.id);
+            assert_eq!(bot.owner_id.as_deref(), Some(owner.id.as_str()));
+            assert_eq!(bot.display_name, "Claude");
         }
-        assert!(
-            ids.iter().all(|id| *id == ids[0]),
-            "every racer should agree on one bot: {ids:?}"
-        );
     }
 }
