@@ -205,17 +205,12 @@ async fn store(
         .await
         .context("creating assets dir")?;
     let path = dir.join(format!("{id}.{ext}"));
-    let mut file = tokio::fs::File::create(&path)
-        .await
-        .context("creating asset")?;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| AppError::bad_request(format!("upload interrupted: {e}")))?
-    {
-        file.write_all(&chunk).await.context("writing asset")?;
+    // From here on, any failure leaves a file on disk with no row for it, so
+    // every error path below removes it before returning.
+    if let Err(e) = write_body(&path, &mut field).await {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(e);
     }
-    file.flush().await.context("flushing asset")?;
     let probe = match media::probe(&path).await {
         Ok(p) => p,
         Err(e) => {
@@ -233,7 +228,8 @@ async fn store(
     let (width, height) = probe
         .video
         .map_or((None, None), |v| (Some(v.width), Some(v.height)));
-    sqlx::query(
+    let created_at = now();
+    if let Err(e) = sqlx::query(
         "INSERT INTO project_assets (id, project_id, kind, name, ext, duration, width, height, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
@@ -244,9 +240,13 @@ async fn store(
     .bind(probe.duration)
     .bind(width)
     .bind(height)
-    .bind(now())
+    .bind(created_at)
     .execute(&state.db)
-    .await?;
+    .await
+    {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(e.into());
+    }
     Ok(asset_from(
         &project.media_id,
         (
@@ -257,9 +257,27 @@ async fn store(
             probe.duration,
             width,
             height,
-            now(),
+            created_at,
         ),
     ))
+}
+
+/// Writes `field`'s chunks into the already-created file at `path`. Split out
+/// so `store` can remove the on-disk file on any failure here, not just the
+/// probe branch's.
+async fn write_body(path: &Path, field: &mut axum::extract::multipart::Field<'_>) -> AppResult<()> {
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .context("creating asset")?;
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::bad_request(format!("upload interrupted: {e}")))?
+    {
+        file.write_all(&chunk).await.context("writing asset")?;
+    }
+    file.flush().await.context("flushing asset")?;
+    Ok(())
 }
 
 pub async fn delete(
@@ -316,6 +334,7 @@ pub mod test_support {
         tokio::fs::write(dir.join(format!("{id}.{ext}")), b"")
             .await
             .unwrap();
+        let created_at = now();
         sqlx::query(
             "INSERT INTO project_assets (id, project_id, kind, name, ext, duration, width, height, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)",
         )
@@ -325,7 +344,7 @@ pub mod test_support {
         .bind(format!("{id}.{ext}"))
         .bind(ext)
         .bind(duration)
-        .bind(now())
+        .bind(created_at)
         .execute(&state.db)
         .await
         .unwrap();
@@ -339,7 +358,7 @@ pub mod test_support {
                 duration,
                 None,
                 None,
-                now(),
+                created_at,
             ),
         )
     }
@@ -469,6 +488,37 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         let (status, body, _) = call(app(&state), req(&ada)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// A file with an allowed extension but unreadable content fails at the
+    /// ffprobe step (in `store`, after the body is fully written), so this
+    /// exercises the same on-any-error cleanup path a mid-write failure
+    /// would take: nothing is left on disk for a row that was never inserted.
+    #[tokio::test]
+    async fn upload_that_fails_to_probe_leaves_no_orphaned_file() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let body = "--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.mp3\"\r\n\r\nnot really audio\r\n--x--\r\n";
+        let req = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/projects/{}/assets", project.id))
+            .header(axum::http::header::COOKIE, &ada)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=x",
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let (status, body, _) = call(app(&state), req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(list_for(&state.db, &project).await.unwrap().is_empty());
+        let dir = state.config.data_dir.join(&project.media_id).join("assets");
+        let leftover = match tokio::fs::read_dir(&dir).await {
+            Ok(mut entries) => entries.next_entry().await.unwrap().is_some(),
+            Err(_) => false,
+        };
+        assert!(!leftover, "expected no files left in {}", dir.display());
     }
 
     #[test]
