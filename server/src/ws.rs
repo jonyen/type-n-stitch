@@ -128,6 +128,8 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                 edits: doc.edits,
                 speaker_names: doc.speaker_names,
                 transition: doc.transition,
+                splits: doc.splits,
+                order: doc.order,
                 peers,
                 you,
             }
@@ -196,6 +198,8 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                                 edits: doc.edits,
                                 speaker_names: doc.speaker_names,
                                 transition: doc.transition,
+                                splits: doc.splits,
+                                order: doc.order,
                             },
                             Err(e) => ServerMsg::Error { code: "load".into(), detail: format!("{e:?}") },
                         };
@@ -442,6 +446,8 @@ mod tests {
                     edits: vec![],
                     speaker_names: vec![],
                     transition: engine::Transition::None,
+                    splits: vec![],
+                    order: vec![],
                 },
             );
         }

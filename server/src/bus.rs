@@ -62,6 +62,10 @@ pub enum ServerMsg {
         edits: Vec<Edit>,
         speaker_names: Vec<String>,
         transition: Transition,
+        #[serde(default)]
+        splits: Vec<f64>,
+        #[serde(default)]
+        order: Vec<f64>,
         peers: Vec<Peer>,
         you: Peer,
     },
@@ -74,6 +78,10 @@ pub enum ServerMsg {
         edits: Vec<Edit>,
         speaker_names: Vec<String>,
         transition: Transition,
+        #[serde(default)]
+        splits: Vec<f64>,
+        #[serde(default)]
+        order: Vec<f64>,
     },
     Presence(Peer),
     #[serde(rename_all = "camelCase")]
@@ -86,6 +94,10 @@ pub enum ServerMsg {
         edits: Vec<Edit>,
         speaker_names: Vec<String>,
         transition: Transition,
+        #[serde(default)]
+        splits: Vec<f64>,
+        #[serde(default)]
+        order: Vec<f64>,
     },
     Error {
         code: String,
@@ -265,6 +277,8 @@ mod tests {
             edits: vec![],
             speaker_names: vec![],
             transition: Transition::None,
+            splits: vec![],
+            order: vec![],
         }
     }
 
@@ -362,6 +376,8 @@ mod tests {
             edits: vec![],
             speaker_names: vec![],
             transition: Transition::Dip,
+            splits: vec![],
+            order: vec![],
         })
         .unwrap();
         assert_eq!(json["t"], "doc");
@@ -371,6 +387,8 @@ mod tests {
             edits: vec![],
             speaker_names: vec![],
             transition: Transition::None,
+            splits: vec![],
+            order: vec![],
         })
         .unwrap();
         assert_eq!(json["transition"], "none");

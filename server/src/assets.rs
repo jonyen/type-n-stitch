@@ -94,8 +94,6 @@ pub async fn list_for(db: &SqlitePool, project: &Project) -> AppResult<Vec<Asset
         .collect())
 }
 
-/// Not called yet — Task 5's validation and export wiring use this.
-#[allow(dead_code)]
 pub async fn find<'e, E>(
     exec: E,
     project_id: &str,
@@ -125,8 +123,6 @@ fn assets_dir(state: &AppState, project: &Project) -> PathBuf {
     state.config.data_dir.join(&project.media_id).join("assets")
 }
 
-/// Not called yet — Task 5's export wiring uses this.
-#[allow(dead_code)]
 pub async fn asset_files(
     state: &AppState,
     project: &Project,

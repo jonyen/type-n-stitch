@@ -6,7 +6,9 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use engine::{
-    fold, Edit, Op, ProjectDoc, SeqOp, Transition, MAX_CAPTIONS, MAX_SPEAKERS, MAX_TITLES,
+    apply_op, fold, piece_starts, Edit, MediaKind, Op, ProjectDoc, SeqOp, Transition, EPS,
+    MAX_AUDIO, MAX_BROLL, MAX_CAPTIONS, MAX_GAIN_DB, MAX_SPEAKERS, MAX_SPLITS, MAX_TITLES,
+    MIN_GAIN_DB,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,6 +42,8 @@ pub struct DocState {
     pub redoable: Option<i64>,
     /// The project-wide transition used at joins that do not override it.
     pub transition: Transition,
+    pub splits: Vec<f64>,
+    pub order: Vec<f64>,
 }
 
 /// Every stored operation for a project, in order. Takes any executor so the
@@ -144,19 +148,16 @@ pub async fn doc_state(state: &AppState, project: &Project, user: &User) -> AppR
         undoable,
         redoable,
         transition: doc.transition,
+        splits: doc.splits,
+        order: doc.order,
     })
-}
-
-/// How much inserted text the project holds so far, batch included: the
-/// caps are per project, so validation counts across the whole batch.
-struct Counts {
-    titles: usize,
-    captions: usize,
 }
 
 /// Reject operations that cannot apply to this media: ranges outside the
 /// duration, overdub audio that is not this media's, undo of someone else's.
-/// `duration` is read once by the caller and shared across the whole batch.
+/// `duration` is read once by the caller and shared across the whole batch;
+/// `current` is the fold so far, batch included, so the per-project caps and
+/// split/order checks see what this batch has already added.
 #[allow(clippy::too_many_arguments)]
 async fn validate(
     tx: &mut Transaction<'_, Sqlite>,
@@ -166,7 +167,7 @@ async fn validate(
     index: usize,
     op: &Op,
     duration: f64,
-    counts: &mut Counts,
+    current: &ProjectDoc,
 ) -> AppResult<()> {
     let dir = state.config.data_dir.join(&project.media_id);
     let check_transition = |transition: Transition| -> AppResult<()> {
@@ -301,11 +302,15 @@ async fn validate(
             {
                 return Err(AppError::bad_request_at(index, "title text is too long"));
             }
-            if matches!(op, Op::AddTitle { .. }) {
-                if counts.titles >= MAX_TITLES {
-                    return Err(AppError::bad_request_at(index, "too many titles"));
-                }
-                counts.titles += 1;
+            if matches!(op, Op::AddTitle { .. })
+                && current
+                    .edits
+                    .iter()
+                    .filter(|e| matches!(e, Edit::Title { .. }))
+                    .count()
+                    >= MAX_TITLES
+            {
+                return Err(AppError::bad_request_at(index, "too many titles"));
             }
             Ok(())
         }
@@ -323,10 +328,15 @@ async fn validate(
             if text.chars().count() > 200 {
                 return Err(AppError::bad_request_at(index, "caption text is too long"));
             }
-            if counts.captions >= MAX_CAPTIONS {
+            if current
+                .edits
+                .iter()
+                .filter(|e| matches!(e, Edit::Caption { .. }))
+                .count()
+                >= MAX_CAPTIONS
+            {
                 return Err(AppError::bad_request_at(index, "too many captions"));
             }
-            counts.captions += 1;
             Ok(())
         }
         Op::RemoveCaption { start } => check_range(*start, *start),
@@ -342,18 +352,176 @@ async fn validate(
             start,
             transition: None,
         } => check_range(*start, *start),
-        // Split, Unsplit, Move, AddBroll/RemoveBroll and AddAudio/EditAudio/
-        // RemoveAudio land in the fold (engine commit 9568a07) but are not
-        // validated here yet; Task 5 wires that up. Left permissive so the
-        // crate compiles in the meantime.
-        Op::Split { .. }
-        | Op::Unsplit { .. }
-        | Op::Move { .. }
-        | Op::AddBroll { .. }
-        | Op::RemoveBroll { .. }
-        | Op::AddAudio { .. }
-        | Op::EditAudio { .. }
-        | Op::RemoveAudio { .. } => Ok(()),
+        Op::Split { at } => {
+            if *at <= EPS || *at >= duration - EPS {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "nothing to split at the edge of the media",
+                ));
+            }
+            let inside = |e: &Edit| {
+                let r = e.range();
+                *at > r.start + EPS && *at < r.end - EPS
+            };
+            if current
+                .edits
+                .iter()
+                .any(|e| matches!(e, Edit::Cut { .. } | Edit::Overdub { .. }) && inside(e))
+            {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "cannot split inside a cut or an overdub",
+                ));
+            }
+            if current.splits.iter().any(|s| (s - at).abs() < EPS) {
+                return Err(AppError::bad_request_at(index, "already split there"));
+            }
+            if current.splits.len() >= MAX_SPLITS {
+                return Err(AppError::bad_request_at(index, "too many splits"));
+            }
+            Ok(())
+        }
+        Op::Unsplit { at } => {
+            if current.splits.iter().any(|s| (s - at).abs() < EPS) {
+                Ok(())
+            } else {
+                Err(AppError::bad_request_at(index, "no split there"))
+            }
+        }
+        Op::Move { piece, before } => {
+            let starts: Vec<f64> = piece_starts(&current.edits, &current.splits)
+                .into_iter()
+                .filter(|s| *s < duration - EPS)
+                .collect();
+            let is_piece = |x: f64| starts.iter().any(|s| (s - x).abs() < EPS);
+            if !is_piece(*piece) {
+                return Err(AppError::bad_request_at(
+                    index,
+                    format!("no clip starts at {piece}"),
+                ));
+            }
+            match before {
+                Some(b) if !is_piece(*b) => Err(AppError::bad_request_at(
+                    index,
+                    format!("no clip starts at {b}"),
+                )),
+                Some(b) if (b - piece).abs() < EPS => Err(AppError::bad_request_at(
+                    index,
+                    "a clip cannot move before itself",
+                )),
+                _ => Ok(()),
+            }
+        }
+        Op::AddBroll {
+            start,
+            end,
+            media,
+            offset,
+        } => {
+            check_range(*start, *end)?;
+            if *end <= *start {
+                return Err(AppError::bad_request_at(index, "B-roll range is empty"));
+            }
+            let Some((kind, length)) = crate::assets::find(&mut **tx, &project.id, media).await?
+            else {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "asset does not belong to this project",
+                ));
+            };
+            if kind != MediaKind::Video {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "B-roll needs a video asset",
+                ));
+            }
+            if *offset < 0.0 || offset + (end - start) > length + EPS {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "B-roll runs past the end of the asset",
+                ));
+            }
+            if current
+                .edits
+                .iter()
+                .filter(|e| matches!(e, Edit::Broll { .. }))
+                .count()
+                >= MAX_BROLL
+            {
+                return Err(AppError::bad_request_at(index, "too many B-roll shots"));
+            }
+            Ok(())
+        }
+        Op::RemoveBroll { start } => check_range(*start, *start),
+        Op::AddAudio {
+            start,
+            end,
+            media,
+            offset,
+            gain,
+            ..
+        } => {
+            check_range(*start, *end)?;
+            if *end <= *start {
+                return Err(AppError::bad_request_at(index, "music range is empty"));
+            }
+            let Some((kind, length)) = crate::assets::find(&mut **tx, &project.id, media).await?
+            else {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "asset does not belong to this project",
+                ));
+            };
+            if kind != MediaKind::Audio {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "music needs an audio asset",
+                ));
+            }
+            if *offset < 0.0 || *offset >= length {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "offset is past the end of the asset",
+                ));
+            }
+            if !(MIN_GAIN_DB..=MAX_GAIN_DB).contains(gain) {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "gain must be between -30 and 12 dB",
+                ));
+            }
+            if current
+                .edits
+                .iter()
+                .any(|e| matches!(e, Edit::Audio { start: s, .. } if (s - start).abs() < EPS))
+            {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "music already starts there",
+                ));
+            }
+            if current
+                .edits
+                .iter()
+                .filter(|e| matches!(e, Edit::Audio { .. }))
+                .count()
+                >= MAX_AUDIO
+            {
+                return Err(AppError::bad_request_at(index, "too many music edits"));
+            }
+            Ok(())
+        }
+        Op::EditAudio { start, gain, .. } => {
+            check_range(*start, *start)?;
+            if !(MIN_GAIN_DB..=MAX_GAIN_DB).contains(gain) {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "gain must be between -30 and 12 dB",
+                ));
+            }
+            Ok(())
+        }
+        Op::RemoveAudio { start } => check_range(*start, *start),
     }
 }
 
@@ -380,19 +548,7 @@ pub async fn apply_ops(
     // this batch adds, so a single batch cannot slip past them either. The
     // log is read *inside* the write transaction: counting before it would
     // let two concurrent batches both see room for one more title.
-    let current = fold(&read_log(&mut *tx, &project.id).await?);
-    let mut counts = Counts {
-        titles: current
-            .edits
-            .iter()
-            .filter(|e| matches!(e, Edit::Title { .. }))
-            .count(),
-        captions: current
-            .edits
-            .iter()
-            .filter(|e| matches!(e, Edit::Caption { .. }))
-            .count(),
-    };
+    let mut current = fold(&read_log(&mut *tx, &project.id).await?);
     // A batch of nothing but replayed op ids appends nothing; there is then
     // no new fold to announce.
     let mut appended = false;
@@ -414,7 +570,7 @@ pub async fn apply_ops(
             index,
             &client_op.op,
             duration,
-            &mut counts,
+            &current,
         )
         .await?;
         let (head,): (Option<i64>,) =
@@ -435,6 +591,9 @@ pub async fn apply_ops(
         .execute(&mut *tx)
         .await?;
         appended = true;
+        if !matches!(client_op.op, Op::Undo { .. } | Op::Redo { .. }) {
+            apply_op(&mut current, &client_op.op);
+        }
         match &client_op.op {
             Op::Undo { target_seq } => {
                 sqlx::query("UPDATE edit_ops SET undone_by = ? WHERE project_id = ? AND seq = ?")
@@ -478,6 +637,8 @@ pub async fn apply_ops(
                 edits: doc.edits,
                 speaker_names: doc.speaker_names,
                 transition: doc.transition,
+                splits: doc.splits,
+                order: doc.order,
             },
         );
     }
@@ -517,9 +678,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::assets::test_support::seed_asset;
     use crate::projects::create_project;
+    use crate::projects::find_project;
     use crate::projects::test_support::seed_media;
     use crate::test_util::{app, call, json_req, register, state};
+
+    async fn project_of(state: &Arc<AppState>, id: &str) -> Project {
+        find_project(&state.db, id).await.unwrap().unwrap()
+    }
 
     async fn me(state: &Arc<AppState>, cookie: &str) -> User {
         let (_, me, _) = call(
@@ -1157,5 +1324,127 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn split_is_validated_against_cuts_edges_and_duplicates() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        post_ops(&state, &ada, &project, vec![cut("c", 4.0, 6.0)]).await;
+        for (id, at) in [("e0", 0.0), ("e1", 10.0), ("in", 5.0)] {
+            let (status, body) = post_ops(
+                &state,
+                &ada,
+                &project,
+                vec![json!({ "opId": id, "kind": "split", "at": at })],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{at}: {body}");
+        }
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "s", "kind": "split", "at": 2.0 })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["splits"], json!([2.0]));
+        let (status, _) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "s2", "kind": "split", "at": 2.0 })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Unsplit must name a split.
+        let (status, _) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "u", "kind": "unsplit", "at": 3.0 })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn move_sees_a_split_earlier_in_the_same_batch() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![
+                json!({ "opId": "s", "kind": "split", "at": 5.0 }),
+                json!({ "opId": "m", "kind": "move", "piece": 5.0, "before": 0.0 }),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["order"], json!([5.0, 0.0]));
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "m2", "kind": "move", "piece": 7.0, "before": null })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn broll_and_audio_check_the_asset_kind_range_offset_and_gain() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let p = project_of(&state, &project).await;
+        let clip = seed_asset(&state, &p, MediaKind::Video, 3.0).await;
+        let song = seed_asset(&state, &p, MediaKind::Audio, 30.0).await;
+        let bad = [
+            json!({ "opId": "b1", "kind": "addbroll", "start": 1.0, "end": 5.0, "media": clip.id, "offset": 0.0 }), // longer than the asset
+            json!({ "opId": "b2", "kind": "addbroll", "start": 1.0, "end": 2.0, "media": song.id, "offset": 0.0 }), // wrong kind
+            json!({ "opId": "b3", "kind": "addbroll", "start": 1.0, "end": 2.0, "media": "nope", "offset": 0.0 }), // not ours
+            json!({ "opId": "a1", "kind": "addaudio", "start": 0.0, "end": 5.0, "media": song.id, "gain": 20.0 }), // too loud
+            json!({ "opId": "a2", "kind": "addaudio", "start": 0.0, "end": 5.0, "media": song.id, "offset": 31.0 }), // past the end
+            json!({ "opId": "a3", "kind": "addaudio", "start": 2.0, "end": 1.0, "media": song.id }), // empty
+        ];
+        for op in bad {
+            let (status, body) = post_ops(&state, &ada, &project, vec![op.clone()]).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{op}: {body}");
+        }
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![
+                json!({ "opId": "ok1", "kind": "addbroll", "start": 1.0, "end": 3.0, "media": clip.id, "offset": 1.0 }),
+                json!({ "opId": "ok2", "kind": "addaudio", "start": 0.0, "end": 10.0, "media": song.id, "gain": -6.0, "duck": false }),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["edits"].as_array().unwrap().len(), 2);
+        assert_eq!(body["edits"][1]["duck"], false);
+        // A second audio at the same start is ambiguous.
+        let (status, _) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "dup", "kind": "addaudio", "start": 0.0, "end": 4.0, "media": song.id })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![
+                json!({ "opId": "e", "kind": "editaudio", "start": 0.0, "gain": 3.0, "duck": true }),
+                json!({ "opId": "r", "kind": "removebroll", "start": 1.0 }),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["edits"].as_array().unwrap().len(), 1);
+        assert_eq!(body["edits"][0]["gain"], 3.0);
     }
 }

@@ -13,7 +13,7 @@ use axum::extract::{Multipart, Path as UrlPath, State};
 use axum::Json;
 use engine::{
     assign_speakers, build_ffmpeg_args, filler_cuts, output_duration, pause_cuts,
-    silence_pause_cuts, text, thumbnail_args, thumbnail_sheet, timeline, Edit, ExportError,
+    silence_pause_cuts, text, thumbnail_args, thumbnail_sheet, timeline_with, Edit, ExportError,
     ExportOptions, MediaKind, OutputFormat, Range, SpeakerTurn, SuggestOptions, ThumbnailSheet,
     VideoInfo, Word, DEFAULT_VIDEO,
 };
@@ -682,6 +682,8 @@ pub async fn start_export(
         Some(other) => return Err(AppError::bad_request(format!("unknown format {other}"))),
     };
     let overdub_audio = overdub_files(&id, &dir, &edits)?;
+    let asset_files = crate::assets::asset_files(state, project, &edits).await?;
+    let words = read_words(&dir).await.unwrap_or_default();
     let (output, name) = next_numbered(&dir, "export", format.extension()).await?;
     let source = dir.join(format!("source.{}", meta.ext));
 
@@ -711,10 +713,10 @@ pub async fn start_export(
             title_images: &title_images,
             caption_images: &caption_images,
             transition: doc.transition,
-            splits: &[],
-            order: &[],
-            assets: &std::collections::HashMap::new(),
-            words: &[],
+            splits: &doc.splits,
+            order: &doc.order,
+            assets: &asset_files,
+            words: &words,
         },
     )
     .map_err(|e| match e {
@@ -725,7 +727,12 @@ pub async fn start_export(
         }
         other => AppError::bad_request(other.to_string()),
     })?;
-    let planned = output_duration(&timeline(meta.duration, &edits));
+    let planned = output_duration(&timeline_with(
+        meta.duration,
+        &edits,
+        &doc.splits,
+        &doc.order,
+    ));
 
     let job_id = Uuid::new_v4().to_string();
     set_job(
