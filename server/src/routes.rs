@@ -711,6 +711,10 @@ pub async fn start_export(
             title_images: &title_images,
             caption_images: &caption_images,
             transition: doc.transition,
+            splits: &[],
+            order: &[],
+            assets: &std::collections::HashMap::new(),
+            words: &[],
         },
     )
     .map_err(|e| match e {

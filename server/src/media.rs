@@ -170,6 +170,18 @@ pub async fn duration(path: &Path) -> anyhow::Result<f64> {
     Ok(probe(path).await?.duration)
 }
 
+/// One JPEG of the first frame, 320 px wide, for asset cards.
+pub async fn poster_frame(input: &Path, output: &Path) -> anyhow::Result<()> {
+    let args = ["-y", "-loglevel", "error", "-i"]
+        .map(String::from)
+        .into_iter()
+        .chain([input.to_string_lossy().into_owned()])
+        .chain(["-frames:v", "1", "-vf", "scale=320:-2"].map(String::from))
+        .chain([output.to_string_lossy().into_owned()])
+        .collect::<Vec<_>>();
+    run("ffmpeg", &args).await.map(drop)
+}
+
 /// Run ffmpeg to completion, with stderr in the error on failure.
 pub async fn ffmpeg(args: &[String]) -> anyhow::Result<()> {
     run("ffmpeg", args).await.map(drop)

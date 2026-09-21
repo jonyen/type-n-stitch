@@ -342,6 +342,18 @@ async fn validate(
             start,
             transition: None,
         } => check_range(*start, *start),
+        // Split, Unsplit, Move, AddBroll/RemoveBroll and AddAudio/EditAudio/
+        // RemoveAudio land in the fold (engine commit 9568a07) but are not
+        // validated here yet; Task 5 wires that up. Left permissive so the
+        // crate compiles in the meantime.
+        Op::Split { .. }
+        | Op::Unsplit { .. }
+        | Op::Move { .. }
+        | Op::AddBroll { .. }
+        | Op::RemoveBroll { .. }
+        | Op::AddAudio { .. }
+        | Op::EditAudio { .. }
+        | Op::RemoveAudio { .. } => Ok(()),
     }
 }
 

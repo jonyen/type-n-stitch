@@ -3,6 +3,7 @@
 //! serves `data/` back to the client.
 
 mod app;
+mod assets;
 mod auth;
 mod bus;
 mod config;
