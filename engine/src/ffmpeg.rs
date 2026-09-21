@@ -18,8 +18,11 @@ use thiserror::Error;
 
 use serde::{Deserialize, Serialize};
 
-use crate::editlist::{caption_windows, joins, timeline, Segment, SegmentKind, FADE};
-use crate::types::{Edit, MediaKind, Range, Transition};
+use crate::editlist::{
+    audio_windows, broll_windows, caption_windows, joins, timeline_with, Segment, SegmentKind,
+    Window, FADE,
+};
+use crate::types::{Edit, MediaKind, Range, Transition, Word};
 
 /// Container/codec for the rendered file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +100,12 @@ pub struct ExportOptions<'a> {
     pub caption_images: &'a HashMap<usize, (PathBuf, u32, u32)>,
     /// Transition used at every join that does not override it.
     pub transition: Transition,
+    pub splits: &'a [f64],
+    pub order: &'a [f64],
+    /// Local file for each asset id a B-roll or audio edit names.
+    pub assets: &'a HashMap<String, PathBuf>,
+    /// Transcript words, for ducking. Empty means no ducking.
+    pub words: &'a [Word],
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -111,6 +120,8 @@ pub enum ExportError {
     MissingTitleImage(usize),
     #[error("no rendered image for caption {0}")]
     MissingCaptionImage(usize),
+    #[error("no file for asset {0}")]
+    MissingAsset(String),
 }
 
 /// Audio format every segment is coerced to before `concat`.
@@ -123,7 +134,7 @@ pub fn build_ffmpeg_args(
     edits: &[Edit],
     opts: &ExportOptions,
 ) -> Result<Vec<String>, ExportError> {
-    let segments = timeline(opts.duration, edits);
+    let segments = timeline_with(opts.duration, edits, opts.splits, opts.order);
     if segments.is_empty() {
         return Err(ExportError::NothingToExport);
     }
@@ -196,6 +207,40 @@ pub fn build_ffmpeg_args(
             args.push(path.to_string_lossy().into_owned());
         }
     }
+    let brolls = broll_windows(&segments, edits);
+    let audios = audio_windows(&segments, edits);
+    let asset_path = |id: &str| {
+        opts.assets
+            .get(id)
+            .ok_or_else(|| ExportError::MissingAsset(id.to_owned()))
+    };
+    let mut broll_input: Vec<Vec<usize>> = vec![Vec::new(); segments.len()];
+    if render_video {
+        for (i, ws) in brolls.iter().enumerate() {
+            for w in ws {
+                let Edit::Broll { media, .. } = &edits[w.index] else {
+                    continue;
+                };
+                args.push("-i".into());
+                args.push(asset_path(media)?.to_string_lossy().into_owned());
+                broll_input[i].push(next_input);
+                next_input += 1;
+            }
+        }
+    }
+    let mut audio_input: Vec<Vec<usize>> = vec![Vec::new(); segments.len()];
+    for (i, ws) in audios.iter().enumerate() {
+        for w in ws {
+            let Edit::Audio { media, .. } = &edits[w.index] else {
+                continue;
+            };
+            args.push("-i".into());
+            args.push(asset_path(media)?.to_string_lossy().into_owned());
+            audio_input[i].push(next_input);
+            next_input += 1;
+        }
+    }
+
     let joins = joins(&segments, edits, opts.transition);
     // A dip needs room for both halves, so very short pieces stay hard-cut.
     let dips = |i: usize| segments[i].output.len() >= 2.0 * FADE;
@@ -217,7 +262,7 @@ pub fn build_ffmpeg_args(
     let mut concat_inputs = String::new();
     for (i, seg) in segments.iter().enumerate() {
         let hold = seg.output.len();
-        let (v, mut a) = match seg.kind {
+        let (v, a) = match seg.kind {
             SegmentKind::Source => (render_video.then(|| video_trim(seg)), audio_trim(seg)),
             SegmentKind::Overdub { index } => (
                 render_video.then(|| freeze_frame(seg, opts.duration, hold)),
@@ -232,6 +277,18 @@ pub fn build_ffmpeg_args(
             // `overlay` takes two inputs, so each caption closes the chain so
             // far under a temporary label and starts a new one from it.
             let mut chain = base;
+            for (n, w) in brolls[i].iter().enumerate() {
+                let Edit::Broll { start, offset, .. } = &edits[w.index] else {
+                    continue;
+                };
+                let from = offset + (w.source_start - start);
+                let _ = write!(graph,
+                    "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS+{}/TB,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}b{n}];",
+                    broll_input[i][n], fmt(from), fmt(from + (w.end - w.start)), fmt(w.start),
+                    W = video_info.width, H = video_info.height);
+                let _ = write!(graph, "{chain}[v{i}bo{n}];");
+                chain = format!("[v{i}bo{n}][v{i}b{n}]overlay=x=0:y=0:eof_action=pass:enable='between(t,{},{})'", fmt(w.start), fmt(w.end));
+            }
             for (n, w) in windows[i].iter().enumerate() {
                 let label = format!("v{i}c{n}");
                 let _ = write!(graph, "{chain}[{label}];");
@@ -253,13 +310,55 @@ pub fn build_ffmpeg_args(
             let _ = write!(graph, "{chain}[v{i}];");
             let _ = write!(concat_inputs, "[v{i}]");
         }
+        let mut mixed = if audios[i].is_empty() {
+            a
+        } else {
+            let _ = write!(graph, "{a}[a{i}m];");
+            let mut labels = format!("[a{i}m]");
+            for (n, w) in audios[i].iter().enumerate() {
+                let Edit::Audio {
+                    start,
+                    offset,
+                    gain,
+                    duck,
+                    ..
+                } = &edits[w.index]
+                else {
+                    continue;
+                };
+                let from = offset + (w.source_start - start);
+                let mut m = format!(
+                    "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE},adelay={}:all=1,volume={}dB",
+                    audio_input[i][n], fmt(from), fmt(from + (w.end - w.start)),
+                    (w.start * 1000.0).round() as i64, fmt(*gain));
+                let runs = if *duck {
+                    duck_runs(seg, w, opts.words)
+                } else {
+                    Vec::new()
+                };
+                if !runs.is_empty() {
+                    let _ = write!(m, ",volume=volume='{}':eval=frame", duck_expr(&runs));
+                }
+                let _ = write!(graph, "{m}[a{i}x{n}];");
+                let _ = write!(labels, "[a{i}x{n}]");
+            }
+            format!(
+                "{labels}amix=inputs={}:normalize=0:duration=first",
+                audios[i].len() + 1
+            )
+        };
         if dip_in(i) {
-            let _ = write!(a, ",afade=t=in:st=0:d={}", fmt(FADE));
+            let _ = write!(mixed, ",afade=t=in:st=0:d={}", fmt(FADE));
         }
         if dip_out(i) {
-            let _ = write!(a, ",afade=t=out:st={}:d={}", fmt(hold - FADE), fmt(FADE));
+            let _ = write!(
+                mixed,
+                ",afade=t=out:st={}:d={}",
+                fmt(hold - FADE),
+                fmt(FADE)
+            );
         }
-        let _ = write!(graph, "{a}[a{i}];");
+        let _ = write!(graph, "{mixed}[a{i}];");
         let _ = write!(concat_inputs, "[a{i}]");
     }
     let _ = write!(
@@ -409,6 +508,30 @@ pub fn duck_expr(runs: &[Range]) -> String {
     format!("1-{}*({expr})", fmt(1.0 - DUCK_GAIN))
 }
 
+/// Speech inside a music window, in segment time: the words the window
+/// covers, or the whole hold of an overdub.
+fn duck_runs(seg: &Segment, w: &Window, words: &[Word]) -> Vec<Range> {
+    match seg.kind {
+        SegmentKind::Overdub { .. } => vec![Range::new(w.start, w.end)],
+        SegmentKind::Title { .. } => Vec::new(),
+        SegmentKind::Source => {
+            let spans: Vec<Range> = words
+                .iter()
+                .filter(|wd| {
+                    wd.end > w.source_start && wd.start < w.source_start + (w.end - w.start)
+                })
+                .map(|wd| {
+                    Range::new(
+                        (wd.start - seg.source.start).max(w.start),
+                        (wd.end - seg.source.start).min(w.end),
+                    )
+                })
+                .collect();
+            speech_runs(&spans, SPEECH_GAP)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +557,25 @@ mod tests {
         )
     }
 
+    /// Local file paths keyed by asset id.
+    fn assets(pairs: &[(&str, &str)]) -> &'static HashMap<String, PathBuf> {
+        leak(
+            pairs
+                .iter()
+                .map(|(id, p)| ((*id).to_owned(), PathBuf::from(p)))
+                .collect(),
+        )
+    }
+
+    fn word(start: f64, end: f64) -> Word {
+        Word {
+            id: format!("w{start}"),
+            text: "x".into(),
+            start,
+            end,
+        }
+    }
+
     fn opts<'a>(
         kind: MediaKind,
         format: OutputFormat,
@@ -454,6 +596,10 @@ mod tests {
             title_images: titles(&[]),
             caption_images: captions(&[]),
             transition: Transition::None,
+            splits: &[],
+            order: &[],
+            assets: assets(&[]),
+            words: &[],
         }
     }
 
@@ -979,5 +1125,197 @@ mod tests {
         });
         assert!(!g.contains("fade=t=out"), "{g}");
         assert!(g.contains("fade=t=in"), "{g}");
+    }
+
+    #[test]
+    fn reordered_pieces_concat_in_output_order() {
+        let g = graph_with(&[], MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.splits = &[5.0];
+            o.order = &[5.0, 0.0];
+        });
+        assert!(g.starts_with("[0:v]trim=start=5:end=10"), "{g}");
+        assert!(g.contains("[0:v]trim=start=0:end=5"), "{g}");
+        assert!(
+            g.ends_with("[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"),
+            "{g}"
+        );
+    }
+
+    #[test]
+    fn broll_is_trimmed_delayed_scaled_and_overlaid_under_captions() {
+        let edits = [Edit::Broll {
+            start: 2.0,
+            end: 4.0,
+            media: "b1".into(),
+            offset: 1.5,
+        }];
+        let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.assets = assets(&[("b1", "/assets/b1.mp4")]);
+        })
+        .unwrap();
+        assert!(has_run(&args, &["-i", "/assets/b1.mp4"]));
+        let g = filter_complex(&args);
+        assert!(g.contains("[1:v]trim=start=1.5:end=3.5,setpts=PTS-STARTPTS+2/TB,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1[v0b0];"), "{g}");
+        assert!(
+            g.contains("[v0bo0][v0b0]overlay=x=0:y=0:eof_action=pass:enable='between(t,2,4)'[v0];"),
+            "{g}"
+        );
+    }
+
+    #[test]
+    fn broll_across_a_reordered_boundary_offsets_into_the_asset() {
+        // Window on the second output piece starts 1 s into the B-roll range.
+        let edits = [Edit::Broll {
+            start: 4.0,
+            end: 6.0,
+            media: "b1".into(),
+            offset: 0.0,
+        }];
+        let g = graph_with(
+            &[edits[0].clone()],
+            MediaKind::Video,
+            OutputFormat::Mp4,
+            |o| {
+                o.splits = &[5.0];
+                o.order = &[5.0, 0.0];
+                o.assets = assets(&[("b1", "/assets/b1.mp4")]);
+            },
+        );
+        // First output piece [5,10): window [0,1) from asset offset 1.
+        assert!(
+            g.contains("[1:v]trim=start=1:end=2,setpts=PTS-STARTPTS+0/TB"),
+            "{g}"
+        );
+        // Second output piece [0,5): window [4,5) from asset offset 0.
+        assert!(
+            g.contains("[2:v]trim=start=0:end=1,setpts=PTS-STARTPTS+4/TB"),
+            "{g}"
+        );
+    }
+
+    #[test]
+    fn music_is_delayed_gained_ducked_and_mixed_before_fades() {
+        let edits = [Edit::Audio {
+            start: 2.0,
+            end: 6.0,
+            media: "m1".into(),
+            offset: 10.0,
+            gain: -6.0,
+            duck: true,
+        }];
+        let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.assets = assets(&[("m1", "/assets/m1.mp3")]);
+            o.words = leak([word(2.5, 3.0), word(3.1, 3.5)]);
+        });
+        assert!(g.contains("[a0m];"), "{g}");
+        assert!(g.contains(&format!("[1:a]atrim=start=10:end=14,asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE},adelay=2000:all=1,volume=-6dB,volume=volume='1-0.749*(max(0,min(1,min((t-2.38)/0.12,(3.62-t)/0.12))))':eval=frame[a0x0];")), "{g}");
+        assert!(
+            g.contains("[a0m][a0x0]amix=inputs=2:normalize=0:duration=first[a0];"),
+            "{g}"
+        );
+    }
+
+    #[test]
+    fn music_without_duck_or_words_has_no_envelope_and_fades_after_the_mix() {
+        let edits = [
+            Edit::Audio {
+                start: 0.0,
+                end: 10.0,
+                media: "m1".into(),
+                offset: 0.0,
+                gain: 0.0,
+                duck: false,
+            },
+            Edit::Title {
+                at: 5.0,
+                duration: 1.0,
+                text: "T".into(),
+                subtitle: None,
+                style: TitleStyle::Dark,
+            },
+        ];
+        let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.assets = assets(&[("m1", "/assets/m1.mp3")]);
+            o.title_images = titles(&[(1, "/imgs/t.png")]);
+        });
+        assert!(g.contains("volume=0dB[a0x0];"), "{g}");
+        assert!(!g.contains("eval=frame"), "{g}");
+        assert!(
+            g.contains("amix=inputs=2:normalize=0:duration=first,afade=t=out:st=4.75:d=0.25[a0];"),
+            "{g}"
+        );
+    }
+
+    #[test]
+    fn overdub_hold_ducks_music_for_its_whole_length() {
+        let edits = [
+            Edit::Overdub {
+                start: 2.0,
+                end: 3.0,
+                text: "x".into(),
+                audio_url: "/data/m/od.wav".into(),
+                audio_duration: 2.0,
+            },
+            Edit::Audio {
+                start: 0.0,
+                end: 10.0,
+                media: "m1".into(),
+                offset: 0.0,
+                gain: 0.0,
+                duck: true,
+            },
+        ];
+        let mut overdub_audio = HashMap::new();
+        overdub_audio.insert("/data/m/od.wav".to_owned(), PathBuf::from("/od.wav"));
+        let out = PathBuf::from("out.mp4");
+        let mut o = opts(MediaKind::Video, OutputFormat::Mp4, &out, &overdub_audio);
+        o.assets = assets(&[("m1", "/assets/m1.mp3")]);
+        let args = build_ffmpeg_args(Path::new("in.mp4"), &edits, &o).unwrap();
+        let g = filter_complex(&args);
+        // Segment 1 is the 2 s hold: the envelope covers [0,2].
+        assert!(g.contains("(t--0.12)/0.12,(2.12-t)/0.12"), "{g}");
+    }
+
+    #[test]
+    fn audio_only_export_mixes_music_and_ignores_broll() {
+        let edits = [
+            Edit::Broll {
+                start: 1.0,
+                end: 2.0,
+                media: "b1".into(),
+                offset: 0.0,
+            },
+            Edit::Audio {
+                start: 0.0,
+                end: 4.0,
+                media: "m1".into(),
+                offset: 0.0,
+                gain: 0.0,
+                duck: false,
+            },
+        ];
+        let args = args_with(&edits, MediaKind::Audio, OutputFormat::Mp3, |o| {
+            o.assets = assets(&[("b1", "/assets/b1.mp4"), ("m1", "/assets/m1.mp3")]);
+        })
+        .unwrap();
+        assert!(!has_run(&args, &["-i", "/assets/b1.mp4"]));
+        assert!(has_run(&args, &["-i", "/assets/m1.mp3"]));
+        assert!(filter_complex(&args).contains("amix=inputs=2"));
+    }
+
+    #[test]
+    fn missing_asset_is_an_error() {
+        let edits = [Edit::Audio {
+            start: 0.0,
+            end: 4.0,
+            media: "m1".into(),
+            offset: 0.0,
+            gain: 0.0,
+            duck: false,
+        }];
+        assert_eq!(
+            args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap_err(),
+            ExportError::MissingAsset("m1".into())
+        );
     }
 }

@@ -139,6 +139,10 @@ fn renders_cuts_and_an_overdub_to_the_expected_length() {
             title_images: &HashMap::new(),
             caption_images: &HashMap::new(),
             transition: Transition::None,
+            splits: &[],
+            order: &[],
+            assets: &HashMap::new(),
+            words: &[],
         },
     )
     .unwrap();
@@ -179,6 +183,10 @@ fn renders_audio_only_export_from_a_video_source() {
             title_images: &HashMap::new(),
             caption_images: &HashMap::new(),
             transition: Transition::None,
+            splits: &[],
+            order: &[],
+            assets: &HashMap::new(),
+            words: &[],
         },
     )
     .unwrap();
@@ -297,6 +305,10 @@ fn renders_a_title_card_a_caption_and_a_dip_from_rasterised_pngs() {
             title_images: &title_images,
             caption_images: &caption_images,
             transition: Transition::Dip,
+            splits: &[],
+            order: &[],
+            assets: &HashMap::new(),
+            words: &[],
         },
     )
     .unwrap();
@@ -395,6 +407,10 @@ fn render_title_at(clip: &Path, dir: &Path, video: VideoInfo, tag: &str) -> (boo
             title_images: &title_images,
             caption_images: &HashMap::new(),
             transition: Transition::None,
+            splits: &[],
+            order: &[],
+            assets: &HashMap::new(),
+            words: &[],
         },
     )
     .unwrap();
