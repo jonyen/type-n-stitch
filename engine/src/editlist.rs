@@ -66,6 +66,51 @@ pub enum SegmentKind {
     Title { index: usize },
 }
 
+/// Kept ranges divided at every split, in output order: live entries of
+/// `order` first, then every other piece in source order.
+pub fn ordered_pieces(duration: f64, edits: &[Edit], splits: &[f64], order: &[f64]) -> Vec<Range> {
+    let mut points = splits.to_vec();
+    points.sort_by(f64::total_cmp);
+    let source: Vec<Range> = kept_segments(duration, edits)
+        .into_iter()
+        .flat_map(|r| split_at(r, &points))
+        .filter(|r| !r.is_empty())
+        .collect();
+    let same = |a: f64, b: f64| (a - b).abs() < EPS;
+    let mut out: Vec<Range> = Vec::with_capacity(source.len());
+    for &s in order {
+        if let Some(r) = source.iter().find(|r| same(r.start, s)) {
+            if !out.iter().any(|o| same(o.start, s)) {
+                out.push(*r);
+            }
+        }
+    }
+    for r in &source {
+        if !out.iter().any(|o| same(o.start, r.start)) {
+            out.push(*r);
+        }
+    }
+    out
+}
+
+/// Which ordered piece owns an instant: the one containing it, else the
+/// one with the smallest start at or after it (an instant inside a cut
+/// belongs to the piece that follows), else none (past every piece).
+fn owner(pieces: &[Range], t: f64) -> Option<usize> {
+    if let Some(i) = pieces
+        .iter()
+        .position(|p| p.contains(t) || (t - p.start).abs() < EPS)
+    {
+        return Some(i);
+    }
+    pieces
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.start >= t)
+        .min_by(|a, b| a.1.start.total_cmp(&b.1.start))
+        .map(|(i, _)| i)
+}
+
 /// Sort cuts and merge any that overlap or touch. Empty ranges are dropped.
 pub fn normalize_cuts(cuts: &[Range]) -> Vec<Range> {
     let mut sorted: Vec<Range> = cuts.iter().copied().filter(|r| !r.is_empty()).collect();
@@ -144,68 +189,79 @@ pub fn piece_starts(edits: &[Edit], splits: &[f64]) -> Vec<f64> {
 /// the length of the synthesized audio, and title cards holding for their own
 /// duration. Where an overdub overlaps a cut, the overdub wins.
 pub fn timeline(duration: f64, edits: &[Edit]) -> Vec<Segment> {
-    let overdubs: Vec<(usize, Range, f64)> = edits
+    timeline_with(duration, edits, &[], &[])
+}
+
+/// `timeline` with pieces laid out in `order`. `timeline(d, e)` ==
+/// `timeline_with(d, e, &[], &[])`.
+pub fn timeline_with(duration: f64, edits: &[Edit], splits: &[f64], order: &[f64]) -> Vec<Segment> {
+    let pieces = ordered_pieces(duration, edits, splits, order);
+    let overdubs: Vec<(usize, Range)> = edits
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, Edit::Overdub { .. }))
+        .map(|(i, e)| (i, e.range()))
+        .filter(|(_, r)| !r.is_empty())
+        .collect();
+    let titles: Vec<(usize, f64)> = edits
         .iter()
         .enumerate()
         .filter_map(|(i, e)| match e {
-            Edit::Overdub { audio_duration, .. } => Some((i, e.range(), *audio_duration)),
-            _ => None,
-        })
-        .filter(|(_, r, _)| !r.is_empty())
-        .collect();
-    let titles: Vec<(usize, f64, f64)> = edits
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| match e {
-            Edit::Title { at, duration, .. } => Some((i, *at, *duration)),
+            Edit::Title { at, .. } => Some((i, *at)),
             _ => None,
         })
         .collect();
+    let overdub_holes = normalize_cuts(&overdubs.iter().map(|(_, r)| *r).collect::<Vec<_>>());
 
-    // Source pieces: kept ranges minus every overdub range, then split at
-    // every title instant so a title can sit between two halves.
-    let overdub_holes = normalize_cuts(&overdubs.iter().map(|(_, r, _)| *r).collect::<Vec<_>>());
-    let mut cut_points: Vec<f64> = titles.iter().map(|(_, at, _)| *at).collect();
-    cut_points.sort_by(|a, b| a.total_cmp(b));
-    let mut pieces: Vec<(Range, SegmentKind)> = kept_segments(duration, edits)
-        .into_iter()
-        .flat_map(|kept| {
-            let holes: Vec<Range> = overdub_holes
-                .iter()
-                .map(|h| Range::new(h.start.max(kept.start), h.end.min(kept.end)))
-                .filter(|h| !h.is_empty())
-                .collect();
-            complement(kept.end, &holes)
-                .into_iter()
-                .filter(move |r| r.end > kept.start + EPS)
-                .map(move |r| Range::new(r.start.max(kept.start), r.end))
-        })
-        .flat_map(|r| split_at(r, &cut_points))
-        .map(|r| (r, SegmentKind::Source))
-        .collect();
+    // Bucket every hold by the piece that owns it; `None` trails the output.
+    let mut owned: Vec<Vec<(Range, SegmentKind)>> = vec![Vec::new(); pieces.len() + 1];
+    let slot = |o: Option<usize>| o.unwrap_or(pieces.len());
+    for (index, r) in &overdubs {
+        owned[slot(owner(&pieces, r.start))].push((*r, SegmentKind::Overdub { index: *index }));
+    }
+    for (index, at) in &titles {
+        owned[slot(owner(&pieces, *at))]
+            .push((Range::new(*at, *at), SegmentKind::Title { index: *index }));
+    }
 
-    // Overdub pieces sit at their source position but take `audio_duration`.
-    pieces.extend(
-        overdubs
+    let mut items: Vec<(Range, SegmentKind)> = Vec::new();
+    for (i, piece) in pieces.iter().enumerate() {
+        let holes: Vec<Range> = overdub_holes
             .iter()
-            .map(|(index, r, _)| (*r, SegmentKind::Overdub { index: *index })),
-    );
-    // Title cards are zero-length in the source and stretch the output.
-    pieces.extend(
-        titles
+            .map(|h| Range::new(h.start.max(piece.start), h.end.min(piece.end)))
+            .filter(|h| !h.is_empty())
+            .collect();
+        let mut cut_points: Vec<f64> = titles
             .iter()
-            .map(|(index, at, _)| (Range::new(*at, *at), SegmentKind::Title { index: *index })),
-    );
-    // Stable: titles at one instant keep edit order; a title precedes an
-    // overdub or source piece starting at the same instant.
-    pieces.sort_by(|a, b| {
+            .map(|(_, at)| *at)
+            .filter(|at| piece.contains(*at))
+            .collect();
+        cut_points.sort_by(f64::total_cmp);
+        let mut bucket: Vec<(Range, SegmentKind)> = complement(piece.end, &holes)
+            .into_iter()
+            .filter(|r| r.end > piece.start + EPS)
+            .map(|r| Range::new(r.start.max(piece.start), r.end))
+            .flat_map(|r| split_at(r, &cut_points))
+            .map(|r| (r, SegmentKind::Source))
+            .collect();
+        bucket.append(&mut owned[i]);
+        bucket.sort_by(|a, b| {
+            a.0.start
+                .total_cmp(&b.0.start)
+                .then(rank(&a.1).cmp(&rank(&b.1)))
+        });
+        items.append(&mut bucket);
+    }
+    let mut tail = std::mem::take(&mut owned[pieces.len()]);
+    tail.sort_by(|a, b| {
         a.0.start
             .total_cmp(&b.0.start)
             .then(rank(&a.1).cmp(&rank(&b.1)))
     });
+    items.append(&mut tail);
 
     let mut out_cursor = 0.0;
-    pieces
+    items
         .into_iter()
         .map(|(source, kind)| {
             let out_len = match kind {
@@ -261,25 +317,35 @@ pub fn output_duration(timeline: &[Segment]) -> f64 {
 /// cut closes; times inside an overdub map to where that overdub begins.
 pub fn source_to_output_time(t: f64, timeline: &[Segment]) -> f64 {
     for seg in timeline {
-        if let SegmentKind::Title { .. } = seg.kind {
-            // A title is zero-length in the source: only the exact instant
-            // lands on it, and everything else reads straight through.
-            if (t - seg.source.start).abs() < EPS {
-                return seg.output.start;
+        match seg.kind {
+            SegmentKind::Title { .. } => {
+                if (t - seg.source.start).abs() < EPS {
+                    return seg.output.start;
+                }
             }
-            continue;
-        }
-        if seg.source.contains(t) {
-            return match seg.kind {
-                SegmentKind::Source => seg.output.start + (t - seg.source.start),
-                _ => seg.output.start,
-            };
-        }
-        if t < seg.source.start {
-            return seg.output.start;
+            SegmentKind::Source => {
+                if seg.source.contains(t) {
+                    return seg.output.start + (t - seg.source.start);
+                }
+            }
+            SegmentKind::Overdub { .. } => {
+                if seg.source.contains(t) {
+                    return seg.output.start;
+                }
+            }
         }
     }
-    output_duration(timeline)
+    // Inside a cut: where the next piece in *source* order begins in the output.
+    timeline
+        .iter()
+        .filter(|s| s.source.start >= t - EPS)
+        .min_by(|a, b| {
+            a.source
+                .start
+                .total_cmp(&b.source.start)
+                .then(a.output.start.total_cmp(&b.output.start))
+        })
+        .map_or(output_duration(timeline), |s| s.output.start)
 }
 
 /// Map an output time back to the source frame that is on screen. Inside an
@@ -296,52 +362,84 @@ pub fn output_to_source_time(t: f64, timeline: &[Segment]) -> f64 {
     timeline.last().map_or(0.0, |s| s.source.end)
 }
 
-/// A caption's visible span inside one segment, in seconds from that
+/// A range's visible span inside one segment, in seconds from that
 /// segment's output start.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CaptionWindow {
+pub struct Window {
     pub index: usize,
     pub start: f64,
     pub end: f64,
+    /// source time where the window begins
+    pub source_start: f64,
 }
+pub type CaptionWindow = Window;
 
-/// Per segment, every caption that overlaps it. Overdubs hold one frame, so
-/// a caption touching them covers the whole hold; titles get none.
-pub fn caption_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<CaptionWindow>> {
+/// Per segment, every overlay range that intersects it, segment-relative.
+/// Overdubs hold one frame, so a range touching them covers the whole hold;
+/// titles get none.
+pub fn overlay_windows(segments: &[Segment], ranges: &[(usize, Range)]) -> Vec<Vec<Window>> {
     segments
         .iter()
         .map(|seg| {
-            edits
+            ranges
                 .iter()
-                .enumerate()
-                .filter_map(|(index, e)| {
-                    let Edit::Caption { start, end, .. } = e else {
-                        return None;
-                    };
-                    let cap = Range::new(*start, *end);
-                    match seg.kind {
-                        SegmentKind::Title { .. } => None,
-                        SegmentKind::Overdub { .. } => (cap.start < seg.source.end
-                            && cap.end > seg.source.start)
-                            .then_some(CaptionWindow {
-                                index,
-                                start: 0.0,
-                                end: seg.output.len(),
-                            }),
-                        SegmentKind::Source => {
-                            let a = cap.start.max(seg.source.start);
-                            let b = cap.end.min(seg.source.end);
-                            (b > a + EPS).then_some(CaptionWindow {
-                                index,
-                                start: a - seg.source.start,
-                                end: b - seg.source.start,
-                            })
-                        }
+                .filter_map(|(index, r)| match seg.kind {
+                    SegmentKind::Title { .. } => None,
+                    SegmentKind::Overdub { .. } => {
+                        (r.start < seg.source.end && r.end > seg.source.start).then_some(Window {
+                            index: *index,
+                            start: 0.0,
+                            end: seg.output.len(),
+                            source_start: seg.source.start,
+                        })
+                    }
+                    SegmentKind::Source => {
+                        let a = r.start.max(seg.source.start);
+                        let b = r.end.min(seg.source.end);
+                        (b > a + EPS).then_some(Window {
+                            index: *index,
+                            start: a - seg.source.start,
+                            end: b - seg.source.start,
+                            source_start: a,
+                        })
                     }
                 })
                 .collect()
         })
         .collect()
+}
+
+fn ranges_of(edits: &[Edit], pick: impl Fn(&Edit) -> bool) -> Vec<(usize, Range)> {
+    edits
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| pick(e))
+        .map(|(i, e)| (i, e.range()))
+        .collect()
+}
+
+/// Per segment, every caption that overlaps it.
+pub fn caption_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
+    overlay_windows(
+        segments,
+        &ranges_of(edits, |e| matches!(e, Edit::Caption { .. })),
+    )
+}
+
+/// Per segment, every B-roll overlay that intersects it.
+pub fn broll_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
+    overlay_windows(
+        segments,
+        &ranges_of(edits, |e| matches!(e, Edit::Broll { .. })),
+    )
+}
+
+/// Per segment, every music/audio overlay that intersects it.
+pub fn audio_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
+    overlay_windows(
+        segments,
+        &ranges_of(edits, |e| matches!(e, Edit::Audio { .. })),
+    )
 }
 
 /// How the piece at `after` meets the one following it.
@@ -363,7 +461,7 @@ pub fn joins(segments: &[Segment], edits: &[Edit], project: Transition) -> Vec<J
             let is_title = |s: &Segment| matches!(s.kind, SegmentKind::Title { .. });
             let transition = if is_title(a) || is_title(b) {
                 Transition::Dip
-            } else if b.source.start > a.source.end + EPS {
+            } else if (b.source.start - a.source.end).abs() > EPS {
                 edits
                     .iter()
                     .find_map(|e| match e {
@@ -677,7 +775,8 @@ mod tests {
             vec![CaptionWindow {
                 index: 1,
                 start: 2.0,
-                end: 3.0
+                end: 3.0,
+                source_start: 2.0
             }]
         );
         assert_eq!(
@@ -685,7 +784,8 @@ mod tests {
             vec![CaptionWindow {
                 index: 1,
                 start: 0.0,
-                end: 2.0
+                end: 2.0,
+                source_start: 5.0
             }]
         );
     }
@@ -700,7 +800,8 @@ mod tests {
             vec![CaptionWindow {
                 index: 1,
                 start: 0.0,
-                end: 4.0
+                end: 4.0,
+                source_start: 2.0
             }]
         );
         let title_i = tl
@@ -720,6 +821,126 @@ mod tests {
         );
         // A cut from zero: no piece starts at zero.
         assert_eq!(piece_starts(&[cut(0.0, 1.0)], &[]), vec![1.0]);
+    }
+
+    #[test]
+    fn ordered_pieces_puts_live_order_first_then_the_rest_in_source_order() {
+        let edits = [cut(4.0, 5.0)];
+        // Pieces: [0,2) [2,4) [5,10). Order names a stale 4.0 and omits 2.0.
+        assert_eq!(
+            ordered_pieces(10.0, &edits, &[2.0], &[5.0, 4.0, 0.0]),
+            vec![r(5.0, 10.0), r(0.0, 2.0), r(2.0, 4.0)]
+        );
+        // A split inside the cut divides nothing; a split at the end makes no empty piece.
+        assert_eq!(
+            ordered_pieces(10.0, &edits, &[4.5, 10.0], &[]),
+            vec![r(0.0, 4.0), r(5.0, 10.0)]
+        );
+    }
+
+    #[test]
+    fn timeline_with_lays_pieces_out_in_order_and_keeps_titles_with_their_piece() {
+        // Title at the boundary 5.0 belongs to the piece starting there.
+        let edits = [title(5.0, 1.0)];
+        let tl = timeline_with(10.0, &edits, &[5.0], &[5.0, 0.0]);
+        assert_eq!(
+            kinds(&tl),
+            vec![
+                &SegmentKind::Title { index: 0 },
+                &SegmentKind::Source,
+                &SegmentKind::Source
+            ]
+        );
+        assert_eq!(tl[0].output, r(0.0, 1.0));
+        assert_eq!(tl[1].source, r(5.0, 10.0));
+        assert_eq!(tl[1].output, r(1.0, 6.0));
+        assert_eq!(tl[2].source, r(0.0, 5.0));
+        assert_eq!(tl[2].output, r(6.0, 11.0));
+        // An overdub inside a reordered piece moves with it.
+        let edits = [overdub(6.0, 7.0, 2.0)];
+        let tl = timeline_with(10.0, &edits, &[5.0], &[5.0, 0.0]);
+        assert_eq!(tl[0].source, r(5.0, 6.0));
+        assert_eq!(tl[1].kind, SegmentKind::Overdub { index: 0 });
+        assert_eq!(tl[1].output, r(1.0, 3.0));
+        assert_eq!(tl[3].source, r(0.0, 5.0));
+        assert_eq!(output_duration(&tl), 11.0);
+    }
+
+    #[test]
+    fn timeline_without_order_is_unchanged() {
+        let edits = [cut(2.0, 4.0), title(4.0, 1.0), overdub(6.0, 7.0, 0.5)];
+        assert_eq!(
+            timeline(10.0, &edits),
+            timeline_with(10.0, &edits, &[], &[])
+        );
+    }
+
+    #[test]
+    fn remaps_follow_the_output_order() {
+        let tl = timeline_with(10.0, &[], &[5.0], &[5.0, 0.0]);
+        assert_eq!(source_to_output_time(6.0, &tl), 1.0);
+        assert_eq!(source_to_output_time(1.0, &tl), 6.0);
+        assert_eq!(output_to_source_time(1.0, &tl), 6.0);
+        assert_eq!(output_to_source_time(6.0, &tl), 1.0);
+        // Inside a cut, the source maps to where the next source piece begins in the output.
+        let tl = timeline_with(10.0, &[cut(2.0, 3.0)], &[], &[3.0, 0.0]);
+        assert_eq!(source_to_output_time(2.5, &tl), 0.0);
+    }
+
+    #[test]
+    fn overlay_windows_split_a_range_across_a_reordered_boundary() {
+        let edits = [caption(4.0, 6.0)];
+        let tl = timeline_with(10.0, &edits, &[5.0], &[5.0, 0.0]);
+        let w = caption_windows(&tl, &edits);
+        assert_eq!(
+            w[0],
+            vec![Window {
+                index: 0,
+                start: 0.0,
+                end: 1.0,
+                source_start: 5.0
+            }]
+        );
+        assert_eq!(
+            w[1],
+            vec![Window {
+                index: 0,
+                start: 4.0,
+                end: 5.0,
+                source_start: 4.0
+            }]
+        );
+        let edits = [
+            Edit::Broll {
+                start: 1.0,
+                end: 2.0,
+                media: "b".into(),
+                offset: 0.0,
+            },
+            Edit::Audio {
+                start: 0.0,
+                end: 10.0,
+                media: "m".into(),
+                offset: 0.0,
+                gain: 0.0,
+                duck: true,
+            },
+        ];
+        let tl = timeline(10.0, &edits);
+        assert_eq!(broll_windows(&tl, &edits)[0][0].index, 0);
+        assert_eq!(audio_windows(&tl, &edits)[0][0].index, 1);
+    }
+
+    #[test]
+    fn a_reorder_join_takes_the_project_transition() {
+        let tl = timeline_with(10.0, &[], &[5.0], &[5.0, 0.0]);
+        assert_eq!(
+            joins(&tl, &[], Transition::Dip),
+            vec![Join {
+                after: 0,
+                transition: Transition::Dip
+            }]
+        );
     }
 
     #[test]

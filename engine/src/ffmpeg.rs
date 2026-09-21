@@ -19,7 +19,7 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
 use crate::editlist::{caption_windows, joins, timeline, Segment, SegmentKind, FADE};
-use crate::types::{Edit, MediaKind, Transition};
+use crate::types::{Edit, MediaKind, Range, Transition};
 
 /// Container/codec for the rendered file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,6 +367,48 @@ fn fmt(t: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
+/// Volume multiplier applied under speech while ducking music.
+pub const DUCK_GAIN: f64 = 0.251;
+/// Length of the ramp in and out of a duck.
+pub const DUCK_RAMP: f64 = 0.12;
+/// Word gaps closer than this are merged into one speech run.
+pub const SPEECH_GAP: f64 = 0.3;
+
+/// Merge word spans closer than `gap` into speech runs, sorted.
+pub fn speech_runs(words: &[Range], gap: f64) -> Vec<Range> {
+    let mut sorted: Vec<Range> = words.iter().copied().filter(|r| !r.is_empty()).collect();
+    sorted.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut runs: Vec<Range> = Vec::new();
+    for r in sorted {
+        match runs.last_mut() {
+            Some(last) if r.start <= last.end + gap => last.end = last.end.max(r.end),
+            _ => runs.push(r),
+        }
+    }
+    runs
+}
+
+/// A `volume` expression in `t`: 1 outside speech, `DUCK_GAIN` inside, linear
+/// ramps of `DUCK_RAMP`. "1" when empty.
+pub fn duck_expr(runs: &[Range]) -> String {
+    if runs.is_empty() {
+        return "1".into();
+    }
+    let term = |r: &Range| {
+        format!(
+            "max(0,min(1,min((t-{})/{ramp},({}-t)/{ramp})))",
+            fmt(r.start - DUCK_RAMP),
+            fmt(r.end + DUCK_RAMP),
+            ramp = fmt(DUCK_RAMP)
+        )
+    };
+    let mut expr = term(&runs[0]);
+    for r in &runs[1..] {
+        expr = format!("max({expr},{})", term(r));
+    }
+    format!("1-{}*({expr})", fmt(1.0 - DUCK_GAIN))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +508,33 @@ mod tests {
     /// Does `args` contain `needle` as a contiguous run?
     fn has_run(args: &[String], needle: &[&str]) -> bool {
         args.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn speech_runs_merge_close_words() {
+        let words = [
+            Range::new(1.0, 1.4),
+            Range::new(1.5, 2.0),
+            Range::new(3.0, 3.2),
+        ];
+        assert_eq!(
+            speech_runs(&words, SPEECH_GAP),
+            vec![Range::new(1.0, 2.0), Range::new(3.0, 3.2)]
+        );
+        assert!(speech_runs(&[], SPEECH_GAP).is_empty());
+    }
+
+    #[test]
+    fn duck_expr_ramps_around_each_run() {
+        assert_eq!(duck_expr(&[]), "1");
+        assert_eq!(
+            duck_expr(&[Range::new(1.0, 2.0)]),
+            "1-0.749*(max(0,min(1,min((t-0.88)/0.12,(2.12-t)/0.12))))"
+        );
+        assert_eq!(
+            duck_expr(&[Range::new(1.0, 2.0), Range::new(3.0, 3.2)]),
+            "1-0.749*(max(max(0,min(1,min((t-0.88)/0.12,(2.12-t)/0.12))),max(0,min(1,min((t-2.88)/0.12,(3.32-t)/0.12)))))"
+        );
     }
 
     #[test]
