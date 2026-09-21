@@ -450,8 +450,9 @@ pub struct Join {
 }
 
 /// The effective transition at every boundary: both sides of a title dip;
-/// a boundary that is a cut takes the cut's override, else the project
-/// setting; any other boundary (into or out of an overdub) has none.
+/// a boundary that is a cut, or a reorder join (the two sides are not
+/// contiguous in the source either way), takes the cut's override, else the
+/// project setting; any other boundary (into or out of an overdub) has none.
 pub fn joins(segments: &[Segment], edits: &[Edit], project: Transition) -> Vec<Join> {
     segments
         .windows(2)
@@ -885,6 +886,16 @@ mod tests {
         // Inside a cut, the source maps to where the next source piece begins in the output.
         let tl = timeline_with(10.0, &[cut(2.0, 3.0)], &[], &[3.0, 0.0]);
         assert_eq!(source_to_output_time(2.5, &tl), 0.0);
+    }
+
+    #[test]
+    fn inside_a_cut_maps_to_the_title_that_follows_it() {
+        // Pieces: [0,2) [2,3)cut [3,10). A title sits right after the cut, so
+        // the playhead inside the cut lands on what plays next: the title.
+        let edits = [cut(2.0, 3.0), title(3.0, 1.0)];
+        let tl = timeline(10.0, &edits);
+        assert_eq!(source_to_output_time(2.5, &tl), 2.0);
+        assert_eq!(source_to_output_time(3.0, &tl), 2.0);
     }
 
     #[test]
