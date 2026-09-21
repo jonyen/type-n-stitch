@@ -115,6 +115,30 @@ pub fn kept_segments(duration: f64, edits: &[Edit]) -> Vec<Range> {
     complement(duration, &normalize_cuts(&cut_ranges(edits)))
 }
 
+/// Source starts of every piece (kept ranges divided at splits), ascending. The
+/// last entry may equal the duration when a cut runs to the end; callers that
+/// know the duration drop it.
+pub fn piece_starts(edits: &[Edit], splits: &[f64]) -> Vec<f64> {
+    let cuts = normalize_cuts(&cut_ranges(edits));
+    let mut starts = Vec::new();
+    let mut cursor = 0.0;
+    for cut in &cuts {
+        if cut.start > cursor + EPS {
+            starts.push(cursor);
+        }
+        cursor = cursor.max(cut.end);
+    }
+    starts.push(cursor);
+    for &s in splits {
+        let in_cut = cuts.iter().any(|c| s > c.start - EPS && s < c.end + EPS);
+        if !in_cut && !starts.iter().any(|x| (x - s).abs() < EPS) {
+            starts.push(s);
+        }
+    }
+    starts.sort_by(f64::total_cmp);
+    starts
+}
+
 /// The rendered output, piece by piece: kept source ranges split around
 /// overdubs and title instants, overdub ranges holding their first frame for
 /// the length of the synthesized audio, and title cards holding for their own
@@ -684,6 +708,18 @@ mod tests {
             .position(|s| matches!(s.kind, SegmentKind::Title { .. }))
             .unwrap();
         assert!(w[title_i].is_empty());
+    }
+
+    #[test]
+    fn piece_starts_come_from_cuts_and_splits_outside_them() {
+        assert_eq!(piece_starts(&[], &[]), vec![0.0]);
+        assert_eq!(piece_starts(&[cut(2.0, 3.0)], &[]), vec![0.0, 3.0]);
+        assert_eq!(
+            piece_starts(&[cut(2.0, 3.0)], &[2.5, 5.0, 3.0, 0.0]),
+            vec![0.0, 3.0, 5.0]
+        );
+        // A cut from zero: no piece starts at zero.
+        assert_eq!(piece_starts(&[cut(0.0, 1.0)], &[]), vec![1.0]);
     }
 
     #[test]

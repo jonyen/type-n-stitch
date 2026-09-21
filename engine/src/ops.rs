@@ -4,8 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::editlist::EPS;
-use crate::types::{CaptionPos, Edit, Range, TitleStyle, Transition};
+use crate::editlist::{piece_starts, EPS};
+use crate::types::{default_duck, CaptionPos, Edit, Range, TitleStyle, Transition};
 
 /// Upper bound on speaker indices. Diarization never finds this many voices;
 /// the cap exists so a stored `RenameSpeaker` cannot ask the fold for an
@@ -81,6 +81,48 @@ pub enum Op {
         start: f64,
         transition: Option<Transition>,
     },
+    Split {
+        at: f64,
+    },
+    Unsplit {
+        at: f64,
+    },
+    /// `before: None` moves the piece to the end.
+    Move {
+        piece: f64,
+        before: Option<f64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    AddBroll {
+        start: f64,
+        end: f64,
+        media: String,
+        #[serde(default)]
+        offset: f64,
+    },
+    RemoveBroll {
+        start: f64,
+    },
+    #[serde(rename_all = "camelCase")]
+    AddAudio {
+        start: f64,
+        end: f64,
+        media: String,
+        #[serde(default)]
+        offset: f64,
+        #[serde(default)]
+        gain: f64,
+        #[serde(default = "default_duck")]
+        duck: bool,
+    },
+    EditAudio {
+        start: f64,
+        gain: f64,
+        duck: bool,
+    },
+    RemoveAudio {
+        start: f64,
+    },
 }
 
 /// An operation as stored: its position in the log, who sent it, and
@@ -103,13 +145,21 @@ pub struct ProjectDoc {
     pub speaker_names: Vec<String>,
     #[serde(default)]
     pub transition: Transition,
+    /// Source instants where a piece is split, ascending and deduplicated.
+    #[serde(default)]
+    pub splits: Vec<f64>,
+    /// Explicit piece order, front to back, by piece start. Entries for
+    /// pieces the fold no longer knows about are left in place; callers that
+    /// build a timeline ignore them.
+    #[serde(default)]
+    pub order: Vec<f64>,
 }
 
 /// Replay the log in order, skipping undone operations.
 pub fn fold(ops: &[SeqOp]) -> ProjectDoc {
     let mut doc = ProjectDoc::default();
     for entry in ops.iter().filter(|o| !o.undone) {
-        apply(&mut doc, &entry.op);
+        apply_op(&mut doc, &entry.op);
     }
     doc
 }
@@ -122,7 +172,7 @@ fn overlaps(a: Range, b: Range) -> bool {
     a.start < b.end && a.end > b.start
 }
 
-fn apply(doc: &mut ProjectDoc, op: &Op) {
+pub fn apply_op(doc: &mut ProjectDoc, op: &Op) {
     match op {
         Op::Cut { start, end } => {
             let cut = Range::new(*start, *end);
@@ -249,6 +299,87 @@ fn apply(doc: &mut ProjectDoc, op: &Op) {
                 }
             }
         }
+        Op::Split { at } => {
+            if !doc.splits.iter().any(|s| (s - at).abs() < EPS) {
+                doc.splits.push(*at);
+                doc.splits.sort_by(f64::total_cmp);
+            }
+        }
+        Op::Unsplit { at } => doc.splits.retain(|s| (s - at).abs() >= EPS),
+        Op::Move { piece, before } => {
+            let current = piece_starts(&doc.edits, &doc.splits);
+            let has = |list: &[f64], x: f64| list.iter().any(|s| (s - x).abs() < EPS);
+            if !has(&current, *piece) {
+                return;
+            }
+            // Materialise: live entries of `order` first, then every other
+            // current piece in source order — the same rule the timeline uses.
+            let mut effective: Vec<f64> = Vec::new();
+            for &s in doc.order.iter().chain(current.iter()) {
+                if has(&current, s) && !has(&effective, s) {
+                    effective.push(s);
+                }
+            }
+            effective.retain(|s| (s - piece).abs() >= EPS);
+            let at = before
+                .and_then(|b| effective.iter().position(|s| (s - b).abs() < EPS))
+                .unwrap_or(effective.len());
+            effective.insert(at, *piece);
+            doc.order = effective;
+        }
+        Op::AddBroll {
+            start,
+            end,
+            media,
+            offset,
+        } => {
+            let span = Range::new(*start, *end);
+            doc.edits
+                .retain(|e| !matches!(e, Edit::Broll { .. } if overlaps(e.range(), span)));
+            doc.edits.push(Edit::Broll {
+                start: *start,
+                end: *end,
+                media: media.clone(),
+                offset: *offset,
+            });
+        }
+        Op::RemoveBroll { start } => doc
+            .edits
+            .retain(|e| !matches!(e, Edit::Broll { start: s, .. } if (s - start).abs() < EPS)),
+        Op::AddAudio {
+            start,
+            end,
+            media,
+            offset,
+            gain,
+            duck,
+        } => doc.edits.push(Edit::Audio {
+            start: *start,
+            end: *end,
+            media: media.clone(),
+            offset: *offset,
+            gain: *gain,
+            duck: *duck,
+        }),
+        Op::EditAudio { start, gain, duck } => {
+            for e in &mut doc.edits {
+                if let Edit::Audio {
+                    start: s,
+                    gain: g,
+                    duck: d,
+                    ..
+                } = e
+                {
+                    if (*s - start).abs() < EPS {
+                        *g = *gain;
+                        *d = *duck;
+                    }
+                }
+            }
+        }
+        Op::RemoveAudio { start } => doc
+            .edits
+            .retain(|e| !matches!(e, Edit::Audio { start: s, .. } if (s - start).abs() < EPS)),
     }
 }
 
@@ -285,6 +416,170 @@ mod tests {
             audio_url: "/data/m/overdub-0.wav".into(),
             audio_duration: 1.0,
         }
+    }
+
+    fn broll(start: f64, end: f64) -> Op {
+        Op::AddBroll {
+            start,
+            end,
+            media: "asset-1".into(),
+            offset: 0.0,
+        }
+    }
+
+    #[test]
+    fn split_and_unsplit_keep_splits_sorted_and_unique() {
+        let doc = fold(&[
+            op(1, Op::Split { at: 5.0 }),
+            op(2, Op::Split { at: 2.0 }),
+            op(3, Op::Split { at: 5.0 }),
+        ]);
+        assert_eq!(doc.splits, vec![2.0, 5.0]);
+        let doc = fold(&[op(1, Op::Split { at: 5.0 }), op(2, Op::Unsplit { at: 5.0 })]);
+        assert!(doc.splits.is_empty());
+    }
+
+    #[test]
+    fn move_materialises_the_order_and_ignores_unknown_pieces() {
+        // Pieces: [0,2) [2,5) [5,..) via a split at 2 and a split at 5.
+        let base = vec![op(1, Op::Split { at: 2.0 }), op(2, Op::Split { at: 5.0 })];
+        let mut log = base.clone();
+        log.push(op(
+            3,
+            Op::Move {
+                piece: 5.0,
+                before: Some(0.0),
+            },
+        ));
+        assert_eq!(fold(&log).order, vec![5.0, 0.0, 2.0]);
+        let mut log = base.clone();
+        log.push(op(
+            3,
+            Op::Move {
+                piece: 0.0,
+                before: None,
+            },
+        ));
+        assert_eq!(fold(&log).order, vec![2.0, 5.0, 0.0]);
+        let mut log = base;
+        log.push(op(
+            3,
+            Op::Move {
+                piece: 9.0,
+                before: None,
+            },
+        ));
+        assert!(
+            fold(&log).order.is_empty(),
+            "an unknown piece moves nothing"
+        );
+    }
+
+    #[test]
+    fn a_cut_after_a_move_leaves_a_stale_order_entry_in_place() {
+        let doc = fold(&[
+            op(1, Op::Split { at: 2.0 }),
+            op(
+                2,
+                Op::Move {
+                    piece: 2.0,
+                    before: Some(0.0),
+                },
+            ),
+            op(3, cut(2.0, 3.0)),
+        ]);
+        // The fold never rewrites `order`; the timeline ignores 2.0 later.
+        assert_eq!(doc.order, vec![2.0, 0.0]);
+    }
+
+    #[test]
+    fn broll_replaces_overlaps_and_audio_edits_by_start() {
+        let doc = fold(&[op(1, broll(1.0, 3.0)), op(2, broll(2.0, 4.0))]);
+        assert_eq!(
+            doc.edits,
+            vec![Edit::Broll {
+                start: 2.0,
+                end: 4.0,
+                media: "asset-1".into(),
+                offset: 0.0
+            }]
+        );
+        let doc = fold(&[
+            op(
+                1,
+                Op::AddAudio {
+                    start: 0.0,
+                    end: 8.0,
+                    media: "m".into(),
+                    offset: 0.0,
+                    gain: 0.0,
+                    duck: true,
+                },
+            ),
+            op(
+                2,
+                Op::EditAudio {
+                    start: 0.0,
+                    gain: -6.0,
+                    duck: false,
+                },
+            ),
+        ]);
+        assert_eq!(
+            doc.edits,
+            vec![Edit::Audio {
+                start: 0.0,
+                end: 8.0,
+                media: "m".into(),
+                offset: 0.0,
+                gain: -6.0,
+                duck: false
+            }]
+        );
+        let doc = fold(&[
+            op(
+                1,
+                Op::AddAudio {
+                    start: 0.0,
+                    end: 8.0,
+                    media: "m".into(),
+                    offset: 0.0,
+                    gain: 0.0,
+                    duck: true,
+                },
+            ),
+            op(2, Op::RemoveAudio { start: 0.0 }),
+            op(3, broll(1.0, 2.0)),
+            op(4, Op::RemoveBroll { start: 1.0 }),
+        ]);
+        assert!(doc.edits.is_empty());
+    }
+
+    #[test]
+    fn new_ops_round_trip_json_with_defaults() {
+        let op: Op =
+            serde_json::from_str(r#"{"kind":"addaudio","start":0,"end":1,"media":"m"}"#).unwrap();
+        assert_eq!(
+            op,
+            Op::AddAudio {
+                start: 0.0,
+                end: 1.0,
+                media: "m".into(),
+                offset: 0.0,
+                gain: 0.0,
+                duck: true
+            }
+        );
+        let op: Op = serde_json::from_str(r#"{"kind":"move","piece":2,"before":null}"#).unwrap();
+        assert_eq!(
+            op,
+            Op::Move {
+                piece: 2.0,
+                before: None
+            }
+        );
+        let doc: ProjectDoc = serde_json::from_str(r#"{"edits":[],"speakerNames":[]}"#).unwrap();
+        assert!(doc.splits.is_empty() && doc.order.is_empty());
     }
 
     #[test]

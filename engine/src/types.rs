@@ -72,6 +72,20 @@ pub enum CaptionPos {
 pub const MAX_TITLES: usize = 32;
 pub const MAX_CAPTIONS: usize = 32;
 
+/// Upper bounds on splits, B-roll and audio inserts, for the same reason.
+pub const MAX_SPLITS: usize = 64;
+pub const MAX_BROLL: usize = 32;
+pub const MAX_AUDIO: usize = 16;
+
+/// Gain range accepted for an `Audio` edit.
+pub const MIN_GAIN_DB: f64 = -30.0;
+pub const MAX_GAIN_DB: f64 = 12.0;
+
+/// Default for `Edit::Audio::duck` and `Op::AddAudio::duck` on old logs.
+pub fn default_duck() -> bool {
+    true
+}
+
 /// An edit applied to the source media. The edit list is the whole project:
 /// the source file plus a `Vec<Edit>` fully describes the output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +125,26 @@ pub enum Edit {
         text: String,
         position: CaptionPos,
     },
+    /// Show asset `media` from `offset` over main-source `[start, end)`; the main audio continues.
+    Broll {
+        start: f64,
+        end: f64,
+        media: String,
+        #[serde(default)]
+        offset: f64,
+    },
+    /// Mix asset `media` from `offset` over `[start, end)` at `gain` dB, ducked under speech when `duck`.
+    Audio {
+        start: f64,
+        end: f64,
+        media: String,
+        #[serde(default)]
+        offset: f64,
+        #[serde(default)]
+        gain: f64,
+        #[serde(default = "default_duck")]
+        duck: bool,
+    },
 }
 
 impl Edit {
@@ -118,7 +152,9 @@ impl Edit {
         match *self {
             Edit::Cut { start, end, .. }
             | Edit::Overdub { start, end, .. }
-            | Edit::Caption { start, end, .. } => Range::new(start, end),
+            | Edit::Caption { start, end, .. }
+            | Edit::Broll { start, end, .. }
+            | Edit::Audio { start, end, .. } => Range::new(start, end),
             Edit::Title { at, .. } => Range::new(at, at),
         }
     }
