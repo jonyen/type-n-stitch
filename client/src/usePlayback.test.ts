@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TitleEdit } from './types';
-import { nextTitleAt, tickSpan, titleCrossed } from './usePlayback';
+import { nextTitleAt, restartAt, tickSpan, titleCrossed } from './usePlayback';
 
 const t = (at: number): TitleEdit => ({
   kind: 'title',
@@ -55,6 +55,19 @@ describe('titleCrossed over a tick span', () => {
   it('sees a title inside an overdubbed range', () => {
     const inside = t(5.5);
     expect(titleCrossed([inside], 4.9, tickSpan(5.0, null, 6.0))).toEqual(inside);
+  });
+});
+
+describe('restartAt', () => {
+  it('starts at the first output piece when at the beginning or the end', () => {
+    const ordered = [
+      { start: 5, end: 10 },
+      { start: 0, end: 5 },
+    ];
+    expect(restartAt(0, false, 10, ordered)).toBe(5);
+    expect(restartAt(9.995, false, 10, ordered)).toBe(5);
+    expect(restartAt(3, false, 10, ordered)).toBeNull();
+    expect(restartAt(3, true, 10, ordered)).toBe(5);
   });
 });
 

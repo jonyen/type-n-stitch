@@ -4,8 +4,8 @@
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
-import { cutRanges, overdubAt, skipTarget, titles, wordIndexAt } from './editlist';
-import type { Edit, OverdubEdit, TitleEdit, Word } from './types';
+import { jumpTarget, overdubAt, titles, wordIndexAt } from './editlist';
+import type { Edit, OverdubEdit, Range, TitleEdit, Word } from './types';
 
 /** The earliest title whose instant lies in (prev, now]; null when none or when moving backwards. */
 export function titleCrossed(list: TitleEdit[], prev: number, now: number): TitleEdit | null {
@@ -38,6 +38,18 @@ export function tickSpan(t: number, skip: number | null, overdubEnd: number | nu
   return Math.max(t, skip ?? t, overdubEnd ?? t);
 }
 
+/** Where play should begin: the first output piece when the media sits at its start or end (or has ended); null to continue from `t`. */
+export function restartAt(
+  t: number,
+  ended: boolean,
+  duration: number,
+  ordered: Range[],
+): number | null {
+  const first = ordered[0]?.start ?? 0;
+  if (ended || t <= 0 || t >= duration - 0.01) return first;
+  return null;
+}
+
 export interface Playback {
   playing: boolean;
   currentTime: number;
@@ -58,6 +70,7 @@ export function usePlayback(
   duration: number,
   /** Media URL. The element mounts after the hook, so listeners re-attach when it changes. */
   src: string | undefined,
+  ordered: Range[],
 ): Playback {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -68,8 +81,10 @@ export function usePlayback(
   // Latest props for the animation-frame loop without re-subscribing.
   const editsRef = useRef(edits);
   const wordsRef = useRef(words);
+  const orderedRef = useRef(ordered);
   editsRef.current = edits;
   wordsRef.current = words;
+  orderedRef.current = ordered;
 
   const wantPlaying = useRef(false);
   const activeOverdub = useRef<OverdubEdit | null>(null);
@@ -199,28 +214,28 @@ export function usePlayback(
     } else {
       const t = media.currentTime;
       const next = overdubAt(t, editsRef.current);
-      const skip = next ? null : skipTarget(t, cutRanges(editsRef.current));
+      const skip = next ? null : jumpTarget(t, orderedRef.current);
       // The jump is decided first but taken last: a title inside the cut (or
       // the overdubbed range) would otherwise be stepped over in this tick
       // and never seen, because the crossing is checked against the time
       // `sync` recorded *after* the jump.
-      const after = tickSpan(t, skip, next?.end ?? null);
+      const after = tickSpan(t, skip === Infinity ? t : skip, next?.end ?? null);
       const crossed = titleCrossed(titles(editsRef.current), lastTime.current, after);
       if (crossed) {
         enterTitle(crossed);
       } else if (next) {
         enterOverdub(next);
       } else if (skip !== null) {
-        if (skip >= duration - 0.01) {
+        if (skip === Infinity) {
+          wantPlaying.current = false;
           media.pause();
-          media.currentTime = duration;
         } else {
           media.currentTime = skip;
         }
       }
     }
     sync();
-  }, [duration, enterOverdub, enterTitle, leaveOverdub, leaveTitle, mediaRef, sync]);
+  }, [enterOverdub, enterTitle, leaveOverdub, leaveTitle, mediaRef, sync]);
 
   useEffect(() => {
     if (!playing) return;
@@ -244,6 +259,12 @@ export function usePlayback(
       if (!activeOverdub.current && !activeTitle.current) setPlaying(false);
     };
     const onEnded = () => {
+      const target = jumpTarget(duration, orderedRef.current);
+      if (target !== null && target !== Infinity) {
+        media.currentTime = target;
+        void media.play();
+        return;
+      }
       wantPlaying.current = false;
       setPlaying(false);
     };
@@ -268,7 +289,7 @@ export function usePlayback(
       shownTitles.current = { at: Number.NaN, list: [] };
       lastTime.current = -1;
     };
-  }, [mediaRef, src, sync]);
+  }, [duration, mediaRef, src, sync]);
 
   // Stop everything when the source changes or the hook unmounts.
   useEffect(() => {
@@ -304,7 +325,8 @@ export function usePlayback(
       return;
     }
     if (media.paused) {
-      if (media.ended || media.currentTime >= duration - 0.01) media.currentTime = 0;
+      const at = restartAt(media.currentTime, media.ended, duration, orderedRef.current);
+      if (at !== null) media.currentTime = at;
       void media.play();
     } else {
       wantPlaying.current = false;

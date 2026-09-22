@@ -14,9 +14,11 @@ import {
   skipTarget,
   titles,
 } from '../editlist';
+import { audios, brolls } from '../overlays';
 import type { Peer } from '../realtime';
-import type { Edit, Media, Transition } from '../types';
+import type { Asset, Edit, Media, Transition, Word } from '../types';
 import type { Playback } from '../usePlayback';
+import { Overlays } from './Overlays';
 import { Caption, TitleCard } from './TitleCard';
 
 interface Props {
@@ -25,13 +27,25 @@ interface Props {
   thumbs: Thumbnails | null;
   mediaRef: RefObject<HTMLVideoElement | null>;
   edits: Edit[];
+  assets: Asset[];
+  words: Word[];
   playback: Playback;
   peers: Peer[];
   /** The project default transition, for the dip preview. */
   transition: Transition;
 }
 
-export function Player({ media, thumbs, mediaRef, edits, playback, peers, transition }: Props) {
+export function Player({
+  media,
+  thumbs,
+  mediaRef,
+  edits,
+  assets,
+  words,
+  playback,
+  peers,
+  transition,
+}: Props) {
   const { duration } = media;
   const cutCount = cutRanges(edits).length;
   const overdubCount = overdubs(edits).length;
@@ -87,6 +101,7 @@ export function Player({ media, thumbs, mediaRef, edits, playback, peers, transi
           onClick={playback.toggle}
           muted={playback.overdubbing !== null}
         />
+        <Overlays edits={edits} assets={assets} words={words} playback={playback} />
         {media.kind === 'audio' && <div className="audio-badge">audio</div>}
         {playback.overdubbing && (
           <div className="overdub-badge">Overdub: “{playback.overdubbing.text}”</div>
@@ -136,6 +151,20 @@ export function Player({ media, thumbs, mediaRef, edits, playback, peers, transi
                 key={`o${r.start}`}
                 className="mark overdub"
                 style={{ left: pct(r.start), width: pct(r.end - r.start) }}
+              />
+            ))}
+            {brolls(edits).map((b) => (
+              <span
+                key={`b${b.start}`}
+                className="mark broll"
+                style={{ left: pct(b.start), width: pct(b.end - b.start) }}
+              />
+            ))}
+            {audios(edits).map((a) => (
+              <span
+                key={`a${a.start}`}
+                className="mark audio"
+                style={{ left: pct(a.start), width: pct(a.end - a.start) }}
               />
             ))}
             {titles(edits).map((t, i) => (

@@ -78,6 +78,13 @@ export function App() {
 
   const [speakers, setSpeakers] = useState<(number | null)[] | null>(null);
 
+  // The output layout for the current edit list, so playback can jump
+  // between output pieces and the transcript can draw clip boundaries.
+  const ordered = useMemo(
+    () => orderedPieces(editor.duration, editor.edits, editor.splits, editor.order),
+    [editor.duration, editor.edits, editor.splits, editor.order],
+  );
+
   const mediaRef = useRef<HTMLVideoElement>(null);
   const playback = usePlayback(
     mediaRef,
@@ -85,6 +92,7 @@ export function App() {
     editor.edits,
     editor.duration,
     project?.media.url,
+    ordered,
   );
   const thumbs = useThumbnails(project?.id ?? null, project?.media.kind);
 
@@ -498,13 +506,6 @@ export function App() {
       setSelectedTitle(null);
   }, [editor.edits, selectedTitle]);
 
-  // `ordered` for the current output layout, and the pieces the transcript
-  // draws as clips.
-  const ordered = useMemo(
-    () => orderedPieces(editor.duration, editor.edits, editor.splits, editor.order),
-    [editor.duration, editor.edits, editor.splits, editor.order],
-  );
-
   // A peer's edit (or an undo) can remove the clip boundary we had selected.
   useEffect(() => {
     if (selectedClip === null) return;
@@ -663,6 +664,8 @@ export function App() {
               thumbs={thumbs}
               mediaRef={mediaRef}
               edits={editor.edits}
+              assets={assets}
+              words={editor.words}
               playback={playback}
               peers={peers}
               transition={editor.transition}
