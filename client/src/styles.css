@@ -19,6 +19,14 @@
   flex: 1;
 }
 
+/* legacy: Login (Task 8) */
+.logo {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, var(--overdub), var(--accent));
+}
+
 /* Dropzone */
 
 .dropzone-wrap {
@@ -440,6 +448,14 @@
 
 /* Toolbar */
 
+/* legacy: dialogs (Task 7) / Login (Task 8) */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .actions button {
   white-space: nowrap;
 }
@@ -463,6 +479,23 @@ button.ghost {
 .actions button:hover:not(:disabled),
 button.ghost:hover {
   background: var(--hover);
+}
+
+/* legacy: dialogs (Task 7) */
+.actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* legacy: dialogs (Task 7) */
+.actions button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.actions button.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, #000);
 }
 
 .toggle {

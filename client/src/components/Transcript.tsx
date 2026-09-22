@@ -259,6 +259,7 @@ export function Transcript({
         <button
           key={`title-${token.before}-${tokenIndex}`}
           type="button"
+          data-at={title.at}
           className={`title-token ${title.style}${selected ? ' selected' : ''}`}
           title={readOnly ? title.text : 'Click to select · double-click to edit'}
           onClick={readOnly ? undefined : () => onTitleClick(title.at)}

@@ -34,6 +34,7 @@ import { Transcript } from './components/Transcript';
 import { cx } from './cx';
 import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
+import { shouldIgnoreGlobalKey } from './keyboardGuard';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
 import { audios, brolls } from './overlays';
@@ -580,7 +581,7 @@ export function App() {
         audioDialog
       )
         return;
-      if (target?.closest('input, textarea, select, [contenteditable]')) return;
+      if (shouldIgnoreGlobalKey(target, e.defaultPrevented)) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
         deleteSelected();
@@ -667,6 +668,7 @@ export function App() {
           if (selected) setBrollRange(selected);
         },
         onAddMusic: () => setAudioDialog({ range: selected }),
+        onOverdub: () => setOverdubOpen(true),
         onSplit,
         transition: editor.transition,
         onTransition: (transition: Transition) => edit({ type: 'setTransition', transition }),
@@ -775,7 +777,9 @@ export function App() {
             />
             <SelectionToolbar
               anchorIndex={selected?.[0] ?? null}
-              open={selected !== null && canEdit}
+              titleAt={selectedTitle}
+              clipStart={hasClipSelection ? selectedClip : null}
+              open={(selected !== null || selectedTitle !== null || hasClipSelection) && canEdit}
               onDelete={deleteSelected}
               onOverdub={() => setOverdubOpen(true)}
               onCaption={() => {

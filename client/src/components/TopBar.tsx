@@ -1,5 +1,5 @@
 import { DropdownMenu, Popover } from 'radix-ui';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { cx } from '../cx';
 import { formatTime } from '../editlist';
@@ -37,6 +37,7 @@ export interface EditorControls {
   onAddCaption: () => void;
   onAddBroll: () => void;
   onAddMusic: () => void;
+  onOverdub: () => void;
   onSplit: () => void;
   transition: Transition;
   onTransition: (transition: Transition) => void;
@@ -216,6 +217,13 @@ function EditorTools({ editor }: { editor: EditorControls }) {
             <DropdownMenu.Item className={styles.item} onSelect={editor.onAddMusic}>
               Music…
             </DropdownMenu.Item>
+            <DropdownMenu.Item
+              className={styles.item}
+              disabled={!editor.hasSelection}
+              onSelect={editor.onOverdub}
+            >
+              Overdub…
+            </DropdownMenu.Item>
             <DropdownMenu.Separator className={styles.separator} />
             <DropdownMenu.Item className={styles.item} onSelect={editor.onSplit}>
               Split here
@@ -248,6 +256,14 @@ function ExportButton({ editor }: { editor: EditorControls }) {
   const [open, setOpen] = useState(false);
   const state = editor.exportState;
   const rendering = state.status === 'rendering';
+
+  // A render that finishes (or fails) while the popover is closed still
+  // needs to be seen: bring it back rather than leaving the result stranded
+  // behind the button.
+  useEffect(() => {
+    if (state.status === 'done' || state.status === 'error') setOpen(true);
+  }, [state.status]);
+
   return (
     <Popover.Root open={open && state.status !== 'idle'} onOpenChange={setOpen}>
       <Popover.Anchor asChild>
@@ -256,8 +272,10 @@ function ExportButton({ editor }: { editor: EditorControls }) {
           className={cx(ui.button, ui.primary)}
           disabled={editor.readOnly || rendering}
           onClick={() => {
+            // A result is already showing: reopen it, don't start a second
+            // render. "Export again" inside the popover does that.
+            if (state.status === 'idle') editor.onExport();
             setOpen(true);
-            editor.onExport();
           }}
         >
           {rendering ? (
@@ -275,6 +293,10 @@ function ExportButton({ editor }: { editor: EditorControls }) {
           align="end"
           sideOffset={8}
           onOpenAutoFocus={(e) => e.preventDefault()}
+          onInteractOutside={(e) => {
+            // A render in flight must not be dismissed and lost.
+            if (rendering) e.preventDefault();
+          }}
         >
           {state.status === 'rendering' && (
             <div className={styles.progress}>
@@ -298,9 +320,19 @@ function ExportButton({ editor }: { editor: EditorControls }) {
               <a className={cx(ui.button, ui.primary)} href={state.url} download>
                 Download {state.url.split('/').pop()}
               </a>
+              <button type="button" className={cx(ui.button, ui.ghost)} onClick={editor.onExport}>
+                Export again
+              </button>
             </div>
           )}
-          {state.status === 'error' && <p className={ui.error}>{state.message}</p>}
+          {state.status === 'error' && (
+            <div className={styles.progress}>
+              <p className={ui.error}>{state.message}</p>
+              <button type="button" className={cx(ui.button, ui.ghost)} onClick={editor.onExport}>
+                Export again
+              </button>
+            </div>
+          )}
           <Popover.Close className={cx(ui.iconButton, ui.ghost, styles.close)} aria-label="Close">
             ✕
           </Popover.Close>

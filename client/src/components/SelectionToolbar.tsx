@@ -6,8 +6,12 @@ import ui from '../styles/ui.module.css';
 import styles from './SelectionToolbar.module.css';
 
 interface Props {
-  /** Index of the first selected word; the toolbar floats above it. */
+  /** Index of the first selected word; the toolbar floats above it, full actions. */
   anchorIndex: number | null;
+  /** A selected title card's instant; Delete-only, anchored to the card. */
+  titleAt: number | null;
+  /** A selected clip divider's start; Delete-only, anchored to the clip. */
+  clipStart: number | null;
   open: boolean;
   onDelete: () => void;
   onOverdub: () => void;
@@ -15,30 +19,57 @@ interface Props {
   onBroll: () => void;
 }
 
+/** What the toolbar is anchored to, and whether it shows the full action set. */
+function target(
+  anchorIndex: number | null,
+  titleAt: number | null,
+  clipStart: number | null,
+): { selector: string; deleteOnly: boolean } | null {
+  if (anchorIndex !== null) return { selector: `[data-index="${anchorIndex}"]`, deleteOnly: false };
+  if (titleAt !== null) return { selector: `[data-at="${titleAt}"]`, deleteOnly: true };
+  if (clipStart !== null) return { selector: `.clip[data-start="${clipStart}"]`, deleteOnly: true };
+  return null;
+}
+
 /**
- * The actions that need a word selection, floating above it. Anchored to the
- * word's element by its `data-index`, so it follows scrolling. It never takes
- * focus: typing shortcuts keep working on the transcript.
+ * The actions that need a selection, floating above it: the full set over a
+ * word selection, Delete-only over a selected title card or clip divider.
+ * Anchored to the element by a stable data attribute, with a `contextElement`
+ * so it follows the transcript panel's own scrolling, not just the window's.
+ * It never takes focus: typing shortcuts keep working underneath.
  */
 export function SelectionToolbar({
   anchorIndex,
+  titleAt,
+  clipStart,
   open,
   onDelete,
   onOverdub,
   onCaption,
   onBroll,
 }: Props) {
+  const t = target(anchorIndex, titleAt, clipStart);
+  const selector = t?.selector ?? null;
   const anchor = useMemo(
     () => ({
       current: {
         getBoundingClientRect: () =>
-          document.querySelector(`[data-index="${anchorIndex}"]`)?.getBoundingClientRect() ??
+          (selector ? document.querySelector(selector) : null)?.getBoundingClientRect() ??
           new DOMRect(),
+        // A getter, so floating-ui's autoUpdate re-reads it as the element
+        // comes and goes, instead of capturing a stale (or missing) node.
+        get contextElement() {
+          return (selector ? document.querySelector(selector) : null) ?? undefined;
+        },
       },
     }),
-    [anchorIndex],
+    [selector],
   );
-  if (anchorIndex === null) return null;
+  if (!t) return null;
+  // A 0×0 rect at the viewport origin is worse than not showing the toolbar:
+  // wait for the anchored element to actually exist.
+  const anchorEl = document.querySelector(t.selector);
+  if (!anchorEl) return null;
   const button = cx(ui.button, ui.ghost, styles.action);
   return (
     <Popover.Root open={open}>
@@ -57,15 +88,19 @@ export function SelectionToolbar({
           <button type="button" className={cx(button, styles.delete)} onClick={onDelete}>
             Delete
           </button>
-          <button type="button" className={button} onClick={onOverdub}>
-            Overdub
-          </button>
-          <button type="button" className={button} onClick={onCaption}>
-            Caption
-          </button>
-          <button type="button" className={button} onClick={onBroll}>
-            B-roll
-          </button>
+          {!t.deleteOnly && (
+            <>
+              <button type="button" className={button} onClick={onOverdub}>
+                Overdub
+              </button>
+              <button type="button" className={button} onClick={onCaption}>
+                Caption
+              </button>
+              <button type="button" className={button} onClick={onBroll}>
+                B-roll
+              </button>
+            </>
+          )}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
