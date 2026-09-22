@@ -50,4 +50,13 @@ describe('shouldIgnoreGlobalKey', () => {
     document.body.append(wrapper);
     expect(shouldIgnoreGlobalKey(inner, false)).toBe(true);
   });
+
+  it('ignores anything inside a Radix dialog', () => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    const inner = document.createElement('button');
+    dialog.append(inner);
+    document.body.append(dialog);
+    expect(shouldIgnoreGlobalKey(inner, false)).toBe(true);
+  });
 });

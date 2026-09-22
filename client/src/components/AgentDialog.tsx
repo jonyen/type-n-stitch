@@ -2,8 +2,13 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { mcpAddCommand } from '../agent';
 import { createToken, listTokens, revokeToken } from '../api';
+import { cx } from '../cx';
 import { relativeTime } from '../format';
 import type { TokenInfo } from '../types';
+import agent from './AgentDialog.module.css';
+import { DialogFrame } from './DialogFrame';
+import frame from './DialogFrame.module.css';
+import ui from '../styles/ui.module.css';
 
 interface Props {
   onCancel: () => void;
@@ -60,20 +65,14 @@ export function AgentDialog({ onCancel }: Props) {
   };
 
   return (
-    <div
-      className="modal-backdrop"
-      onClick={busy || minted ? undefined : onCancel}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape' && !busy && !minted) onCancel();
-      }}
+    <DialogFrame
+      title="Connect an agent"
+      description="Mint a token so Claude can join this project as its own agent — cursor, edits, and undo all its own."
+      busy={busy || minted !== null}
+      wide
+      onClose={onCancel}
     >
-      <div className="modal agent-dialog" onClick={(e) => e.stopPropagation()}>
-        <h2>Connect an agent</h2>
-        <p className="muted">
-          Mint a token so Claude can join this project as its own agent — cursor, edits, and undo
-          all its own.
-        </p>
-
+      <div className={frame.form}>
         {minted ? (
           <MintedToken
             origin={window.location.origin}
@@ -81,8 +80,8 @@ export function AgentDialog({ onCancel }: Props) {
             onDone={() => setMinted(null)}
           />
         ) : (
-          <form className="agent-create" onSubmit={create}>
-            <label className="field">
+          <form className={agent.create} onSubmit={create}>
+            <label className={ui.field}>
               Label
               <input
                 ref={first}
@@ -94,30 +93,38 @@ export function AgentDialog({ onCancel }: Props) {
                 disabled={busy}
               />
             </label>
-            <button type="submit" className="primary" disabled={busy || !label.trim()}>
+            <button
+              type="submit"
+              className={cx(ui.button, ui.primary)}
+              disabled={busy || !label.trim()}
+            >
               {busy ? 'Creating…' : 'Create token'}
             </button>
           </form>
         )}
 
-        {error && <p className="error">{error}</p>}
+        {error && <p className={ui.error}>{error}</p>}
 
-        <div className="token-list">
+        <div className={agent.list}>
           <h3>Tokens</h3>
           {tokens === null ? (
-            <p className="muted">Loading…</p>
+            <p className={ui.muted}>Loading…</p>
           ) : tokens.length === 0 ? (
-            <p className="muted">No tokens yet. Create one above to connect an agent.</p>
+            <p className={ui.muted}>No tokens yet. Create one above to connect an agent.</p>
           ) : (
             <ul>
               {tokens.map((t) => (
-                <li key={t.id} className="token-row">
-                  <span className="token-label">{t.label}</span>
-                  <span className="muted token-meta">
+                <li key={t.id} className={agent.row}>
+                  <span className={agent.label}>{t.label}</span>
+                  <span className={cx(ui.muted, agent.meta)}>
                     created {relativeTime(t.createdAt)} · last used{' '}
                     {t.lastUsedAt ? relativeTime(t.lastUsedAt) : 'never'}
                   </span>
-                  <button type="button" className="ghost" onClick={() => revoke(t.id)}>
+                  <button
+                    type="button"
+                    className={cx(ui.button, ui.ghost)}
+                    onClick={() => revoke(t.id)}
+                  >
                     Revoke
                   </button>
                 </li>
@@ -127,15 +134,15 @@ export function AgentDialog({ onCancel }: Props) {
         </div>
 
         {!minted && (
-          <div className="actions">
-            <span className="spacer" />
-            <button type="button" onClick={onCancel}>
+          <div className={frame.actions}>
+            <span className={frame.spacer} />
+            <button type="button" className={ui.button} onClick={onCancel}>
               Done
             </button>
           </div>
         )}
       </div>
-    </div>
+    </DialogFrame>
   );
 }
 
@@ -150,15 +157,15 @@ function MintedToken({
 }) {
   const command = mcpAddCommand(origin, token);
   return (
-    <div className="minted-token">
-      <p className="muted">
+    <div className={agent.minted}>
+      <p className={ui.muted}>
         This token is shown once — copy it now. Anyone with it can edit as this agent.
       </p>
       <CopyBox label="Token" value={token} />
       <CopyBox label="claude mcp add" value={command} />
-      <div className="actions">
-        <span className="spacer" />
-        <button type="button" className="primary" onClick={onDone}>
+      <div className={frame.actions}>
+        <span className={frame.spacer} />
+        <button type="button" className={cx(ui.button, ui.primary)} onClick={onDone}>
           Done
         </button>
       </div>
@@ -180,10 +187,10 @@ function CopyBox({ label, value }: { label: string; value: string }) {
   };
 
   return (
-    <div className="copy-box">
-      <span className="copy-box-label muted">{label}</span>
-      <code className="copy-box-value">{value}</code>
-      <button type="button" className="ghost" onClick={copy}>
+    <div className={agent.copyBox}>
+      <span className={cx(agent.copyLabel, ui.muted)}>{label}</span>
+      <code className={agent.copyValue}>{value}</code>
+      <button type="button" className={cx(ui.button, ui.ghost)} onClick={copy}>
         {copied ? 'Copied' : 'Copy'}
       </button>
     </div>

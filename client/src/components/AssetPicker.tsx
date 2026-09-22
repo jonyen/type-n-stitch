@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import { cx } from '../cx';
 import { formatTime } from '../editlist';
 import type { Asset, MediaKind } from '../types';
+import picker from './AssetPicker.module.css';
+import ui from '../styles/ui.module.css';
 
 interface Props {
   assets: Asset[];
@@ -33,8 +36,8 @@ export function AssetPicker({ assets, kind, value, onChange, onUpload, autoFocus
     }
   };
   return (
-    <div className="asset-picker">
-      <div className="asset-grid" role="radiogroup">
+    <div className={picker.picker}>
+      <div className={picker.grid} role="radiogroup">
         {list.map((a, i) => (
           <button
             key={a.id}
@@ -42,32 +45,32 @@ export function AssetPicker({ assets, kind, value, onChange, onUpload, autoFocus
             type="button"
             role="radio"
             aria-checked={value?.id === a.id}
-            className={`asset-card${value?.id === a.id ? ' selected' : ''}`}
+            className={cx(picker.card, value?.id === a.id && picker.selected)}
             disabled={busy}
             onClick={() => onChange(a)}
           >
             <span
-              className={`poster ${a.kind}`}
+              className={picker.poster}
               style={a.poster ? { backgroundImage: `url(${a.poster})` } : undefined}
             >
               {!a.poster && (
-                <span className="poster-glyph" aria-hidden>
+                <span className={picker.glyph} aria-hidden>
                   ♪
                 </span>
               )}
-              <span className="length">{formatTime(a.duration)}</span>
+              <span className={picker.length}>{formatTime(a.duration)}</span>
             </span>
-            <span className="asset-name">{a.name}</span>
+            <span className={picker.name}>{a.name}</span>
           </button>
         ))}
         <button
           ref={list.length === 0 ? first : undefined}
           type="button"
-          className="asset-card add"
+          className={cx(picker.card, picker.add)}
           disabled={busy}
           onClick={() => input.current?.click()}
         >
-          {busy ? <span className="spinner small" aria-hidden /> : '+'}{' '}
+          {busy ? <span className={ui.spinnerSmall} aria-hidden /> : '+'}{' '}
           {busy ? 'Uploading…' : `Upload ${kind}`}
         </button>
       </div>
@@ -82,8 +85,8 @@ export function AssetPicker({ assets, kind, value, onChange, onUpload, autoFocus
           e.target.value = '';
         }}
       />
-      {error && <p className="error">{error}</p>}
-      {list.length === 0 && !busy && <p className="muted">No {kind} assets yet — upload one.</p>}
+      {error && <p className={ui.error}>{error}</p>}
+      {list.length === 0 && !busy && <p className={ui.muted}>No {kind} assets yet — upload one.</p>}
     </div>
   );
 }

@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
+import { cx } from '../cx';
+import { DialogFrame } from './DialogFrame';
+import frame from './DialogFrame.module.css';
+import ui from '../styles/ui.module.css';
+
 interface Props {
   /** The words being replaced, for the prompt. */
   original: string;
@@ -32,35 +37,46 @@ export function OverdubDialog({ original, onSubmit, onCancel }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={busy ? undefined : onCancel}>
-      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
-        <h2>Overdub</h2>
-        <p className="muted">
+    <DialogFrame
+      title="Overdub"
+      description={
+        <>
           Replacing <q>{original}</q>. Type what should be said instead; VoiceStudio will speak it
           in the cloned voice.
-        </p>
-        <textarea
-          ref={textarea}
-          rows={3}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey))
-              e.currentTarget.form?.requestSubmit();
-            if (e.key === 'Escape' && !busy) onCancel();
-          }}
-          disabled={busy}
-        />
-        {error && <p className="error">{error}</p>}
-        <div className="actions">
-          <span className="spacer" />
-          <button type="button" onClick={onCancel} disabled={busy}>
+        </>
+      }
+      busy={busy}
+      onClose={onCancel}
+    >
+      <form className={frame.form} onSubmit={submit}>
+        <label className={ui.field}>
+          Say instead
+          <textarea
+            ref={textarea}
+            rows={3}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey))
+                e.currentTarget.form?.requestSubmit();
+            }}
+            disabled={busy}
+          />
+        </label>
+        {error && <p className={ui.error}>{error}</p>}
+        <div className={frame.actions}>
+          <span className={frame.spacer} />
+          <button type="button" className={ui.button} onClick={onCancel} disabled={busy}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={busy || !text.trim()}>
+          <button
+            type="submit"
+            className={cx(ui.button, ui.primary)}
+            disabled={busy || !text.trim()}
+          >
             {busy ? (
               <>
-                <span className="spinner small" aria-hidden /> Synthesizing…
+                <span className={ui.spinnerSmall} aria-hidden /> Synthesizing…
               </>
             ) : (
               'Generate'
@@ -68,6 +84,6 @@ export function OverdubDialog({ original, onSubmit, onCancel }: Props) {
           </button>
         </div>
       </form>
-    </div>
+    </DialogFrame>
   );
 }

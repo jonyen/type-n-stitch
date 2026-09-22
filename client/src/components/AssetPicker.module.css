@@ -1,0 +1,75 @@
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--space-2);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--raised);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.card:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.poster {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 68px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: #111 center / cover no-repeat;
+}
+
+.glyph {
+  color: var(--muted);
+  font-size: 22px;
+}
+
+.length {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.name {
+  padding: 6px 8px;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add {
+  align-items: center;
+  justify-content: center;
+  min-height: 100px;
+  border-style: dashed;
+  background: transparent;
+  color: var(--muted);
+}

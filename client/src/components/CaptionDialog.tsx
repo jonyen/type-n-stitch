@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
+import { cx } from '../cx';
 import type { CaptionPos } from '../types';
+import { DialogFrame } from './DialogFrame';
+import frame from './DialogFrame.module.css';
+import ui from '../styles/ui.module.css';
 
 interface Props {
   /** The selected words, which the caption starts out as. */
@@ -32,22 +36,19 @@ export function CaptionDialog({ original, onSubmit, onCancel }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onCancel}>
+    <DialogFrame
+      title="Add caption"
+      description="Text drawn over the picture while the selected words play."
+      onClose={onCancel}
+    >
       <form
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
+        className={frame.form}
         onSubmit={submit}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') {
-            e.stopPropagation();
-            onCancel();
-          }
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.currentTarget.requestSubmit();
         }}
       >
-        <h2>Add caption</h2>
-        <p className="muted">Text drawn over the picture while the selected words play.</p>
-        <label className="field">
+        <label className={ui.field}>
           Caption
           <input
             ref={first}
@@ -58,7 +59,7 @@ export function CaptionDialog({ original, onSubmit, onCancel }: Props) {
             onChange={(e) => setText(e.target.value)}
           />
         </label>
-        <label className="field">
+        <label className={ui.field}>
           Position
           <select value={position} onChange={(e) => setPosition(e.target.value as CaptionPos)}>
             {POSITIONS.map((p) => (
@@ -68,16 +69,16 @@ export function CaptionDialog({ original, onSubmit, onCancel }: Props) {
             ))}
           </select>
         </label>
-        <div className="actions">
-          <span className="spacer" />
-          <button type="button" onClick={onCancel}>
+        <div className={frame.actions}>
+          <span className={frame.spacer} />
+          <button type="button" className={ui.button} onClick={onCancel}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={!text.trim()}>
+          <button type="submit" className={cx(ui.button, ui.primary)} disabled={!text.trim()}>
             Add caption
           </button>
         </div>
       </form>
-    </div>
+    </DialogFrame>
   );
 }
