@@ -310,6 +310,43 @@ pub struct ExportArgs {
     pub format: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SplitArgs {
+    /// Split just after this word, from the transcript's `i`: the new clip
+    /// starts where the next word starts.
+    pub after: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MoveClipArgs {
+    /// Index of the clip to move, from `list_clips`.
+    pub clip: usize,
+    /// Index of the clip it should land before; omit to move it to the end.
+    pub before: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddBrollArgs {
+    pub from: usize,
+    pub to: usize,
+    /// An asset id from `list_assets` (a video).
+    pub asset: String,
+    /// Seconds into the asset to start from; 0 when omitted.
+    pub offset: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddAudioArgs {
+    pub from: usize,
+    pub to: usize,
+    /// An asset id from `list_assets` (audio).
+    pub asset: String,
+    /// Level in dB, -30..12; 0 when omitted.
+    pub gain: Option<f64>,
+    /// Duck under speech; true when omitted.
+    pub duck: Option<bool>,
+}
+
 #[tool_router]
 impl McpSession {
     #[tool(description = "Every project you can open, with your role and its duration.")]
@@ -517,6 +554,95 @@ impl McpSession {
                 .await,
         )
     }
+
+    #[tool(
+        description = "The clips in output order, each with its index, source \
+                       start/end, duration and first words. Clips come from \
+                       splits and cuts."
+    )]
+    async fn list_clips(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_list_clips(&identity_of(&ctx)?).await)
+    }
+
+    #[tool(
+        description = "Split the edit into two clips just after word `after`, \
+                       so the part starting at the next word can be moved."
+    )]
+    async fn split(
+        &self,
+        Parameters(args): Parameters<SplitArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_split(&identity_of(&ctx)?, args.after).await)
+    }
+
+    #[tool(description = "Move clip `clip` so it plays before clip `before` \
+                       (indices from `list_clips`); omit `before` to move it \
+                       to the end.")]
+    async fn move_clip(
+        &self,
+        Parameters(args): Parameters<MoveClipArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(
+            self.tool_move_clip(&identity_of(&ctx)?, args.clip, args.before)
+                .await,
+        )
+    }
+
+    #[tool(
+        description = "B-roll videos and music files uploaded to this project, \
+                       with ids for `add_broll` and `add_audio`."
+    )]
+    async fn list_assets(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_list_assets(&identity_of(&ctx)?).await)
+    }
+
+    #[tool(description = "Show video asset `asset` over the picture while words \
+                       `from`..`to` play, starting `offset` seconds into it. \
+                       The main audio keeps playing.")]
+    async fn add_broll(
+        &self,
+        Parameters(args): Parameters<AddBrollArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(
+            self.tool_add_broll(
+                &identity_of(&ctx)?,
+                args.from,
+                args.to,
+                &args.asset,
+                args.offset,
+            )
+            .await,
+        )
+    }
+
+    #[tool(description = "Play audio asset `asset` under words `from`..`to` at \
+                       `gain` dB, ducked under speech unless `duck` is false.")]
+    async fn add_audio(
+        &self,
+        Parameters(args): Parameters<AddAudioArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(
+            self.tool_add_audio(
+                &identity_of(&ctx)?,
+                args.from,
+                args.to,
+                &args.asset,
+                args.gain,
+                args.duck,
+            )
+            .await,
+        )
+    }
 }
 
 impl McpSession {
@@ -601,6 +727,7 @@ impl McpSession {
             "transition": doc.transition,
             "role": role,
             "transcript": transcript(&open.words, open.speakers.as_deref(), &doc.edits),
+            "clips": Self::clips_json(&open, &doc),
         }))
     }
 
@@ -847,6 +974,143 @@ impl McpSession {
         }
     }
 
+    /// The clips an open project renders in, from splits, cuts and the
+    /// stored playback order.
+    fn clips_json(open: &Open, doc: &engine::ProjectDoc) -> Vec<Value> {
+        engine::ordered_pieces(open.duration, &doc.edits, &doc.splits, &doc.order)
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let words: Vec<&str> = open
+                    .words
+                    .iter()
+                    .filter(|w| w.start >= p.start - engine::EPS && w.start < p.end)
+                    .map(|w| w.text.as_str())
+                    .take(6)
+                    .collect();
+                json!({ "i": i, "start": p.start, "end": p.end, "duration": p.len(), "words": words.join(" ") })
+            })
+            .collect()
+    }
+
+    pub(crate) async fn tool_list_clips(&self, identity: &McpIdentity) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        let open = agent.lock().await;
+        let project = require_open(&open, identity)?;
+        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
+        Ok(Value::Array(Self::clips_json(&open, &doc)))
+    }
+
+    pub(crate) async fn tool_split(&self, identity: &McpIdentity, after: i64) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        self.edit(&agent, identity, |open| {
+            if after < 0 {
+                return Err(AppError::bad_request(
+                    "the first clip already starts at the beginning",
+                ));
+            }
+            let i = after as usize;
+            let next = open.words.get(i + 1).ok_or_else(|| {
+                AppError::bad_request(if i < open.words.len() {
+                    "nothing after the last word to split off".to_owned()
+                } else {
+                    format!("no word {i} in a transcript of {}", open.words.len())
+                })
+            })?;
+            Ok((Some((i, i)), Op::Split { at: next.start }))
+        })
+        .await
+    }
+
+    pub(crate) async fn tool_move_clip(
+        &self,
+        identity: &McpIdentity,
+        clip: usize,
+        before: Option<usize>,
+    ) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        let (project_id, duration) = {
+            let open = agent.lock().await;
+            (require_open(&open, identity)?.id.clone(), open.duration)
+        };
+        let (_, doc) = ops::load_doc(&self.state, &project_id).await?;
+        let pieces = engine::ordered_pieces(duration, &doc.edits, &doc.splits, &doc.order);
+        let start_of = |i: usize| {
+            pieces.get(i).map(|p| p.start).ok_or_else(|| {
+                AppError::bad_request(format!("no clip {i}; there are {}", pieces.len()))
+            })
+        };
+        let piece = start_of(clip)?;
+        let before = before.map(start_of).transpose()?;
+        let mut out = self
+            .edit(&agent, identity, |_| Ok((None, Op::Move { piece, before })))
+            .await?;
+        let open = agent.lock().await;
+        let (_, doc) = ops::load_doc(&self.state, &project_id).await?;
+        out["clips"] = Value::Array(Self::clips_json(&open, &doc));
+        Ok(out)
+    }
+
+    pub(crate) async fn tool_list_assets(&self, identity: &McpIdentity) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        let open = agent.lock().await;
+        let project = require_open(&open, identity)?;
+        Ok(serde_json::to_value(
+            crate::assets::list_for(&self.state.db, project).await?,
+        )?)
+    }
+
+    pub(crate) async fn tool_add_broll(
+        &self,
+        identity: &McpIdentity,
+        from: usize,
+        to: usize,
+        asset: &str,
+        offset: Option<f64>,
+    ) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        self.edit(&agent, identity, |open| {
+            let range = range_of(open, from, to)?;
+            Ok((
+                Some((from, to)),
+                Op::AddBroll {
+                    start: range.start,
+                    end: range.end,
+                    media: asset.to_owned(),
+                    offset: offset.unwrap_or(0.0),
+                },
+            ))
+        })
+        .await
+    }
+
+    pub(crate) async fn tool_add_audio(
+        &self,
+        identity: &McpIdentity,
+        from: usize,
+        to: usize,
+        asset: &str,
+        gain: Option<f64>,
+        duck: Option<bool>,
+    ) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        self.edit(&agent, identity, |open| {
+            let range = range_of(open, from, to)?;
+            Ok((
+                Some((from, to)),
+                Op::AddAudio {
+                    start: range.start,
+                    end: range.end,
+                    media: asset.to_owned(),
+                    offset: 0.0,
+                    gain: gain.unwrap_or(0.0),
+                    duck: duck.unwrap_or(true),
+                },
+            ))
+        })
+        .await
+    }
+
     /// The shared body of every editing tool: work out what to do from the
     /// open project, move the cursor onto the words about to change, dwell
     /// long enough for people watching to see it, then append the operation
@@ -1012,12 +1276,16 @@ impl ServerHandler for McpSession {
              You appear to them as \"Claude\", a peer with its own colour, and your \
              edits are yours to undo. The editing tools are `cut`, \
              `remove_fillers`, `tighten_pauses`, `overdub`, `add_title`, \
-             `add_caption`, `set_transition`, `undo` and `redo`. Each pauses \
+             `add_caption`, `set_transition`, `split`, `move_clip`, `add_broll`, \
+             `add_audio`, `undo` and `redo`. Each pauses \
              about half a second before it applies, and the ones that work on a \
              range of words move your cursor onto those words first — `undo`, \
              `redo`, `set_transition` and `add_title` with `after: -1` have no \
              range to point at, so they leave it where it is. All of them return \
-             the new counts and the words they touched. `export` renders and waits. Indices are always the \
+             the new counts and the words they touched. `list_clips`, `split` \
+             and `move_clip` reorder the edit; `list_assets`, `add_broll` and \
+             `add_audio` lay a shot or music over a range of words (uploading \
+             assets happens in the browser). `export` renders and waits. Indices are always the \
              transcript's `i`, so call `get_transcript` again after an edit \
              rather than reusing stale ones. One token is one agent: every \
              window connected with it shares the project you open and the \
@@ -1245,19 +1513,25 @@ mod tests {
         assert_eq!(
             names,
             [
+                "add_audio",
+                "add_broll",
                 "add_caption",
                 "add_title",
                 "cut",
                 "export",
                 "find",
                 "get_transcript",
+                "list_assets",
+                "list_clips",
                 "list_projects",
                 "look_at",
+                "move_clip",
                 "open_project",
                 "overdub",
                 "redo",
                 "remove_fillers",
                 "set_transition",
+                "split",
                 "tighten_pauses",
                 "undo"
             ]
@@ -2091,5 +2365,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn split_after_a_word_then_move_reorders_the_clips() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        let out = session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        assert_eq!(out["clips"].as_array().unwrap().len(), 1);
+        session.tool_split(&identity, 0).await.unwrap();
+        let clips = session.tool_list_clips(&identity).await.unwrap();
+        // Word 0 ends at 0.5; the split lands at the next word's start, 1.0.
+        assert_eq!(clips[0]["start"], 0.0);
+        assert_eq!(clips[1]["start"], 1.0);
+        assert_eq!(clips[1]["words"], "b c");
+        session.tool_move_clip(&identity, 1, Some(0)).await.unwrap();
+        let clips = session.tool_list_clips(&identity).await.unwrap();
+        assert_eq!(clips[0]["start"], 1.0);
+        assert_eq!(clips[1]["start"], 0.0);
+        assert!(
+            session.tool_split(&identity, 2).await.is_err(),
+            "nothing after the last word"
+        );
+        assert!(session.tool_move_clip(&identity, 5, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn add_broll_and_add_audio_take_project_assets() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let clip = crate::assets::test_support::seed_asset(
+            &state,
+            &project,
+            engine::MediaKind::Video,
+            5.0,
+        )
+        .await;
+        let song = crate::assets::test_support::seed_asset(
+            &state,
+            &project,
+            engine::MediaKind::Audio,
+            60.0,
+        )
+        .await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let assets = session.tool_list_assets(&identity).await.unwrap();
+        assert_eq!(assets.as_array().unwrap().len(), 2);
+        let out = session
+            .tool_add_broll(&identity, 0, 1, &clip.id, Some(1.0))
+            .await
+            .unwrap();
+        assert_eq!(out["touched"].as_array().unwrap().len(), 2);
+        session
+            .tool_add_audio(&identity, 0, 2, &song.id, Some(-8.0), Some(false))
+            .await
+            .unwrap();
+        let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
+        assert!(matches!(&doc.edits[0], Edit::Broll { offset, .. } if *offset == 1.0));
+        assert!(matches!(&doc.edits[1], Edit::Audio { gain, duck, .. } if *gain == -8.0 && !*duck));
     }
 }
