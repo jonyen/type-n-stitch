@@ -455,9 +455,14 @@ export function App() {
     if (tool === 'range') edit({ type: 'deleteSelection' });
   }, [tool, edit]);
 
-  const onWordDrag = useCallback((index: number) => {
-    dispatch({ type: 'select', index, extend: true });
-  }, []);
+  // Razor splits on a press; dragging across words selects nothing.
+  const onWordDrag = useCallback(
+    (index: number) => {
+      if (tool === 'razor') return;
+      dispatch({ type: 'select', index, extend: true });
+    },
+    [tool],
+  );
 
   const onExport = useCallback(async () => {
     if (!projectId) return;

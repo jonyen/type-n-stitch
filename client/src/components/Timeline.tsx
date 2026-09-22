@@ -101,7 +101,11 @@ export function Timeline(props: TimelineProps) {
     if (!p) return;
     if (props.tool === 'razor') {
       const hit = razorHit(p.t);
-      if (hit.ok && !readOnly) props.onSplit(hit.at);
+      if (hit.ok && !readOnly) {
+        props.onSplit(hit.at);
+        // The split makes this spot illegal; the next move redraws the line.
+        setRazor(null);
+      }
       return;
     }
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -131,6 +135,13 @@ export function Timeline(props: TimelineProps) {
     if (!p) return;
     const cuts = rangeCuts(band.from, p.t, words, segments);
     if (cuts.length > 0) props.onCut(cuts);
+  };
+
+  // A cancelled pointer abandons the gesture: no seek, no cut.
+  const onLanesCancel = () => {
+    scrubbing.current = false;
+    setBand(null);
+    setDrag(null);
   };
 
   // Clips: press and release to select, drag to reorder.
@@ -198,7 +209,13 @@ export function Timeline(props: TimelineProps) {
           onClick={() => {
             if (props.tool === 'select') props.onSelectOverlay({ kind, start: e.start });
           }}
-          onDoubleClick={kind === 'audio' ? () => props.onOpenAudio(e.start) : undefined}
+          onDoubleClick={
+            kind === 'audio'
+              ? () => {
+                  if (props.tool === 'select') props.onOpenAudio(e.start);
+                }
+              : undefined
+          }
         >
           <span>{nameOf(e.media)}</span>
         </button>
@@ -222,7 +239,7 @@ export function Timeline(props: TimelineProps) {
         onPointerDown={onLanesDown}
         onPointerMove={onLanesMove}
         onPointerUp={onLanesUp}
-        onPointerCancel={onLanesUp}
+        onPointerCancel={onLanesCancel}
         onPointerLeave={() => {
           if (!scrubbing.current) setHover(null);
           setRazor(null);

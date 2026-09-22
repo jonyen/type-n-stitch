@@ -191,6 +191,30 @@ describe('Timeline (Razor and Range)', () => {
     expect(props.onCut).toHaveBeenCalledWith([{ start: 6, end: 9 }]);
   });
 
+  it('razor: drops the line after a split, until the pointer moves again', () => {
+    const props = setup({ tool: 'razor' });
+    fireEvent.pointerMove(lanes(), { clientX: 260 });
+    fireEvent.pointerDown(lanes(), { clientX: 260, button: 0 });
+    expect(props.onSplit).toHaveBeenCalledWith(8);
+    expect(screen.queryByTestId('razor-line')).toBeNull();
+  });
+
+  it('range: a cancelled drag abandons the band without cutting', () => {
+    const props = setup({ tool: 'range' });
+    fireEvent.pointerDown(lanes(), { clientX: 110, button: 0 });
+    fireEvent.pointerMove(lanes(), { clientX: 390 });
+    fireEvent.pointerCancel(lanes(), { clientX: 390 });
+    expect(screen.queryByTestId('range-band')).toBeNull();
+    expect(props.onCut).not.toHaveBeenCalled();
+    expect(props.onSeek).not.toHaveBeenCalled();
+  });
+
+  it('opens a music bar on double-click only with the Select tool', () => {
+    const props = setup({ tool: 'razor' });
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'Music a2.mp3' }));
+    expect(props.onOpenAudio).not.toHaveBeenCalled();
+  });
+
   it('shows no razor line with the Select tool', () => {
     setup();
     fireEvent.pointerMove(lanes(), { clientX: 260 });
