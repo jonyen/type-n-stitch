@@ -218,7 +218,11 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
 
     case 'applyCuts': {
       if (action.cuts.length === 0) return state;
-      return withEdits(state, [...state.edits, ...action.cuts]);
+      // The same rule as a single cut: an overdub wholly inside a cut goes with it.
+      const kept = state.edits.filter(
+        (e) => !(e.kind === 'overdub' && action.cuts.some((c) => inside(e, c))),
+      );
+      return withEdits(state, [...kept, ...action.cuts]);
     }
 
     case 'sync': {

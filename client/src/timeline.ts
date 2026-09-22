@@ -7,6 +7,9 @@
 import { EPS, cutRanges, normalizeCuts, owner, pieceStarts, pieces } from './editlist';
 import type { Edit, Range, Word } from './types';
 
+/** The server's cap on splits per project (engine/src/types.rs `MAX_SPLITS`). */
+const MAX_SPLITS = 64;
+
 export interface Segment {
   source: Range;
   output: Range;
@@ -117,6 +120,7 @@ export function nearestStop(t: number, stops: Stop[]): Stop | null {
 
 /** The server's split rules, plus: a split on an existing piece start would do nothing. */
 export function canSplitAt(at: number, edits: Edit[], splits: number[], duration: number): boolean {
+  if (splits.length >= MAX_SPLITS) return false;
   if (at <= EPS || at >= duration - EPS) return false;
   const strictlyInside = (r: Range) => at > r.start + EPS && at < r.end - EPS;
   if (cutRanges(edits).some(strictlyInside)) return false;

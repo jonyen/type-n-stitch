@@ -111,6 +111,61 @@ describe('applyCuts', () => {
   it('is a no-op for an empty batch', () => {
     expect(editorReducer(loaded, { type: 'applyCuts', cuts: [] })).toBe(loaded);
   });
+
+  it('drops an overdub wholly covered by a cut, like a single cut', () => {
+    // Start with an overdub
+    let state = editorReducer(loaded, {
+      type: 'sync',
+      doc: {
+        headSeq: 1,
+        edits: [
+          {
+            kind: 'overdub' as const,
+            start: 2,
+            end: 3,
+            text: 'x',
+            audioUrl: '/data/m/od.wav',
+            audioDuration: 1,
+          },
+        ],
+        speakerNames: [],
+        undoable: null,
+        redoable: null,
+      },
+    });
+    expect(state.edits).toHaveLength(1);
+    // Apply a cut that wholly covers the overdub
+    state = editorReducer(state, {
+      type: 'applyCuts',
+      cuts: [{ kind: 'cut' as const, start: 1, end: 4 }],
+    });
+    expect(state.edits).toEqual([{ kind: 'cut' as const, start: 1, end: 4 }]);
+    // Apply a cut that only partly covers an overdub
+    state = editorReducer(loaded, {
+      type: 'sync',
+      doc: {
+        headSeq: 1,
+        edits: [
+          {
+            kind: 'overdub' as const,
+            start: 2,
+            end: 3,
+            text: 'x',
+            audioUrl: '/data/m/od.wav',
+            audioDuration: 1,
+          },
+        ],
+        speakerNames: [],
+        undoable: null,
+        redoable: null,
+      },
+    });
+    state = editorReducer(state, {
+      type: 'applyCuts',
+      cuts: [{ kind: 'cut' as const, start: 2.5, end: 4 }],
+    });
+    expect(state.edits.some((e) => e.kind === 'overdub')).toBe(true);
+  });
 });
 
 describe('overdub', () => {

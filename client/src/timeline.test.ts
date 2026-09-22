@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { editorReducer, initialEditor } from './editor';
 import {
   canSplitAt,
   clipSpans,
@@ -159,6 +160,17 @@ describe('split legality', () => {
   it('treats touching cuts as one', () => {
     expect(canSplitAt(3, [cut(2, 3), cut(3, 4)], [], 10)).toBe(false);
   });
+
+  it('refuses when the split count reaches the server cap', () => {
+    expect(
+      canSplitAt(
+        5,
+        [],
+        Array.from({ length: 64 }, (_, i) => 0.05 + i * 0.1),
+        10,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('razor', () => {
@@ -204,6 +216,25 @@ describe('range', () => {
     // 3.2 snaps to the stop at 4, so the band starts after the hold and leaves it alone.
     expect(rangeCuts(3.2, 5, ws, segs)).toEqual([r(3, 4)]);
     expect(rangeCuts(6, 9, ws, segs)).toEqual([r(5, 7)]);
+  });
+
+  it('a band over a whole overdub hold removes it once the cuts are applied', () => {
+    const edits = [overdub(2, 3, 2)];
+    let state = editorReducer(initialEditor, { type: 'load', words: ws, duration: 10 });
+    state = editorReducer(state, {
+      type: 'sync',
+      doc: { headSeq: 1, edits, speakerNames: [], undoable: null, redoable: null },
+    });
+    const segs = timelineSegments(10, edits, [], []);
+    const cuts = rangeCuts(1, 5, ws, segs);
+    state = editorReducer(state, {
+      type: 'applyCuts',
+      cuts: cuts.map((r) => ({ kind: 'cut' as const, ...r })),
+    });
+    const after = timelineSegments(10, state.edits, [], []);
+    expect(after.some((s) => s.kind === 'overdub')).toBe(false);
+    // 11 s of output, minus the 4 s the band covered.
+    expect(timelineLength(after)).toBe(7);
   });
 });
 
