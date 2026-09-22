@@ -157,6 +157,20 @@ describe('pieceIndexAt', () => {
     expect(pieceIndexAt(20, ordered)).toBe(1);
     expect(pieceIndexAt(0, [])).toBe(0);
   });
+
+  it('resyncs onto the piece that now covers t after ordered changes mid-playback', () => {
+    // Playing piece index 1 ([5,10)) at t=7; an edit splits it into [3,4) and
+    // [5,10), shifting what index 1 means. Resyncing from `t` (not from the
+    // stale index) must land back on the piece that now contains 7.
+    const ordered: Range[] = [
+      { start: 0, end: 3 },
+      { start: 3, end: 4 },
+      { start: 5, end: 10 },
+    ];
+    expect(pieceIndexAt(7, ordered)).toBe(2);
+    // A time inside no piece (the gap [4, 5)) resyncs to the next piece.
+    expect(pieceIndexAt(4.5, ordered)).toBe(2);
+  });
 });
 
 describe('nextTitleAt', () => {

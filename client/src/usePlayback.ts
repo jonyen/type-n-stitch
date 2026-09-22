@@ -121,6 +121,15 @@ export function usePlayback(
   const wantPlaying = useRef(false);
   /** The output piece currently playing, by index into `ordered`. */
   const playIndex = useRef(0);
+  // `ordered` changing (a split, cut, reorder or undo, possibly a peer's,
+  // mid-playback) can leave `playIndex` pointing at a piece that no longer
+  // occupies that slot; resync it from where the media actually sits rather
+  // than pausing or seeking, so an edit never interrupts the person watching.
+  useEffect(() => {
+    const media = mediaRef.current;
+    if (!media) return;
+    playIndex.current = pieceIndexAt(media.currentTime, ordered);
+  }, [mediaRef, ordered]);
   const activeOverdub = useRef<OverdubEdit | null>(null);
   const overdubAudio = useRef<HTMLAudioElement | null>(null);
   const frame = useRef(0);
