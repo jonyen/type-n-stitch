@@ -13,11 +13,14 @@ import {
   suggestEdits,
   synthesizeOverdub,
   transcribeMedia,
+  uploadAsset,
   uploadMedia,
   type Suggestions,
 } from './api';
 import { AgentDialog } from './components/AgentDialog';
+import { AudioDialog } from './components/AudioDialog';
 import { Avatar } from './components/Avatar';
+import { BrollDialog } from './components/BrollDialog';
 import { CaptionDialog } from './components/CaptionDialog';
 import { ClipStrip } from './components/ClipStrip';
 import { Dropzone } from './components/Dropzone';
@@ -38,6 +41,7 @@ import { useSession } from './session';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
 import type {
   Asset,
+  AudioEdit,
   CaptionPos,
   LibraryItem,
   ProjectSummary,
@@ -66,6 +70,13 @@ export function App() {
   // the dialog mounted (and the caption anchored) when a peer's `sync` clears
   // the selection while someone is still typing.
   const [captionRange, setCaptionRange] = useState<[number, number] | null>(null);
+  // The word range the B-roll dialog was opened on.
+  const [brollRange, setBrollRange] = useState<[number, number] | null>(null);
+  // The music dialog: adding over `range` (null means the whole edit), or
+  // editing an existing `edit`.
+  const [audioDialog, setAudioDialog] = useState<
+    { range: [number, number] | null } | { edit: AudioEdit } | null
+  >(null);
   // A selected title card, by its instant. Exclusive with the word selection.
   const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
   // A selected clip, by its piece's start. Exclusive with the word/title selection.
@@ -209,24 +220,26 @@ export function App() {
     };
   }, [projectId, words, duration, twoWordFillers]);
 
-  // The project's uploaded B-roll/music assets. Uploading is Task 12.
-  useEffect(() => {
-    if (!projectId) {
-      setAssets([]);
-      return;
-    }
-    let cancelled = false;
+  // The project's uploaded B-roll/music assets.
+  const refreshAssets = useCallback(() => {
+    if (!projectId) return;
     listAssets(projectId)
-      .then((a) => {
-        if (!cancelled) setAssets(a);
-      })
-      .catch(() => {
-        if (!cancelled) setAssets([]);
-      });
-    return () => {
-      cancelled = true;
-    };
+      .then(setAssets)
+      .catch(() => setAssets([]));
   }, [projectId]);
+  useEffect(() => {
+    setAssets([]);
+    refreshAssets();
+  }, [refreshAssets]);
+  const onUploadAsset = useCallback(
+    async (file: File) => {
+      if (!projectId) throw new Error('no project');
+      const asset = await uploadAsset(projectId, file);
+      setAssets((list) => [...list, asset]);
+      return asset;
+    },
+    [projectId],
+  );
 
   useEffect(() => {
     if (!projectId) {
@@ -289,6 +302,8 @@ export function App() {
     setSelectedClip(null);
     setTitleDialog(null);
     setCaptionRange(null);
+    setBrollRange(null);
+    setAudioDialog(null);
   }, []);
 
   // Opening a project pushes a history entry, so the browser's Back button
@@ -520,7 +535,15 @@ export function App() {
     if (!projectId) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      if (overdubOpen || titleDialog || captionRange || agentDialogOpen) return;
+      if (
+        overdubOpen ||
+        titleDialog ||
+        captionRange ||
+        agentDialogOpen ||
+        brollRange ||
+        audioDialog
+      )
+        return;
       if (target?.closest('input, textarea, select, [contenteditable]')) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
@@ -564,6 +587,8 @@ export function App() {
     titleDialog,
     captionRange,
     agentDialogOpen,
+    brollRange,
+    audioDialog,
     selectedTitle,
     selectedClip,
     hasClipSelection,
@@ -700,11 +725,9 @@ export function App() {
               }}
               onSplit={onSplit}
               onAddBroll={() => {
-                // Task 12: opens the B-roll dialog.
+                if (selected) setBrollRange(selected);
               }}
-              onAddMusic={() => {
-                // Task 12: opens the music dialog.
-              }}
+              onAddMusic={() => setAudioDialog({ range: selected })}
               onTransition={(transition: Transition) => edit({ type: 'setTransition', transition })}
               onRemoveFillers={() => edit({ type: 'applyCuts', cuts: fillers })}
               onTightenPauses={() => edit({ type: 'applyCuts', cuts: pauses })}
@@ -754,7 +777,12 @@ export function App() {
               onClipClick={onClipClick}
               assets={assets}
               onBrollClick={(start) => edit({ type: 'removeBroll', start })}
-              onAudioClick={(start) => edit({ type: 'removeAudio', start })}
+              onAudioClick={(start) => {
+                const found = editor.edits.find(
+                  (e): e is AudioEdit => e.kind === 'audio' && Math.abs(e.start - start) < EPS,
+                );
+                if (found) setAudioDialog({ edit: found });
+              }}
             />
           </section>
         </main>
@@ -784,6 +812,47 @@ export function App() {
           original={captionText}
           onSubmit={onCaptionSubmit}
           onCancel={() => setCaptionRange(null)}
+        />
+      )}
+
+      {brollRange && (
+        <BrollDialog
+          assets={assets}
+          original={wordsIn(brollRange)}
+          rangeLength={(() => {
+            const r = rangeForWords(editor.words, brollRange[0], brollRange[1], editor.duration);
+            return r.end - r.start;
+          })()}
+          onUpload={onUploadAsset}
+          onSubmit={(asset, offset) => {
+            edit({ type: 'addBroll', media: asset.id, offset, range: brollRange });
+            setBrollRange(null);
+          }}
+          onCancel={() => setBrollRange(null)}
+        />
+      )}
+      {audioDialog && (
+        <AudioDialog
+          assets={assets}
+          initial={'edit' in audioDialog ? audioDialog.edit : undefined}
+          wholeEdit={'range' in audioDialog && audioDialog.range === null}
+          onUpload={onUploadAsset}
+          onSubmit={(asset, gain, duck) => {
+            if ('edit' in audioDialog)
+              edit({ type: 'editAudio', start: audioDialog.edit.start, gain, duck });
+            else if (asset)
+              edit({ type: 'addAudio', media: asset.id, gain, duck, range: audioDialog.range });
+            setAudioDialog(null);
+          }}
+          onRemove={
+            'edit' in audioDialog
+              ? () => {
+                  edit({ type: 'removeAudio', start: audioDialog.edit.start });
+                  setAudioDialog(null);
+                }
+              : undefined
+          }
+          onCancel={() => setAudioDialog(null)}
         />
       )}
     </div>
