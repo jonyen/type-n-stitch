@@ -11,3 +11,4 @@ samples/*
 *.log
 .vite/
 models/
+.superpowers/
