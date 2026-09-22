@@ -22,7 +22,11 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    and undo appends an `undo` targeting your own operation. Titles are cards inserted at an instant —
    the engine splits the timeline wherever one falls, and the UI places them at word
    boundaries — captions are text drawn over a word range, and a project-wide (or per-cut) transition
-   dips to black where pieces meet; all three are operations like any other. Everyone with the
+   dips to black where pieces meet; all three are operations like any other. Splitting adds a
+   boundary between clips and the clip strip lets you drag clips into a new order; the output
+   plays pieces in that order while every edit stays anchored to its words. B-roll shows an
+   uploaded shot over a range of words (the voice continues); music plays an uploaded file
+   under a range, ducked beneath speech. Everyone with the
    project open holds
    a WebSocket (`GET /api/projects/:id/ws`); after each append the server pushes its fold to all
    of them, and presence frames carry each person's playhead, selection, caret and whether they
@@ -35,7 +39,8 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
 4. **Export.** The Rust engine turns the edit list into a timeline of output pieces, then into
    one ffmpeg `filter_complex`: `trim`/`atrim` + `setpts` per kept piece, a `select`/`tpad`
    freeze-frame over the synthesized audio per overdub, title cards as looped PNG inputs,
-   `overlay` for captions, and `fade`/`afade` for dip transitions, joined with a `concat`.
+   `overlay` for captions, and `fade`/`afade` for dip transitions, joined with a `concat`, plus
+   `overlay` per B-roll window and `amix` with a word-timed `volume` envelope for music.
    ffmpeg renders an mp4
    (or mp3/wav for audio-only sources) and the UI offers a download.
 
@@ -51,7 +56,7 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
  │  suggest.ts (fillers,      │        │  POST /api/projects/:id/{transcribe,…} │
  │    pauses, preview mirror) │        │  GET  …/export/:job/progress           │
  │  editlist.ts (preview      │ ◀───── │  GET  /data/…       (source, wav, mp4) │
- │    mirror of the engine)   │ /data  │                                        │
+ │    mirror of the engine)   │ /data  │  GET/POST/DELETE …/assets[/:aid]       │
  └────────────────────────────┘        │  engine/  Rust library                 │
                                        │  SQLite (sqlx): accounts, op log       │
                                        │  ─────────────────────────────────     │
@@ -117,6 +122,13 @@ do. Without it, the Overdub button explains what's missing and everything else k
 to PNGs in Rust and composited by ffmpeg's `overlay` — no extra ffmpeg build features
 (`drawtext`/libfreetype) are needed. The same files are served at `/fonts/` so the client's
 preview can match the exported look.
+
+**Assets.** B-roll and music files you upload land under `data/<media id>/assets/<asset
+id>.<ext>` and are served the same way as the source media. Allowed extensions are `mp3`,
+`wav`, `m4a`, `mp4`, `mov`, `aac`, `ogg` and `webm`; ffprobe reads back the actual kind
+(video or audio) rather than trusting the extension, so the wrong kind of file for the button
+you used it on still fails cleanly. Deleting an asset that a B-roll or music edit still
+references is a 409, naming how many edits use it — remove those edits first.
 
 | Variable                     | Default                                                          | Purpose                                                 |
 | ---------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------- |
