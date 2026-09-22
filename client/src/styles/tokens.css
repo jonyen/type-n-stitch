@@ -57,6 +57,13 @@
   --radius-sm: 4px;
   --radius: 6px;
   --radius-lg: 10px;
+
+  --speaker-0: #60a5fa;
+  --speaker-1: #fb923c;
+  --speaker-2: #4ade80;
+  --speaker-3: #c084fc;
+  --speaker-4: #fb7185;
+  --speaker-5: #22d3ee;
 }
 
 :root[data-theme='light'] {
@@ -89,6 +96,13 @@
   --danger: #dc2626;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px rgba(0, 0, 0, 0.06);
   --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.16);
+
+  --speaker-0: #2563eb;
+  --speaker-1: #c2410c;
+  --speaker-2: #15803d;
+  --speaker-3: #9333ea;
+  --speaker-4: #be123c;
+  --speaker-5: #0e7490;
 }
 
 @media (prefers-color-scheme: light) {
@@ -122,5 +136,12 @@
     --danger: #dc2626;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px rgba(0, 0, 0, 0.06);
     --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.16);
+
+    --speaker-0: #2563eb;
+    --speaker-1: #c2410c;
+    --speaker-2: #15803d;
+    --speaker-3: #9333ea;
+    --speaker-4: #be123c;
+    --speaker-5: #0e7490;
   }
 }

@@ -34,7 +34,7 @@ function target(
   if (titleAt !== null)
     return { selector: `[data-at="${titleAt}"]`, deleteOnly: true, side: 'top' };
   if (clipStart !== null)
-    return { selector: `.clip[data-start="${clipStart}"]`, deleteOnly: true, side: 'top' };
+    return { selector: `[data-clip-start="${clipStart}"]`, deleteOnly: true, side: 'top' };
   // Below the bar, so it does not cover the lane above it.
   if (overlay !== null)
     return {

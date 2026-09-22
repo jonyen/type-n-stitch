@@ -570,7 +570,7 @@ export function App() {
       dispatch({ type: 'clearSelection' });
       playback.seek(start);
       document
-        .querySelector<HTMLElement>(`.clip[data-start="${start}"]`)
+        .querySelector<HTMLElement>(`[data-clip-start="${start}"]`)
         ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     },
     [playback, editor.splits],
@@ -804,18 +804,23 @@ export function App() {
           </section>
           <section className={styles.script} aria-label="Transcript">
             <div className={styles.scriptHead}>
-              <span>Transcript</span>
-              <label
-                className={ui.toggle}
-                title="Off: read the transcript as the output will sound"
-              >
-                <input
-                  type="checkbox"
-                  checked={showCuts}
-                  onChange={(e) => setShowCuts(e.target.checked)}
-                />
-                Show cuts
-              </label>
+              <div className={styles.scriptHeadRow}>
+                <span>Transcript</span>
+                <label
+                  className={ui.toggle}
+                  title="Off: read the transcript as the output will sound"
+                >
+                  <input
+                    type="checkbox"
+                    checked={showCuts}
+                    onChange={(e) => setShowCuts(e.target.checked)}
+                  />
+                  Show cuts
+                </label>
+              </div>
+              <span className={styles.scriptHint}>
+                click a word to seek · shift-click to extend · space plays
+              </span>
             </div>
             <Transcript
               words={editor.words}
