@@ -10,6 +10,7 @@ import {
   pxToOutput,
   razorAt,
   rangeCuts,
+  rulerTicks,
   snappedBand,
   sourceToOutput,
   timelineLength,
@@ -261,5 +262,14 @@ describe('lane geometry', () => {
     expect(pxToOutput(150, 100, 200, 60)).toBe(15);
     expect(pxToOutput(50, 100, 200, 60)).toBe(0);
     expect(pxToOutput(500, 100, 200, 60)).toBe(60);
+  });
+});
+
+describe('rulerTicks', () => {
+  it('picks a round step that keeps the labels sparse', () => {
+    expect(rulerTicks(60)).toEqual([0, 10, 20, 30, 40, 50, 60]);
+    expect(rulerTicks(7)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(rulerTicks(125)).toEqual([0, 30, 60, 90, 120]);
+    expect(rulerTicks(0)).toEqual([0]);
   });
 });

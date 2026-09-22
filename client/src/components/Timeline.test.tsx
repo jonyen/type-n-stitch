@@ -1,0 +1,132 @@
+// @vitest-environment jsdom
+import { fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { orderedPieces } from '../editlist';
+import { timelineSegments } from '../timeline';
+import type { Asset, Edit, Word } from '../types';
+import { Timeline, type TimelineProps } from './Timeline';
+
+const words: Word[] = Array.from({ length: 10 }, (_, i) => ({
+  id: `w${i}`,
+  text: `w${i}`,
+  start: i,
+  end: i + 0.5,
+}));
+const asset = (id: string, kind: 'video' | 'audio'): Asset => ({
+  id,
+  kind,
+  name: `${id}.${kind === 'video' ? 'mp4' : 'mp3'}`,
+  ext: kind === 'video' ? 'mp4' : 'mp3',
+  duration: 30,
+  width: null,
+  height: null,
+  createdAt: 0,
+  url: `/data/m/assets/${id}`,
+  poster: null,
+});
+const edits: Edit[] = [
+  { kind: 'broll', start: 2, end: 4, media: 'a1', offset: 0 },
+  { kind: 'audio', start: 0, end: 10, media: 'a2', offset: 0, gain: 0, duck: true },
+];
+const splits = [5];
+const order = [5, 0];
+
+function setup(overrides: Partial<TimelineProps> = {}): TimelineProps {
+  const props: TimelineProps = {
+    words,
+    edits,
+    assets: [asset('a1', 'video'), asset('a2', 'audio')],
+    ordered: orderedPieces(10, edits, splits, order),
+    segments: timelineSegments(10, edits, splits, order),
+    currentTime: 0,
+    peers: [],
+    thumbs: null,
+    readOnly: false,
+    selectedClip: null,
+    selectedOverlay: null,
+    onSeek: vi.fn(),
+    onSelectClip: vi.fn(),
+    onMoveClip: vi.fn(),
+    onSelectOverlay: vi.fn(),
+    onOpenAudio: vi.fn(),
+    ...overrides,
+  };
+  render(<Timeline {...props} />);
+  return props;
+}
+
+beforeEach(() => {
+  // The lanes are 1,000 px wide over 10 s of output: 100 px per second.
+  // Clip 0 is output [0, 5), clip 1 is output [5, 10).
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const clip = this.getAttribute('data-clip');
+    if (clip !== null) return new DOMRect(Number(clip) * 500, 0, 500, 24);
+    return new DOMRect(0, 0, 1000, 100);
+  });
+});
+
+afterEach(() => vi.restoreAllMocks());
+
+describe('Timeline (Select tool)', () => {
+  it('draws one block per clip in output order, labelled with its first words', () => {
+    setup();
+    const clips = screen.getAllByRole('button', { name: /^Clip \d/ });
+    expect(clips.map((c) => c.getAttribute('aria-label'))).toEqual([
+      'Clip 1: w5 w6 w7 w8…',
+      'Clip 2: w0 w1 w2 w3…',
+    ]);
+  });
+
+  it('selects a clip on a plain click', () => {
+    const props = setup();
+    const first = screen.getByRole('button', { name: 'Clip 1: w5 w6 w7 w8…' });
+    fireEvent.pointerDown(first, { clientX: 250, button: 0 });
+    fireEvent.pointerUp(first, { clientX: 250, button: 0 });
+    expect(props.onSelectClip).toHaveBeenCalledWith(5);
+    expect(props.onMoveClip).not.toHaveBeenCalled();
+  });
+
+  it('moves a clip dragged in front of another', () => {
+    const props = setup();
+    const second = screen.getByRole('button', { name: 'Clip 2: w0 w1 w2 w3…' });
+    fireEvent.pointerDown(second, { clientX: 750, button: 0 });
+    fireEvent.pointerMove(second, { clientX: 100 });
+    fireEvent.pointerUp(second, { clientX: 100 });
+    expect(props.onMoveClip).toHaveBeenCalledWith(0, 5);
+  });
+
+  it('does not let a viewer drag clips', () => {
+    const props = setup({ readOnly: true });
+    const second = screen.getByRole('button', { name: 'Clip 2: w0 w1 w2 w3…' });
+    fireEvent.pointerDown(second, { clientX: 750, button: 0 });
+    fireEvent.pointerMove(second, { clientX: 100 });
+    fireEvent.pointerUp(second, { clientX: 100 });
+    expect(props.onMoveClip).not.toHaveBeenCalled();
+  });
+
+  it('selects a B-roll bar and opens a music bar on double-click', () => {
+    const props = setup();
+    fireEvent.click(screen.getByRole('button', { name: 'B-roll a1.mp4' }));
+    expect(props.onSelectOverlay).toHaveBeenCalledWith({ kind: 'broll', start: 2 });
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'Music a2.mp3' }));
+    expect(props.onOpenAudio).toHaveBeenCalledWith(0);
+  });
+
+  it('tags each overlay bar for the selection toolbar to anchor on', () => {
+    setup();
+    expect(screen.getByRole('button', { name: 'B-roll a1.mp4' }).getAttribute('data-overlay')).toBe(
+      'broll:2',
+    );
+    expect(screen.getByRole('button', { name: 'Music a2.mp3' }).getAttribute('data-overlay')).toBe(
+      'audio:0',
+    );
+  });
+
+  it('seeks to the source time under the pointer', () => {
+    const props = setup();
+    fireEvent.pointerDown(screen.getByTestId('timeline-lanes'), { clientX: 250, button: 0 });
+    // Output 2.5 s is inside the first clip, which starts at source 5.
+    expect(props.onSeek).toHaveBeenCalledWith(7.5);
+  });
+});

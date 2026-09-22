@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { assetTime, audiosAt, brollAt, DUCK, gainToLinear, speaking } from '../overlays';
 import type { Asset, AudioEdit, Edit, Word } from '../types';
 import type { Playback } from '../usePlayback';
+import styles from './Overlays.module.css';
 
 interface Props {
   edits: Edit[];
@@ -80,11 +81,11 @@ function BrollVideo({
     },
     [],
   );
-  if (missing) return <div className="overlay-missing">B-roll file missing</div>;
+  if (missing) return <div className={styles.missing}>B-roll file missing</div>;
   return (
     <video
       ref={ref}
-      className="broll"
+      className={styles.broll}
       src={src}
       muted
       playsInline

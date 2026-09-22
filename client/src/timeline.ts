@@ -235,3 +235,14 @@ export function pxToOutput(clientX: number, left: number, width: number, length:
   if (width <= 0) return 0;
   return Math.min(Math.max((clientX - left) / width, 0), 1) * length;
 }
+
+const STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+
+/** Round-second tick positions for the ruler, at most `maxTicks` intervals across. */
+export function rulerTicks(length: number, maxTicks = 8): number[] {
+  if (length <= 0) return [0];
+  const step = STEPS.find((s) => length / s <= maxTicks) ?? 600;
+  const ticks: number[] = [];
+  for (let t = 0; t <= length + EPS; t += step) ticks.push(t);
+  return ticks;
+}

@@ -21,13 +21,13 @@ import { AgentDialog } from './components/AgentDialog';
 import { AudioDialog } from './components/AudioDialog';
 import { BrollDialog } from './components/BrollDialog';
 import { CaptionDialog } from './components/CaptionDialog';
-import { ClipStrip } from './components/ClipStrip';
 import { Dropzone } from './components/Dropzone';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
 import { Projects } from './components/Projects';
 import { SelectionToolbar } from './components/SelectionToolbar';
+import { Timeline, type OverlayRef } from './components/Timeline';
 import { TitleDialog, type TitleFields } from './components/TitleDialog';
 import { TopBar, type ExportState } from './components/TopBar';
 import { Transcript } from './components/Transcript';
@@ -43,6 +43,7 @@ import { useSession } from './session';
 import styles from './App.module.css';
 import ui from './styles/ui.module.css';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
+import { timelineSegments } from './timeline';
 import type {
   Asset,
   AudioEdit,
@@ -87,6 +88,8 @@ export function App() {
   const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
   // A selected clip, by its piece's start. Exclusive with the word/title selection.
   const [selectedClip, setSelectedClip] = useState<number | null>(null);
+  // A selected B-roll or music bar. Exclusive with every other selection.
+  const [selectedOverlay, setSelectedOverlay] = useState<OverlayRef | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle' });
   const [twoWordFillers, setTwoWordFillers] = useState(false);
@@ -99,6 +102,11 @@ export function App() {
   // between output pieces and the transcript can draw clip boundaries.
   const ordered = useMemo(
     () => orderedPieces(editor.duration, editor.edits, editor.splits, editor.order),
+    [editor.duration, editor.edits, editor.splits, editor.order],
+  );
+  // The edit in output time: what the timeline draws and the player's clock reads.
+  const segments = useMemo(
+    () => timelineSegments(editor.duration, editor.edits, editor.splits, editor.order),
     [editor.duration, editor.edits, editor.splits, editor.order],
   );
 
@@ -324,6 +332,7 @@ export function App() {
     setExportState({ status: 'idle' });
     setSelectedTitle(null);
     setSelectedClip(null);
+    setSelectedOverlay(null);
     setTitleDialog(null);
     setCaptionRange(null);
     setBrollRange(null);
@@ -418,6 +427,7 @@ export function App() {
     (index: number, extend: boolean) => {
       setSelectedTitle(null);
       setSelectedClip(null);
+      setSelectedOverlay(null);
       dispatch({ type: 'select', index, extend });
       const word = editor.words[index];
       if (word && !extend) playback.seek(word.start);
@@ -480,6 +490,15 @@ export function App() {
     setTitleDialog({ at });
   }, [selected, editor.words, editor.duration, playback.currentTime]);
 
+  // A music bar, from the transcript tag or the timeline, opens its dialog.
+  const openAudio = useCallback(
+    (start: number) => {
+      const found = audios(editor.edits).find((a) => Math.abs(a.start - start) < EPS);
+      if (found) setAudioDialog({ edit: found });
+    },
+    [editor.edits],
+  );
+
   const onTitleOpen = useCallback(
     (at: number) => {
       const initial = titles(editor.edits).find((t) => Math.abs(t.at - at) < EPS);
@@ -502,7 +521,17 @@ export function App() {
   const onTitleClick = useCallback((at: number) => {
     setSelectedTitle(at);
     setSelectedClip(null);
+    setSelectedOverlay(null);
     dispatch({ type: 'clearSelection' });
+  }, []);
+
+  const onSelectOverlay = useCallback((ref: OverlayRef | null) => {
+    setSelectedOverlay(ref);
+    if (ref) {
+      setSelectedTitle(null);
+      setSelectedClip(null);
+      dispatch({ type: 'clearSelection' });
+    }
   }, []);
 
   // Clicking any divider jumps there; only a split's divider can be
@@ -512,6 +541,7 @@ export function App() {
     (start: number) => {
       setSelectedClip(editor.splits.some((s) => Math.abs(s - start) < EPS) ? start : null);
       setSelectedTitle(null);
+      setSelectedOverlay(null);
       dispatch({ type: 'clearSelection' });
       playback.seek(start);
       document
@@ -551,12 +581,27 @@ export function App() {
     if (!ordered.some((p) => Math.abs(p.start - selectedClip) < EPS)) setSelectedClip(null);
   }, [ordered, selectedClip]);
 
+  // A peer's edit (or an undo) can remove the B-roll or music we had selected.
+  useEffect(() => {
+    if (!selectedOverlay) return;
+    const list = selectedOverlay.kind === 'broll' ? brolls(editor.edits) : audios(editor.edits);
+    if (!list.some((e) => Math.abs(e.start - selectedOverlay.start) < EPS))
+      setSelectedOverlay(null);
+  }, [editor.edits, selectedOverlay]);
+
   const hasClipSelection =
     selectedClip !== null && editor.splits.some((s) => Math.abs(s - selectedClip) < EPS);
 
-  /** Delete whatever is selected: a title card, a split, or words. They never coexist. */
+  /** Delete whatever is selected: a B-roll or music bar, a title card, a split, or words. They never coexist. */
   const deleteSelected = useCallback(() => {
-    if (selectedTitle !== null) {
+    if (selectedOverlay) {
+      edit(
+        selectedOverlay.kind === 'broll'
+          ? { type: 'removeBroll', start: selectedOverlay.start }
+          : { type: 'removeAudio', start: selectedOverlay.start },
+      );
+      setSelectedOverlay(null);
+    } else if (selectedTitle !== null) {
       edit({ type: 'removeTitle', at: selectedTitle });
       setSelectedTitle(null);
     } else if (hasClipSelection && selectedClip !== null) {
@@ -565,7 +610,7 @@ export function App() {
     } else {
       edit({ type: 'deleteSelection' });
     }
-  }, [selectedTitle, hasClipSelection, selectedClip, edit]);
+  }, [selectedOverlay, selectedTitle, hasClipSelection, selectedClip, edit]);
 
   // Keyboard: Delete cuts, ⌘Z undoes, ⇧⌘Z redoes, Space plays, Esc clears, arrows move.
   useEffect(() => {
@@ -595,6 +640,7 @@ export function App() {
         dispatch({ type: 'clearSelection' });
         setSelectedTitle(null);
         setSelectedClip(null);
+        setSelectedOverlay(null);
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         dispatch({
@@ -717,13 +763,12 @@ export function App() {
           <section className={styles.viewer} aria-label="Viewer">
             <Player
               media={project.media}
-              thumbs={thumbs}
               mediaRef={mediaRef}
               edits={editor.edits}
               assets={assets}
               words={editor.words}
               playback={playback}
-              peers={peers}
+              segments={segments}
               transition={editor.transition}
             />
           </section>
@@ -770,16 +815,20 @@ export function App() {
               onClipClick={onClipClick}
               assets={assets}
               onBrollClick={(start) => edit({ type: 'removeBroll', start })}
-              onAudioClick={(start) => {
-                const found = audios(editor.edits).find((a) => Math.abs(a.start - start) < EPS);
-                if (found) setAudioDialog({ edit: found });
-              }}
+              onAudioClick={openAudio}
             />
             <SelectionToolbar
               anchorIndex={selected?.[0] ?? null}
               titleAt={selectedTitle}
               clipStart={hasClipSelection ? selectedClip : null}
-              open={(selected !== null || selectedTitle !== null || hasClipSelection) && canEdit}
+              overlay={selectedOverlay}
+              open={
+                (selected !== null ||
+                  selectedTitle !== null ||
+                  hasClipSelection ||
+                  selectedOverlay !== null) &&
+                canEdit
+              }
               onDelete={deleteSelected}
               onOverdub={() => setOverdubOpen(true)}
               onCaption={() => {
@@ -791,14 +840,23 @@ export function App() {
             />
           </section>
           <section className={styles.dock} aria-label="Timeline">
-            <ClipStrip
-              ordered={ordered}
+            <Timeline
               words={editor.words}
+              edits={editor.edits}
+              assets={assets}
+              ordered={ordered}
+              segments={segments}
+              currentTime={playback.currentTime}
+              peers={peers}
               thumbs={thumbs}
-              selected={selectedClip}
               readOnly={!canEdit}
-              onSelect={onClipClick}
-              onMove={(piece, before) => edit({ type: 'moveClip', piece, before })}
+              selectedClip={selectedClip}
+              selectedOverlay={selectedOverlay}
+              onSeek={playback.seek}
+              onSelectClip={onClipClick}
+              onMoveClip={(piece, before) => edit({ type: 'moveClip', piece, before })}
+              onSelectOverlay={onSelectOverlay}
+              onOpenAudio={openAudio}
             />
           </section>
         </main>

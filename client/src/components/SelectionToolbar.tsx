@@ -4,6 +4,7 @@ import { useMemo } from 'react';
 import { cx } from '../cx';
 import ui from '../styles/ui.module.css';
 import styles from './SelectionToolbar.module.css';
+import type { OverlayRef } from './Timeline';
 
 interface Props {
   /** Index of the first selected word; the toolbar floats above it, full actions. */
@@ -12,6 +13,8 @@ interface Props {
   titleAt: number | null;
   /** A selected clip divider's start; Delete-only, anchored to the clip. */
   clipStart: number | null;
+  /** A selected B-roll or music bar; Delete-only, anchored to the timeline bar. */
+  overlay: OverlayRef | null;
   open: boolean;
   onDelete: () => void;
   onOverdub: () => void;
@@ -24,16 +27,20 @@ function target(
   anchorIndex: number | null,
   titleAt: number | null,
   clipStart: number | null,
+  overlay: OverlayRef | null,
 ): { selector: string; deleteOnly: boolean } | null {
   if (anchorIndex !== null) return { selector: `[data-index="${anchorIndex}"]`, deleteOnly: false };
   if (titleAt !== null) return { selector: `[data-at="${titleAt}"]`, deleteOnly: true };
   if (clipStart !== null) return { selector: `.clip[data-start="${clipStart}"]`, deleteOnly: true };
+  if (overlay !== null)
+    return { selector: `[data-overlay="${overlay.kind}:${overlay.start}"]`, deleteOnly: true };
   return null;
 }
 
 /**
  * The actions that need a selection, floating above it: the full set over a
- * word selection, Delete-only over a selected title card or clip divider.
+ * word selection, Delete-only over a selected title card, clip divider or
+ * timeline overlay bar.
  * Anchored to the element by a stable data attribute, with a `contextElement`
  * so it follows the transcript panel's own scrolling, not just the window's.
  * It never takes focus: typing shortcuts keep working underneath.
@@ -42,13 +49,14 @@ export function SelectionToolbar({
   anchorIndex,
   titleAt,
   clipStart,
+  overlay,
   open,
   onDelete,
   onOverdub,
   onCaption,
   onBroll,
 }: Props) {
-  const t = target(anchorIndex, titleAt, clipStart);
+  const t = target(anchorIndex, titleAt, clipStart, overlay);
   const selector = t?.selector ?? null;
   const anchor = useMemo(
     () => ({
