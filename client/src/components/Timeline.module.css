@@ -47,8 +47,8 @@
   transform: none;
 }
 
-/* Keeps the last label inside the lanes when it sits at (or near) the end. */
-.tick:last-child:not(:first-child) {
+/* A label at (or near) the end ends at its tick, so it stays inside the lanes. */
+.tick.tickEnd {
   transform: translateX(-100%);
 }
 

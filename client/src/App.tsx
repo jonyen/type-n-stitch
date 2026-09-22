@@ -39,6 +39,7 @@ import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
 import { audios, brolls } from './overlays';
 import { type PresenceState } from './realtime';
+import { deleteAction } from './selection';
 import { useSession } from './session';
 import styles from './App.module.css';
 import ui from './styles/ui.module.css';
@@ -592,25 +593,30 @@ export function App() {
   const hasClipSelection =
     selectedClip !== null && editor.splits.some((s) => Math.abs(s - selectedClip) < EPS);
 
-  /** Delete whatever is selected: a B-roll or music bar, a title card, a split, or words. They never coexist. */
+  // A word selection made any other way (the arrow keys, a peer's sync) ends
+  // the title, clip and overlay selections, as clicking a word does.
+  const hasWordSelection = selected !== null;
+  useEffect(() => {
+    if (!hasWordSelection) return;
+    setSelectedTitle(null);
+    setSelectedClip(null);
+    setSelectedOverlay(null);
+  }, [hasWordSelection]);
+
+  /** Delete whatever is selected: words, a title card, a split, or a B-roll or music bar. */
   const deleteSelected = useCallback(() => {
-    if (selectedOverlay) {
-      edit(
-        selectedOverlay.kind === 'broll'
-          ? { type: 'removeBroll', start: selectedOverlay.start }
-          : { type: 'removeAudio', start: selectedOverlay.start },
-      );
-      setSelectedOverlay(null);
-    } else if (selectedTitle !== null) {
-      edit({ type: 'removeTitle', at: selectedTitle });
-      setSelectedTitle(null);
-    } else if (hasClipSelection && selectedClip !== null) {
-      edit({ type: 'unsplit', at: selectedClip });
-      setSelectedClip(null);
-    } else {
-      edit({ type: 'deleteSelection' });
-    }
-  }, [selectedOverlay, selectedTitle, hasClipSelection, selectedClip, edit]);
+    edit(
+      deleteAction({
+        hasWords: hasWordSelection,
+        title: selectedTitle,
+        clip: hasClipSelection ? selectedClip : null,
+        overlay: selectedOverlay,
+      }),
+    );
+    setSelectedTitle(null);
+    setSelectedClip(null);
+    setSelectedOverlay(null);
+  }, [hasWordSelection, selectedTitle, hasClipSelection, selectedClip, selectedOverlay, edit]);
 
   // Keyboard: Delete cuts, ⌘Z undoes, ⇧⌘Z redoes, Space plays, Esc clears, arrows move.
   useEffect(() => {

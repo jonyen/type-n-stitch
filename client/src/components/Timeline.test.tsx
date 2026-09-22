@@ -96,6 +96,19 @@ describe('Timeline (Select tool)', () => {
     expect(props.onMoveClip).toHaveBeenCalledWith(0, 5);
   });
 
+  it('selects a focused clip from the keyboard', () => {
+    const props = setup();
+    // Enter or Space on a focused button fires a click with no pointer (detail 0).
+    fireEvent.click(screen.getByRole('button', { name: 'Clip 2: w0 w1 w2 w3…' }), { detail: 0 });
+    expect(props.onSelectClip).toHaveBeenCalledWith(0);
+  });
+
+  it('ignores the click that follows a pointer press on a clip', () => {
+    const props = setup();
+    fireEvent.click(screen.getByRole('button', { name: 'Clip 2: w0 w1 w2 w3…' }), { detail: 1 });
+    expect(props.onSelectClip).not.toHaveBeenCalled();
+  });
+
   it('does not let a viewer drag clips', () => {
     const props = setup({ readOnly: true });
     const second = screen.getByRole('button', { name: 'Clip 2: w0 w1 w2 w3…' });

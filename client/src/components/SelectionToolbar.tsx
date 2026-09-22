@@ -28,12 +28,20 @@ function target(
   titleAt: number | null,
   clipStart: number | null,
   overlay: OverlayRef | null,
-): { selector: string; deleteOnly: boolean } | null {
-  if (anchorIndex !== null) return { selector: `[data-index="${anchorIndex}"]`, deleteOnly: false };
-  if (titleAt !== null) return { selector: `[data-at="${titleAt}"]`, deleteOnly: true };
-  if (clipStart !== null) return { selector: `.clip[data-start="${clipStart}"]`, deleteOnly: true };
+): { selector: string; deleteOnly: boolean; side: 'top' | 'bottom' } | null {
+  if (anchorIndex !== null)
+    return { selector: `[data-index="${anchorIndex}"]`, deleteOnly: false, side: 'top' };
+  if (titleAt !== null)
+    return { selector: `[data-at="${titleAt}"]`, deleteOnly: true, side: 'top' };
+  if (clipStart !== null)
+    return { selector: `.clip[data-start="${clipStart}"]`, deleteOnly: true, side: 'top' };
+  // Below the bar, so it does not cover the lane above it.
   if (overlay !== null)
-    return { selector: `[data-overlay="${overlay.kind}:${overlay.start}"]`, deleteOnly: true };
+    return {
+      selector: `[data-overlay="${overlay.kind}:${overlay.start}"]`,
+      deleteOnly: true,
+      side: 'bottom',
+    };
   return null;
 }
 
@@ -75,9 +83,10 @@ export function SelectionToolbar({
   );
   if (!t) return null;
   // A 0×0 rect at the viewport origin is worse than not showing the toolbar:
-  // wait for the anchored element to actually exist.
-  const anchorEl = document.querySelector(t.selector);
-  if (!anchorEl) return null;
+  // wait for the anchored element to exist and have a box (a hidden one,
+  // like an overlay lane in a narrow window, has none).
+  const box = document.querySelector(t.selector)?.getBoundingClientRect();
+  if (!box || (box.width === 0 && box.height === 0)) return null;
   const button = cx(ui.button, ui.ghost, styles.action);
   return (
     <Popover.Root open={open}>
@@ -85,7 +94,7 @@ export function SelectionToolbar({
       <Popover.Portal>
         <Popover.Content
           className={styles.bar}
-          side="top"
+          side={t.side}
           align="start"
           sideOffset={6}
           role="toolbar"

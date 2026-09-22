@@ -182,7 +182,11 @@ export function Timeline(props: TimelineProps) {
       >
         <div className={styles.ruler}>
           {rulerTicks(length).map((t) => (
-            <span key={t} className={styles.tick} style={{ left: pct(t) }}>
+            <span
+              key={t}
+              className={cx(styles.tick, t > 0 && t / length > 0.95 && styles.tickEnd)}
+              style={{ left: pct(t) }}
+            >
               {formatTime(t)}
             </span>
           ))}
@@ -211,6 +215,10 @@ export function Timeline(props: TimelineProps) {
                 onPointerMove={onClipMove}
                 onPointerUp={(e) => onClipUp(k, e)}
                 onPointerCancel={() => setDrag(null)}
+                onClick={(e) => {
+                  // Enter or Space on a focused clip; a pointer press already selected it.
+                  if (e.detail === 0) props.onSelectClip(piece.start);
+                }}
               >
                 <span>{text || '…'}</span>
               </button>
