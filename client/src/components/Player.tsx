@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from 'react';
+import { useMemo, useRef, useState, type PointerEvent, type RefObject } from 'react';
 
-import { fetchThumbnails, type Thumbnails } from '../api';
+import type { Thumbnails } from '../api';
 import {
   captionsAt,
   cutRanges,
@@ -15,14 +15,14 @@ import {
   titles,
 } from '../editlist';
 import type { Peer } from '../realtime';
-import type { Edit, Media, MediaKind, Transition } from '../types';
+import type { Edit, Media, Transition } from '../types';
 import type { Playback } from '../usePlayback';
 import { Caption, TitleCard } from './TitleCard';
 
 interface Props {
   media: Media;
-  /** Thumbnails are served per project, not per media. */
-  projectId: string;
+  /** The scrubber sprite sheet, fetched per project. */
+  thumbs: Thumbnails | null;
   mediaRef: RefObject<HTMLVideoElement | null>;
   edits: Edit[];
   playback: Playback;
@@ -31,7 +31,7 @@ interface Props {
   transition: Transition;
 }
 
-export function Player({ media, projectId, mediaRef, edits, playback, peers, transition }: Props) {
+export function Player({ media, thumbs, mediaRef, edits, playback, peers, transition }: Props) {
   const { duration } = media;
   const cutCount = cutRanges(edits).length;
   const overdubCount = overdubs(edits).length;
@@ -45,7 +45,6 @@ export function Player({ media, projectId, mediaRef, edits, playback, peers, tra
   }, [duration, edits, transition]);
   const fading = nearDipJoin(playback.currentTime, timeline.list, timeline.joinList);
 
-  const thumbs = useThumbnails(projectId, media.kind);
   const [hover, setHover] = useState<{ ratio: number; width: number } | null>(null);
   const dragging = useRef(false);
 
@@ -186,27 +185,6 @@ export function Player({ media, projectId, mediaRef, edits, playback, peers, tra
       </div>
     </div>
   );
-}
-
-/** Sprite sheet for the scrubber preview; null for audio or until it loads. */
-function useThumbnails(projectId: string, kind: MediaKind): Thumbnails | null {
-  const [thumbs, setThumbs] = useState<Thumbnails | null>(null);
-  useEffect(() => {
-    setThumbs(null);
-    if (kind !== 'video') return;
-    let cancelled = false;
-    fetchThumbnails(projectId)
-      .then((t) => {
-        if (!cancelled) setThumbs(t);
-      })
-      .catch(() => {
-        // No preview frames; the time label still shows.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, kind]);
-  return thumbs;
 }
 
 interface PreviewProps {

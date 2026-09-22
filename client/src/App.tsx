@@ -19,6 +19,7 @@ import {
 import { AgentDialog } from './components/AgentDialog';
 import { Avatar } from './components/Avatar';
 import { CaptionDialog } from './components/CaptionDialog';
+import { ClipStrip } from './components/ClipStrip';
 import { Dropzone } from './components/Dropzone';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
@@ -45,6 +46,7 @@ import type {
 } from './types';
 import { usePlayback } from './usePlayback';
 import { holdOrApply, useRealtime, type RemoteDoc } from './useRealtime';
+import { useThumbnails } from './useThumbnails';
 
 export function App() {
   const { user, setUser, signOut } = useSession();
@@ -84,6 +86,7 @@ export function App() {
     editor.duration,
     project?.media.url,
   );
+  const thumbs = useThumbnails(project?.id ?? null, project?.media.kind);
 
   // The server's last confirmed document, for rolling back a rejected op.
   const confirmed = useRef<DocState | null>(null);
@@ -464,6 +467,9 @@ export function App() {
       setSelectedTitle(null);
       dispatch({ type: 'clearSelection' });
       playback.seek(start);
+      document
+        .querySelector<HTMLElement>(`.clip[data-start="${start}"]`)
+        ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     },
     [playback, editor.splits],
   );
@@ -654,7 +660,7 @@ export function App() {
           <section className="stage">
             <Player
               media={project.media}
-              projectId={project.id}
+              thumbs={thumbs}
               mediaRef={mediaRef}
               edits={editor.edits}
               playback={playback}
@@ -708,6 +714,15 @@ export function App() {
             />
           </section>
           <section className="script">
+            <ClipStrip
+              ordered={ordered}
+              words={editor.words}
+              thumbs={thumbs}
+              selected={selectedClip}
+              readOnly={!canEdit}
+              onSelect={onClipClick}
+              onMove={(piece, before) => edit({ type: 'moveClip', piece, before })}
+            />
             <Transcript
               words={editor.words}
               edits={editor.edits}

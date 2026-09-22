@@ -1673,3 +1673,65 @@ input.speaker-tag {
 .style-chip.on {
   box-shadow: 0 0 0 2px var(--accent);
 }
+
+.clip-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 0 10px;
+  margin-bottom: 8px;
+  touch-action: none;
+}
+.clip-slot {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.clip-card {
+  display: flex;
+  flex-direction: column;
+  width: 128px;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  cursor: grab;
+  user-select: none;
+}
+.clip-card.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+.clip-card.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.clip-poster {
+  position: relative;
+  height: 72px;
+  border-radius: 8px 8px 0 0;
+  background: #111 center / cover no-repeat;
+}
+.clip-poster .length {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 3px;
+}
+.clip-words {
+  padding: 6px 8px;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drop-indicator {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
