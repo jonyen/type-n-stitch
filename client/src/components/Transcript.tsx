@@ -298,6 +298,7 @@ export function Transcript({
           <button
             type="button"
             className={odClasses.join(' ')}
+            data-index={first}
             style={odPeer ? ({ '--peer': odPeer.user.color } as CSSProperties) : undefined}
             title={`Overdub replacing “${original}”`}
             onMouseDown={(e) => press(first, e, () => onOverdubClick(overdub))}

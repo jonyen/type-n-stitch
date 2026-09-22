@@ -1,0 +1,10 @@
+.tip {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--text-strong);
+  color: var(--bg);
+  font-size: var(--text-sm);
+  line-height: 1.3;
+  box-shadow: var(--shadow);
+  z-index: 50;
+}

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { DropdownMenu } from 'radix-ui';
 
 import {
   exportMedia,
@@ -20,7 +19,6 @@ import {
 } from './api';
 import { AgentDialog } from './components/AgentDialog';
 import { AudioDialog } from './components/AudioDialog';
-import { Avatar } from './components/Avatar';
 import { BrollDialog } from './components/BrollDialog';
 import { CaptionDialog } from './components/CaptionDialog';
 import { ClipStrip } from './components/ClipStrip';
@@ -28,12 +26,12 @@ import { Dropzone } from './components/Dropzone';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
-import { Presence } from './components/Presence';
 import { Projects } from './components/Projects';
-import { ThemeToggle } from './components/ThemeToggle';
+import { SelectionToolbar } from './components/SelectionToolbar';
 import { TitleDialog, type TitleFields } from './components/TitleDialog';
-import { Toolbar, type ExportState } from './components/Toolbar';
+import { TopBar, type ExportState } from './components/TopBar';
 import { Transcript } from './components/Transcript';
+import { cx } from './cx';
 import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
 import { createOpQueue, type OpQueue } from './opQueue';
@@ -41,6 +39,8 @@ import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
 import { audios, brolls } from './overlays';
 import { type PresenceState } from './realtime';
 import { useSession } from './session';
+import styles from './App.module.css';
+import ui from './styles/ui.module.css';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
 import type {
   Asset,
@@ -553,6 +553,19 @@ export function App() {
   const hasClipSelection =
     selectedClip !== null && editor.splits.some((s) => Math.abs(s - selectedClip) < EPS);
 
+  /** Delete whatever is selected: a title card, a split, or words. They never coexist. */
+  const deleteSelected = useCallback(() => {
+    if (selectedTitle !== null) {
+      edit({ type: 'removeTitle', at: selectedTitle });
+      setSelectedTitle(null);
+    } else if (hasClipSelection && selectedClip !== null) {
+      edit({ type: 'unsplit', at: selectedClip });
+      setSelectedClip(null);
+    } else {
+      edit({ type: 'deleteSelection' });
+    }
+  }, [selectedTitle, hasClipSelection, selectedClip, edit]);
+
   // Keyboard: Delete cuts, ⌘Z undoes, ⇧⌘Z redoes, Space plays, Esc clears, arrows move.
   useEffect(() => {
     if (!projectId) return;
@@ -570,18 +583,7 @@ export function App() {
       if (target?.closest('input, textarea, select, [contenteditable]')) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        // A selected card, a selected clip and a word selection never
-        // coexist, so this is unambiguous: Delete removes whichever one is
-        // showing.
-        if (selectedTitle !== null) {
-          edit({ type: 'removeTitle', at: selectedTitle });
-          setSelectedTitle(null);
-        } else if (hasClipSelection && selectedClip !== null) {
-          edit({ type: 'unsplit', at: selectedClip });
-          setSelectedClip(null);
-        } else {
-          edit({ type: 'deleteSelection' });
-        }
+        deleteSelected();
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         undoRedo(e.shiftKey ? 'redo' : 'undo');
@@ -612,9 +614,7 @@ export function App() {
     agentDialogOpen,
     brollRange,
     audioDialog,
-    selectedTitle,
-    selectedClip,
-    hasClipSelection,
+    deleteSelected,
     playback,
     showCuts,
     edit,
@@ -634,92 +634,85 @@ export function App() {
 
   if (user === undefined)
     return (
-      <div className="app">
-        <p className="muted">Loading…</p>
+      <div className={styles.app}>
+        <p className={ui.muted}>Loading…</p>
       </div>
     );
   if (!user)
     return (
-      <div className="app">
+      <div className={styles.app}>
         <Login needsSetup={needsSetup} onSignedIn={setUser} />
       </div>
     );
 
+  const controls = project
+    ? {
+        readOnly: !canEdit,
+        canUndo: editor.undoable !== null,
+        canRedo: editor.redoable !== null,
+        onUndo: () => undoRedo('undo'),
+        onRedo: () => undoRedo('redo'),
+        fillerCount: fillers.length,
+        pauseCount: pauses.length,
+        twoWordFillers,
+        onRemoveFillers: () => edit({ type: 'applyCuts', cuts: fillers }),
+        onTightenPauses: () => edit({ type: 'applyCuts', cuts: pauses }),
+        onTwoWordFillers: setTwoWordFillers,
+        hasSelection: selected !== null,
+        onAddTitle,
+        onAddCaption: () => {
+          if (selected) setCaptionRange(selected);
+        },
+        onAddBroll: () => {
+          if (selected) setBrollRange(selected);
+        },
+        onAddMusic: () => setAudioDialog({ range: selected }),
+        onSplit,
+        transition: editor.transition,
+        onTransition: (transition: Transition) => edit({ type: 'setTransition', transition }),
+        peers,
+        status,
+        lastError,
+        exportState,
+        onExport: () => void onExport(),
+      }
+    : null;
+
   return (
-    <div className="app">
-      <header>
-        {project && (
-          <button type="button" className="ghost back" onClick={onBack} title="Back to samples">
-            <span aria-hidden>←</span> Home
-          </button>
-        )}
-        <h1>
-          {project ? (
-            <a
-              href="/"
-              className="home-link"
-              onClick={(e) => {
-                e.preventDefault();
-                onBack();
-              }}
-            >
-              <span className="logo" aria-hidden />
-              type-n-stitch
-            </a>
-          ) : (
-            <>
-              <span className="logo" aria-hidden />
-              type-n-stitch
-            </>
-          )}
-        </h1>
-        <span className="tagline muted">edit media by editing its words</span>
-        <span className="spacer" />
-        {project && <span className="header-file muted">{project.media.filename}</span>}
-        {project && <Presence peers={peers} status={status} lastError={lastError} />}
-        <Avatar user={user} withName size="sm" />
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger className="ghost" aria-label="Theme">
-            Theme
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
-              sideOffset={6}
-              style={{ background: 'var(--raised)', padding: 4, borderRadius: 6 }}
-            >
-              <ThemeToggle value={theme} onChange={setTheme} />
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
-        <button type="button" className="ghost" onClick={() => setAgentDialogOpen(true)}>
-          Connect an agent
-        </button>
-        <button type="button" className="ghost" onClick={signOut}>
-          Sign out
-        </button>
-      </header>
+    <div className={styles.app}>
+      <TopBar
+        user={user}
+        project={project}
+        editor={controls}
+        theme={theme}
+        onTheme={setTheme}
+        onHome={onBack}
+        onAgent={() => setAgentDialogOpen(true)}
+        onSignOut={signOut}
+      />
 
       {!project ? (
-        <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError}>
-          <Projects items={projects} onOpen={onOpenProject} disabled={busy !== null} />
-        </Dropzone>
+        <div className={styles.home}>
+          <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError}>
+            <Projects items={projects} onOpen={onOpenProject} disabled={busy !== null} />
+          </Dropzone>
+        </div>
       ) : (
-        <main className="editor">
+        <main className={styles.editor}>
           {loadError && (
-            <p className="error banner">
+            <p className={styles.banner} role="alert">
               {loadError}
               <button
                 type="button"
-                className="ghost"
+                className={cx(ui.iconButton, ui.ghost)}
                 onClick={() => setLoadError(null)}
                 aria-label="Dismiss"
-                title="Dismiss"
               >
                 ✕
               </button>
             </p>
           )}
-          <section className="stage">
+          <section className={styles.viewer} aria-label="Viewer">
             <Player
               media={project.media}
               thumbs={thumbs}
@@ -731,60 +724,22 @@ export function App() {
               peers={peers}
               transition={editor.transition}
             />
-            <Toolbar
-              hasSelection={selected !== null}
-              hasTitleSelection={selectedTitle !== null}
-              hasClipSelection={hasClipSelection}
-              canUndo={editor.undoable !== null}
-              canRedo={editor.redoable !== null}
-              readOnly={!canEdit}
-              fillerCount={fillers.length}
-              pauseCount={pauses.length}
-              twoWordFillers={twoWordFillers}
-              showCuts={showCuts}
-              exportState={exportState}
-              transition={editor.transition}
-              onDelete={() => {
-                if (selectedTitle !== null) {
-                  edit({ type: 'removeTitle', at: selectedTitle });
-                  setSelectedTitle(null);
-                } else if (hasClipSelection && selectedClip !== null) {
-                  edit({ type: 'unsplit', at: selectedClip });
-                  setSelectedClip(null);
-                } else {
-                  edit({ type: 'deleteSelection' });
-                }
-              }}
-              onAddTitle={onAddTitle}
-              onAddCaption={() => {
-                if (selected) setCaptionRange(selected);
-              }}
-              onSplit={onSplit}
-              onAddBroll={() => {
-                if (selected) setBrollRange(selected);
-              }}
-              onAddMusic={() => setAudioDialog({ range: selected })}
-              onTransition={(transition: Transition) => edit({ type: 'setTransition', transition })}
-              onRemoveFillers={() => edit({ type: 'applyCuts', cuts: fillers })}
-              onTightenPauses={() => edit({ type: 'applyCuts', cuts: pauses })}
-              onTwoWordFillers={setTwoWordFillers}
-              onShowCuts={setShowCuts}
-              onOverdub={() => setOverdubOpen(true)}
-              onUndo={() => undoRedo('undo')}
-              onRedo={() => undoRedo('redo')}
-              onExport={onExport}
-            />
           </section>
-          <section className="script">
-            <ClipStrip
-              ordered={ordered}
-              words={editor.words}
-              thumbs={thumbs}
-              selected={selectedClip}
-              readOnly={!canEdit}
-              onSelect={onClipClick}
-              onMove={(piece, before) => edit({ type: 'moveClip', piece, before })}
-            />
+          <section className={styles.script} aria-label="Transcript">
+            <div className={styles.scriptHead}>
+              <span>Transcript</span>
+              <label
+                className={ui.toggle}
+                title="Off: read the transcript as the output will sound"
+              >
+                <input
+                  type="checkbox"
+                  checked={showCuts}
+                  onChange={(e) => setShowCuts(e.target.checked)}
+                />
+                Show cuts
+              </label>
+            </div>
             <Transcript
               words={editor.words}
               edits={editor.edits}
@@ -817,6 +772,29 @@ export function App() {
                 const found = audios(editor.edits).find((a) => Math.abs(a.start - start) < EPS);
                 if (found) setAudioDialog({ edit: found });
               }}
+            />
+            <SelectionToolbar
+              anchorIndex={selected?.[0] ?? null}
+              open={selected !== null && canEdit}
+              onDelete={deleteSelected}
+              onOverdub={() => setOverdubOpen(true)}
+              onCaption={() => {
+                if (selected) setCaptionRange(selected);
+              }}
+              onBroll={() => {
+                if (selected) setBrollRange(selected);
+              }}
+            />
+          </section>
+          <section className={styles.dock} aria-label="Timeline">
+            <ClipStrip
+              ordered={ordered}
+              words={editor.words}
+              thumbs={thumbs}
+              selected={selectedClip}
+              readOnly={!canEdit}
+              onSelect={onClipClick}
+              onMove={(piece, before) => edit({ type: 'moveClip', piece, before })}
             />
           </section>
         </main>
