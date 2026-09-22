@@ -5,10 +5,12 @@ import {
   cutTransitionAt,
   formatTime,
   joins,
+  jumpTarget,
   keptSegments,
   nearDipJoin,
   nextCutTransition,
   normalizeCuts,
+  orderedPieces,
   outputDuration,
   overdubAt,
   pieces,
@@ -218,5 +220,41 @@ describe('pieceStarts', () => {
     expect(pieceStarts([cut(2, 3)], [])).toEqual([0, 3]);
     expect(pieceStarts([cut(2, 3)], [2.5, 5, 3, 0])).toEqual([0, 3, 5]);
     expect(pieceStarts([cut(0, 1)], [])).toEqual([1]);
+  });
+});
+
+describe('orderedPieces and jumps', () => {
+  it('orders live entries first, then the rest in source order', () => {
+    expect(orderedPieces(10, [cut(4, 5)], [2], [5, 4, 0])).toEqual([
+      { start: 5, end: 10 },
+      { start: 0, end: 2 },
+      { start: 2, end: 4 },
+    ]);
+  });
+  it('pieces lays out sub-pieces per ordered piece', () => {
+    const list = pieces(10, [overdub(6, 7, 2)], [5], [5, 0]);
+    expect(list.map((p) => [p.kind, p.source.start])).toEqual([
+      ['source', 5],
+      ['overdub', 6],
+      ['source', 7],
+      ['source', 0],
+    ]);
+    expect(pieces(10, [cut(2, 4)])).toEqual(pieces(10, [cut(2, 4)], [], []));
+  });
+  it('jumpTarget follows output order and matches skipTarget for plain cuts', () => {
+    const ordered = orderedPieces(10, [cut(2, 3)], [], []);
+    expect(jumpTarget(1, ordered)).toBeNull();
+    expect(jumpTarget(2.5, ordered)).toBe(3);
+    const swapped = orderedPieces(10, [], [5], [5, 0]);
+    expect(jumpTarget(10, swapped)).toBe(0);
+    expect(jumpTarget(5, swapped)).toBeNull();
+    expect(jumpTarget(5, orderedPieces(10, [], [5], [0, 5]))).toBeNull();
+    expect(jumpTarget(10, orderedPieces(10, [], [5], [0, 5]))).toBe(Infinity);
+    // Before the first piece (cut from zero): the first output piece.
+    expect(jumpTarget(0.5, orderedPieces(10, [cut(0, 1)], [], []))).toBe(1);
+  });
+  it('a reorder join takes the project transition', () => {
+    const list = pieces(10, [], [5], [5, 0]);
+    expect(joins(list, [], 'dip')).toEqual([{ after: 0, transition: 'dip' }]);
   });
 });

@@ -121,52 +121,139 @@ function complement(from: number, to: number, holes: Range[]): Range[] {
 const RANK: Record<Piece['kind'], number> = { title: 0, overdub: 1, source: 2 };
 
 /**
+ * The kept source split at every reorder split point, then laid out in
+ * output order: entries named in `order` first (in that order, deduped),
+ * then any remaining pieces in source order. Mirrors the engine's
+ * `ordered_pieces`.
+ */
+export function orderedPieces(
+  duration: number,
+  edits: Edit[],
+  splits: number[],
+  order: number[],
+): Range[] {
+  const points = [...splits].sort((a, b) => a - b);
+  const source: Range[] = [];
+  for (const kept of keptSegments(duration, edits)) {
+    let cursor = kept.start;
+    for (const p of points) {
+      if (p > cursor + EPS && p < kept.end - EPS) {
+        source.push({ start: cursor, end: p });
+        cursor = p;
+      }
+    }
+    source.push({ start: cursor, end: kept.end });
+  }
+  const same = (a: number, b: number) => Math.abs(a - b) < EPS;
+  const out: Range[] = [];
+  for (const s of order) {
+    const r = source.find((x) => same(x.start, s));
+    if (r && !out.some((o) => same(o.start, s))) out.push(r);
+  }
+  for (const r of source) if (!out.some((o) => same(o.start, r.start))) out.push(r);
+  return out;
+}
+
+/** Index of the ordered piece that owns source time `t`: containing it, or the next one after it. */
+function owner(list: Range[], t: number): number {
+  const inside = list.findIndex((p) => (t >= p.start && t < p.end) || Math.abs(t - p.start) < EPS);
+  if (inside !== -1) return inside;
+  let best = -1;
+  list.forEach((p, i) => {
+    if (p.start >= t && (best === -1 || p.start < (list[best] as Range).start)) best = i;
+  });
+  return best === -1 ? list.length : best;
+}
+
+/**
  * The rendered output, piece by piece: kept source ranges split around
  * overdubs and at every title instant, plus one piece per overdub and per
- * title. A port of the engine's `timeline` without the output ranges.
+ * title. With `splits`/`order`, the pieces are laid out per ordered piece
+ * (reorder-aware); with neither, this is exactly the source-order layout. A
+ * port of the engine's `timeline_with`.
  */
-export function pieces(duration: number, edits: Edit[]): Piece[] {
+export function pieces(
+  duration: number,
+  edits: Edit[],
+  splits: number[] = [],
+  order: number[] = [],
+): Piece[] {
+  const ordered = orderedPieces(duration, edits, splits, order);
   const dubs = edits
     .map((e, index) => ({ e, index }))
     .filter((x): x is { e: OverdubEdit; index: number } => x.e.kind === 'overdub')
     .filter(({ e }) => e.end > e.start);
   const holes = normalizeCuts(dubs.map(({ e }) => e));
-  const instants = titles(edits)
-    .map((t) => t.at)
-    .sort((a, b) => a - b);
+  const cards = edits
+    .map((e, index) => ({ e, index }))
+    .filter((x): x is { e: TitleEdit; index: number } => x.e.kind === 'title');
+
+  const owned: Piece[][] = Array.from({ length: ordered.length + 1 }, () => []);
+  for (const { e, index } of dubs) {
+    owned[owner(ordered, e.start)]?.push({
+      source: { start: e.start, end: e.end },
+      kind: 'overdub',
+      index,
+    });
+  }
+  for (const { e, index } of cards) {
+    owned[owner(ordered, e.at)]?.push({ source: { start: e.at, end: e.at }, kind: 'title', index });
+  }
+
+  const byStart = (a: { piece: Piece; i: number }, b: { piece: Piece; i: number }) =>
+    a.piece.source.start - b.piece.source.start ||
+    RANK[a.piece.kind] - RANK[b.piece.kind] ||
+    a.i - b.i;
 
   const out: Piece[] = [];
-  for (const kept of keptSegments(duration, edits)) {
-    for (const run of complement(kept.start, kept.end, holes)) {
-      // Split the run at every title instant strictly inside it.
+  ordered.forEach((piece, k) => {
+    const instants = cards
+      .map((c) => c.e.at)
+      .filter((at) => at > piece.start + EPS && at < piece.end - EPS)
+      .sort((a, b) => a - b);
+    const bucket: Piece[] = [];
+    for (const run of complement(piece.start, piece.end, holes)) {
       let cursor = run.start;
       for (const at of instants) {
         if (at > cursor + EPS && at < run.end - EPS) {
-          out.push({ source: { start: cursor, end: at }, kind: 'source' });
+          bucket.push({ source: { start: cursor, end: at }, kind: 'source' });
           cursor = at;
         }
       }
-      out.push({ source: { start: cursor, end: run.end }, kind: 'source' });
+      bucket.push({ source: { start: cursor, end: run.end }, kind: 'source' });
     }
-  }
-  for (const { e, index } of dubs) {
-    out.push({ source: { start: e.start, end: e.end }, kind: 'overdub', index });
-  }
-  edits.forEach((e, index) => {
-    if (e.kind === 'title') out.push({ source: { start: e.at, end: e.at }, kind: 'title', index });
+    bucket.push(...(owned[k] ?? []));
+    out.push(
+      ...bucket
+        .map((p, i) => ({ piece: p, i }))
+        .sort(byStart)
+        .map(({ piece: p }) => p),
+    );
   });
+  const tail = owned[ordered.length] ?? [];
+  out.push(
+    ...tail
+      .map((p, i) => ({ piece: p, i }))
+      .sort(byStart)
+      .map(({ piece: p }) => p),
+  );
+  return out;
+}
 
-  // Stable sort by start, then title before overdub before source, so a title
-  // card plays ahead of anything else beginning at the same instant.
-  return out
-    .map((piece, i) => ({ piece, i }))
-    .sort(
-      (a, b) =>
-        a.piece.source.start - b.piece.source.start ||
-        RANK[a.piece.kind] - RANK[b.piece.kind] ||
-        a.i - b.i,
-    )
-    .map(({ piece }) => piece);
+/**
+ * Where playback goes when source time `t` is not inside a piece: the next
+ * piece's start in output order, `Infinity` past the last, or `null` while
+ * inside a piece.
+ */
+export function jumpTarget(t: number, ordered: Range[]): number | null {
+  if (ordered.some((p) => t >= p.start && t < p.end)) return null;
+  let prev = -1;
+  ordered.forEach((p, i) => {
+    if (p.end <= t + EPS && (prev === -1 || p.end > (ordered[prev] as Range).end)) prev = i;
+  });
+  if (prev === -1) return ordered[0]?.start ?? Infinity;
+  const next = ordered[prev + 1];
+  return next ? next.start : Infinity;
 }
 
 /**
@@ -184,7 +271,7 @@ export function joins(list: Piece[], edits: Edit[], project: Transition): Join[]
     let transition: Transition = 'none';
     if (prev.kind === 'title' || next.kind === 'title') {
       transition = 'dip';
-    } else if (next.source.start > prev.source.end + EPS) {
+    } else if (Math.abs(next.source.start - prev.source.end) > EPS) {
       // A cut boundary: the gap was removed. Only a cut that *starts* at the
       // boundary can override it, so where several cuts merged into one gap
       // the later ones' overrides do not apply.
