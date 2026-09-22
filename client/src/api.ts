@@ -1,7 +1,7 @@
 // Thin fetch wrappers over the Rust server. Errors carry the server's message.
 
 import type { ClientOp, DocState } from './ops';
-import type { CutEdit, LibraryItem, ProjectSummary, TokenInfo, User, Word } from './types';
+import type { Asset, CutEdit, LibraryItem, ProjectSummary, TokenInfo, User, Word } from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -182,4 +182,18 @@ export function createToken(label: string): Promise<NewToken> {
 
 export function revokeToken(id: string): Promise<{ ok: true }> {
   return request(`/api/tokens/${id}`, { method: 'DELETE' });
+}
+
+export function listAssets(id: string): Promise<Asset[]> {
+  return request<Asset[]>(`/api/projects/${id}/assets`);
+}
+
+export function uploadAsset(id: string, file: File): Promise<Asset> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  return request<Asset>(`/api/projects/${id}/assets`, { method: 'POST', body: form });
+}
+
+export function deleteAsset(id: string, assetId: string): Promise<{ ok: true }> {
+  return request(`/api/projects/${id}/assets/${assetId}`, { method: 'DELETE' });
 }

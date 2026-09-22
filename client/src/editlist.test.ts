@@ -12,6 +12,7 @@ import {
   outputDuration,
   overdubAt,
   pieces,
+  pieceStarts,
   rangeForWords,
   skipTarget,
   wordIndexAt,
@@ -208,5 +209,14 @@ describe('cut transition overrides', () => {
     expect(cutTransitionAt(1, edits)).toBe('dip');
     expect(cutTransitionAt(3, edits)).toBe(null);
     expect(cutTransitionAt(9, edits)).toBe(null);
+  });
+});
+
+describe('pieceStarts', () => {
+  it('mirrors the engine: cut ends and splits outside cuts', () => {
+    expect(pieceStarts([], [])).toEqual([0]);
+    expect(pieceStarts([cut(2, 3)], [])).toEqual([0, 3]);
+    expect(pieceStarts([cut(2, 3)], [2.5, 5, 3, 0])).toEqual([0, 3, 5]);
+    expect(pieceStarts([cut(0, 1)], [])).toEqual([1]);
   });
 });

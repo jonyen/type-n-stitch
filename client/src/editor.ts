@@ -1,9 +1,11 @@
 // The editor's state machine: words, the edit list, server-fold metadata and
 // the current word selection. Pure, so it is easy to test.
 
-import { EPS, rangeForWords, wordStatus } from './editlist';
+import { EPS, pieceStarts, rangeForWords, wordStatus } from './editlist';
 import type { DocState } from './ops';
 import type {
+  AudioEdit,
+  BrollEdit,
   CaptionEdit,
   CaptionPos,
   CutEdit,
@@ -36,6 +38,10 @@ export interface EditorState {
   undoable: number | null;
   redoable: number | null;
   selection: Selection | null;
+  /** Extra piece boundaries outside any cut, sorted ascending. */
+  splits: number[];
+  /** Explicit output order of piece starts; empty means source order. */
+  order: number[];
 }
 
 export type EditorAction =
@@ -74,6 +80,21 @@ export type EditorAction =
   | { type: 'removeCaption'; start: number }
   | { type: 'setTransition'; transition: Transition }
   | { type: 'setCutTransition'; start: number; transition: Transition | null }
+  | { type: 'split'; at: number }
+  | { type: 'unsplit'; at: number }
+  | { type: 'moveClip'; piece: number; before: number | null }
+  /** `range` `null` means the whole edit; `undefined` means the current selection. */
+  | { type: 'addBroll'; media: string; offset: number; range?: [number, number] }
+  | { type: 'removeBroll'; start: number }
+  | {
+      type: 'addAudio';
+      media: string;
+      gain: number;
+      duck: boolean;
+      range?: [number, number] | null;
+    }
+  | { type: 'editAudio'; start: number; gain: number; duck: boolean }
+  | { type: 'removeAudio'; start: number }
   /** Another collaborator's append, as the server's fold. Per-user fields stay. */
   | {
       type: 'remote';
@@ -81,6 +102,8 @@ export type EditorAction =
       edits: Edit[];
       speakerNames: string[];
       transition?: Transition;
+      splits?: number[];
+      order?: number[];
     };
 
 export const initialEditor: EditorState = {
@@ -93,6 +116,8 @@ export const initialEditor: EditorState = {
   undoable: null,
   redoable: null,
   selection: null,
+  splits: [],
+  order: [],
 };
 
 /** The selection as an inclusive, ascending index pair. */
@@ -111,6 +136,11 @@ function inside(inner: OverdubEdit, outer: { start: number; end: number }): bool
 
 function sameInstant(a: number, b: number): boolean {
   return Math.abs(a - b) < EPS;
+}
+
+/** The whole edit as a word range, or null when there are no words yet. */
+export function wholeRange(state: EditorState): [number, number] | null {
+  return state.words.length ? [0, state.words.length - 1] : null;
 }
 
 export function editorReducer(state: EditorState, action: EditorAction): EditorState {
@@ -205,6 +235,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         undoable: action.doc.undoable,
         redoable: action.doc.redoable,
         selection: stale ? state.selection : null,
+        splits: stale ? state.splits : (action.doc.splits ?? []),
+        order: stale ? state.order : (action.doc.order ?? []),
       };
     }
 
@@ -218,6 +250,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         speakerNames: action.speakerNames,
         transition: action.transition ?? 'none',
         headSeq: action.headSeq,
+        splits: action.splits ?? [],
+        order: action.order ?? [],
       };
 
     case 'renameSpeaker': {
@@ -298,5 +332,89 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       });
       return { ...state, edits };
     }
+
+    case 'split': {
+      if (state.splits.some((s) => sameInstant(s, action.at))) return state;
+      return { ...state, splits: [...state.splits, action.at].sort((a, b) => a - b) };
+    }
+
+    case 'unsplit':
+      return { ...state, splits: state.splits.filter((s) => !sameInstant(s, action.at)) };
+
+    case 'moveClip': {
+      const current = pieceStarts(state.edits, state.splits);
+      const has = (list: number[], x: number) => list.some((s) => sameInstant(s, x));
+      if (!has(current, action.piece)) return state;
+      const effective: number[] = [];
+      for (const s of [...state.order, ...current])
+        if (has(current, s) && !has(effective, s)) effective.push(s);
+      const rest = effective.filter((s) => !sameInstant(s, action.piece));
+      const at =
+        action.before === null
+          ? -1
+          : rest.findIndex((s) => sameInstant(s, action.before as number));
+      rest.splice(at === -1 ? rest.length : at, 0, action.piece);
+      return { ...state, order: rest };
+    }
+
+    case 'addBroll': {
+      const range = action.range ?? selectedRange(state.selection);
+      if (!range) return state;
+      const span = rangeForWords(state.words, range[0], range[1], state.duration);
+      const kept = state.edits.filter(
+        (e) => !(e.kind === 'broll' && e.start < span.end && e.end > span.start),
+      );
+      const broll: BrollEdit = {
+        kind: 'broll',
+        ...span,
+        media: action.media,
+        offset: action.offset,
+      };
+      return withEdits(state, [...kept, broll]);
+    }
+
+    case 'removeBroll':
+      return {
+        ...state,
+        edits: state.edits.filter(
+          (e) => !(e.kind === 'broll' && sameInstant(e.start, action.start)),
+        ),
+      };
+
+    case 'addAudio': {
+      const range =
+        action.range === null
+          ? wholeRange(state)
+          : (action.range ?? selectedRange(state.selection));
+      if (!range) return state;
+      const span = rangeForWords(state.words, range[0], range[1], state.duration);
+      const audio: AudioEdit = {
+        kind: 'audio',
+        ...span,
+        media: action.media,
+        offset: 0,
+        gain: action.gain,
+        duck: action.duck,
+      };
+      return withEdits(state, [...state.edits, audio]);
+    }
+
+    case 'editAudio':
+      return {
+        ...state,
+        edits: state.edits.map((e) =>
+          e.kind === 'audio' && sameInstant(e.start, action.start)
+            ? { ...e, gain: action.gain, duck: action.duck }
+            : e,
+        ),
+      };
+
+    case 'removeAudio':
+      return {
+        ...state,
+        edits: state.edits.filter(
+          (e) => !(e.kind === 'audio' && sameInstant(e.start, action.start)),
+        ),
+      };
   }
 }

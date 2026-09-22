@@ -19,6 +19,10 @@ export interface RemoteDoc {
   speakerNames: string[];
   /** Absent on folds from a server that does not know transitions yet. */
   transition?: Transition;
+  /** Absent on folds from a server that does not know splits yet. */
+  splits?: number[];
+  /** Absent on folds from a server that does not know order yet. */
+  order?: number[];
 }
 
 /**

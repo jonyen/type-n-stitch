@@ -25,7 +25,16 @@ export interface Peer {
 }
 
 export type ServerMsg =
-  | { t: 'hello'; headSeq: number; edits: Edit[]; speakerNames: string[]; peers: Peer[]; you: Peer }
+  | {
+      t: 'hello';
+      headSeq: number;
+      edits: Edit[];
+      speakerNames: string[];
+      splits?: number[];
+      order?: number[];
+      peers: Peer[];
+      you: Peer;
+    }
   | {
       t: 'doc';
       seq: number;
@@ -33,10 +42,19 @@ export type ServerMsg =
       headSeq: number;
       edits: Edit[];
       speakerNames: string[];
+      splits?: number[];
+      order?: number[];
     }
   | { t: 'presence'; connId: string; user: PeerInfo; state: PresenceState }
   | { t: 'left'; connId: string }
-  | { t: 'resync'; headSeq: number; edits: Edit[]; speakerNames: string[] }
+  | {
+      t: 'resync';
+      headSeq: number;
+      edits: Edit[];
+      speakerNames: string[];
+      splits?: number[];
+      order?: number[];
+    }
   | { t: 'pong' }
   | { t: 'error'; code: string; detail: string };
 

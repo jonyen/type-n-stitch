@@ -50,7 +50,21 @@ export interface CaptionEdit extends Range {
   position: CaptionPos;
 }
 
-export type Edit = CutEdit | OverdubEdit | TitleEdit | CaptionEdit;
+export interface BrollEdit extends Range {
+  kind: 'broll';
+  media: string;
+  offset: number;
+}
+
+export interface AudioEdit extends Range {
+  kind: 'audio';
+  media: string;
+  offset: number;
+  gain: number;
+  duck: boolean;
+}
+
+export type Edit = CutEdit | OverdubEdit | TitleEdit | CaptionEdit | BrollEdit | AudioEdit;
 
 export type MediaKind = 'audio' | 'video';
 
@@ -101,4 +115,18 @@ export interface ProjectSummary {
   role: Role;
   media: Media;
   createdAt: number;
+}
+
+/** A project's uploaded B-roll/music file (GET/POST/DELETE /api/projects/:id/assets). */
+export interface Asset {
+  id: string;
+  kind: MediaKind;
+  name: string;
+  ext: string;
+  duration: number;
+  width: number | null;
+  height: number | null;
+  createdAt: number;
+  url: string;
+  poster: string | null;
 }

@@ -297,3 +297,59 @@ describe('titles, captions and transitions', () => {
     expect(s.transition).toBe('none');
   });
 });
+
+describe('clips', () => {
+  it('split keeps splits sorted and unique; unsplit removes', () => {
+    let s = editorReducer(loaded, { type: 'split', at: 5 });
+    s = editorReducer(s, { type: 'split', at: 2 });
+    s = editorReducer(s, { type: 'split', at: 5 });
+    expect(s.splits).toEqual([2, 5]);
+    expect(editorReducer(s, { type: 'unsplit', at: 5 }).splits).toEqual([2]);
+  });
+
+  it('moveClip materialises the order like the engine', () => {
+    let s = editorReducer(loaded, { type: 'split', at: 2 });
+    s = editorReducer(s, { type: 'split', at: 5 });
+    expect(editorReducer(s, { type: 'moveClip', piece: 5, before: 0 }).order).toEqual([5, 0, 2]);
+    expect(editorReducer(s, { type: 'moveClip', piece: 0, before: null }).order).toEqual([2, 5, 0]);
+    expect(editorReducer(s, { type: 'moveClip', piece: 9, before: null }).order).toEqual([]);
+  });
+
+  it('sync and remote carry splits and order, defaulting to empty', () => {
+    const doc = {
+      headSeq: 3,
+      edits: [],
+      speakerNames: [],
+      undoable: null,
+      redoable: null,
+      splits: [2],
+      order: [2, 0],
+    };
+    const s = editorReducer(loaded, { type: 'sync', doc });
+    expect(s.splits).toEqual([2]);
+    expect(s.order).toEqual([2, 0]);
+    const r = editorReducer(s, { type: 'remote', headSeq: 4, edits: [], speakerNames: [] });
+    expect(r.splits).toEqual([]);
+  });
+
+  it('addBroll replaces overlaps; audio edits by start; whole-edit range covers every word', () => {
+    let s = editorReducer(select(loaded, 0, 1), { type: 'addBroll', media: 'b', offset: 1 });
+    s = editorReducer(select(s, 1, 2), { type: 'addBroll', media: 'b', offset: 0 });
+    expect(s.edits).toEqual([{ kind: 'broll', start: 0.91, end: 2, media: 'b', offset: 0 }]);
+    s = editorReducer(s, { type: 'addAudio', media: 'm', gain: -6, duck: true, range: null });
+    expect(s.edits[1]).toEqual({
+      kind: 'audio',
+      start: 0,
+      end: 20,
+      media: 'm',
+      offset: 0,
+      gain: -6,
+      duck: true,
+    });
+    s = editorReducer(s, { type: 'editAudio', start: 0, gain: 3, duck: false });
+    expect(s.edits[1]).toMatchObject({ gain: 3, duck: false });
+    s = editorReducer(s, { type: 'removeAudio', start: 0 });
+    s = editorReducer(s, { type: 'removeBroll', start: 0.91 });
+    expect(s.edits).toEqual([]);
+  });
+});

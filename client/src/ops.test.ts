@@ -133,3 +133,33 @@ describe('titles, captions and transitions', () => {
     });
   });
 });
+
+describe('clip and overlay operations', () => {
+  const state = loaded;
+  const selected01 = select(loaded, 0, 1);
+
+  it('maps clip and overlay actions to operations', () => {
+    expect(opForAction(state, { type: 'split', at: 2 })).toEqual({ kind: 'split', at: 2 });
+    expect(opForAction(state, { type: 'moveClip', piece: 2, before: null })).toEqual({
+      kind: 'move',
+      piece: 2,
+      before: null,
+    });
+    expect(opForAction(selected01, { type: 'addBroll', media: 'b', offset: 1 })).toEqual({
+      kind: 'addbroll',
+      start: 0,
+      end: 1.25,
+      media: 'b',
+      offset: 1,
+    });
+    expect(
+      opForAction(state, { type: 'addAudio', media: 'm', gain: 0, duck: true, range: null }),
+    ).toEqual({ kind: 'addaudio', start: 0, end: 20, media: 'm', offset: 0, gain: 0, duck: true });
+    expect(opForAction(state, { type: 'editAudio', start: 0, gain: 1, duck: false })).toEqual({
+      kind: 'editaudio',
+      start: 0,
+      gain: 1,
+      duck: false,
+    });
+  });
+});

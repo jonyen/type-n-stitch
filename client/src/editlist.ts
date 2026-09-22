@@ -290,3 +290,20 @@ export function cutTransitionAt(start: number, edits: Edit[]): Transition | null
   const cut = edits.find((e): e is CutEdit => e.kind === 'cut' && Math.abs(e.start - start) < EPS);
   return cut?.transition ?? null;
 }
+
+/** Source starts of every piece, ascending; mirrors the engine's `piece_starts`. */
+export function pieceStarts(edits: Edit[], splits: number[]): number[] {
+  const cuts = cutRanges(edits);
+  const starts: number[] = [];
+  let cursor = 0;
+  for (const cut of cuts) {
+    if (cut.start > cursor + EPS) starts.push(cursor);
+    cursor = Math.max(cursor, cut.end);
+  }
+  starts.push(cursor);
+  for (const s of splits) {
+    const inCut = cuts.some((c) => s > c.start - EPS && s < c.end + EPS);
+    if (!inCut && !starts.some((x) => Math.abs(x - s) < EPS)) starts.push(s);
+  }
+  return starts.sort((a, b) => a - b);
+}

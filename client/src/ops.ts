@@ -4,7 +4,7 @@
 
 import { rangeForWords } from './editlist';
 import type { EditorAction, EditorState } from './editor';
-import { selectedRange } from './editor';
+import { selectedRange, wholeRange } from './editor';
 import type { CaptionPos, Edit, Range, TitleStyle, Transition } from './types';
 
 export type Op =
@@ -41,7 +41,23 @@ export type Op =
   | { kind: 'addcaption'; start: number; end: number; text: string; position: CaptionPos }
   | { kind: 'removecaption'; start: number }
   | { kind: 'settransition'; transition: Transition }
-  | { kind: 'setcuttransition'; start: number; transition: Transition | null };
+  | { kind: 'setcuttransition'; start: number; transition: Transition | null }
+  | { kind: 'split'; at: number }
+  | { kind: 'unsplit'; at: number }
+  | { kind: 'move'; piece: number; before: number | null }
+  | { kind: 'addbroll'; start: number; end: number; media: string; offset: number }
+  | { kind: 'removebroll'; start: number }
+  | {
+      kind: 'addaudio';
+      start: number;
+      end: number;
+      media: string;
+      offset: number;
+      gain: number;
+      duck: boolean;
+    }
+  | { kind: 'editaudio'; start: number; gain: number; duck: boolean }
+  | { kind: 'removeaudio'; start: number };
 
 export type ClientOp = Op & { opId: string };
 
@@ -53,6 +69,10 @@ export interface DocState {
   redoable: number | null;
   /** The project-wide transition. Absent on folds from an older server. */
   transition?: Transition;
+  /** Extra piece boundaries outside any cut. Absent on folds from an older server. */
+  splits?: number[];
+  /** Explicit output order of piece starts. Absent on folds from an older server. */
+  order?: number[];
 }
 
 /**
@@ -125,6 +145,43 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
       return { kind: 'settransition', transition: action.transition };
     case 'setCutTransition':
       return { kind: 'setcuttransition', start: action.start, transition: action.transition };
+    case 'split':
+      return { kind: 'split', at: action.at };
+    case 'unsplit':
+      return { kind: 'unsplit', at: action.at };
+    case 'moveClip':
+      return { kind: 'move', piece: action.piece, before: action.before };
+    case 'addBroll': {
+      const range = action.range ?? selectedRange(state.selection);
+      if (!range) return null;
+      return {
+        kind: 'addbroll',
+        ...rangeForWords(state.words, range[0], range[1], state.duration),
+        media: action.media,
+        offset: action.offset,
+      };
+    }
+    case 'removeBroll':
+      return { kind: 'removebroll', start: action.start };
+    case 'addAudio': {
+      const range =
+        action.range === null
+          ? wholeRange(state)
+          : (action.range ?? selectedRange(state.selection));
+      if (!range) return null;
+      return {
+        kind: 'addaudio',
+        ...rangeForWords(state.words, range[0], range[1], state.duration),
+        media: action.media,
+        offset: 0,
+        gain: action.gain,
+        duck: action.duck,
+      };
+    }
+    case 'editAudio':
+      return { kind: 'editaudio', start: action.start, gain: action.gain, duck: action.duck };
+    case 'removeAudio':
+      return { kind: 'removeaudio', start: action.start };
     default:
       return null;
   }
