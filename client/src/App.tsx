@@ -36,6 +36,7 @@ import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
+import { audios } from './overlays';
 import { type PresenceState } from './realtime';
 import { useSession } from './session';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
@@ -778,9 +779,7 @@ export function App() {
               assets={assets}
               onBrollClick={(start) => edit({ type: 'removeBroll', start })}
               onAudioClick={(start) => {
-                const found = editor.edits.find(
-                  (e): e is AudioEdit => e.kind === 'audio' && Math.abs(e.start - start) < EPS,
-                );
+                const found = audios(editor.edits).find((a) => Math.abs(a.start - start) < EPS);
                 if (found) setAudioDialog({ edit: found });
               }}
             />

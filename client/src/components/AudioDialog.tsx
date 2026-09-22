@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { Asset, AudioEdit } from '../types';
 import { AssetPicker } from './AssetPicker';
 
@@ -26,6 +26,11 @@ export function AudioDialog({
   );
   const [gain, setGain] = useState(String(initial?.gain ?? 0));
   const [duck, setDuck] = useState(initial?.duck ?? true);
+  const gainInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    gainInput.current?.focus();
+    gainInput.current?.select();
+  }, []);
   const db = Number(gain);
   const validGain = Number.isFinite(db) && db >= -30 && db <= 12;
   const ready = validGain && (initial !== undefined || asset !== null);
@@ -66,6 +71,7 @@ export function AudioDialog({
         <label className="field">
           Level (dB, −30 to 12)
           <input
+            ref={gainInput}
             type="number"
             min={-30}
             max={12}

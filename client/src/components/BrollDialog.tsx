@@ -59,6 +59,7 @@ export function BrollDialog({
           value={asset}
           onChange={setAsset}
           onUpload={onUpload}
+          autoFocus
         />
         {asset && (
           <>

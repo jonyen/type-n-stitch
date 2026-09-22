@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { formatTime } from '../editlist';
 import type { Asset, MediaKind } from '../types';
 
@@ -8,13 +8,19 @@ interface Props {
   value: Asset | null;
   onChange: (a: Asset) => void;
   onUpload: (f: File) => Promise<Asset>;
+  /** Focus the first interactive control (a card, or the upload button) on mount. */
+  autoFocus?: boolean;
 }
 
-export function AssetPicker({ assets, kind, value, onChange, onUpload }: Props) {
+export function AssetPicker({ assets, kind, value, onChange, onUpload, autoFocus }: Props) {
   const input = useRef<HTMLInputElement>(null);
+  const first = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const list = assets.filter((a) => a.kind === kind);
+  useEffect(() => {
+    if (autoFocus) first.current?.focus();
+  }, [autoFocus]);
   const upload = async (file: File) => {
     setBusy(true);
     setError(null);
@@ -29,13 +35,15 @@ export function AssetPicker({ assets, kind, value, onChange, onUpload }: Props) 
   return (
     <div className="asset-picker">
       <div className="asset-grid" role="radiogroup">
-        {list.map((a) => (
+        {list.map((a, i) => (
           <button
             key={a.id}
+            ref={i === 0 ? first : undefined}
             type="button"
             role="radio"
             aria-checked={value?.id === a.id}
             className={`asset-card${value?.id === a.id ? ' selected' : ''}`}
+            disabled={busy}
             onClick={() => onChange(a)}
           >
             <span
@@ -53,6 +61,7 @@ export function AssetPicker({ assets, kind, value, onChange, onUpload }: Props) 
           </button>
         ))}
         <button
+          ref={list.length === 0 ? first : undefined}
           type="button"
           className="asset-card add"
           disabled={busy}
