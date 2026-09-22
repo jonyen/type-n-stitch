@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import {
   exportMedia,
@@ -6,6 +6,7 @@ import {
   fetchProject,
   fetchSetup,
   fetchSpeakers,
+  listAssets,
   listProjects,
   openLibraryClip,
   submitOps,
@@ -27,14 +28,21 @@ import { Projects } from './components/Projects';
 import { TitleDialog, type TitleFields } from './components/TitleDialog';
 import { Toolbar, type ExportState } from './components/Toolbar';
 import { Transcript } from './components/Transcript';
-import { EPS, rangeForWords, titles } from './editlist';
+import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
 import { type PresenceState } from './realtime';
 import { useSession } from './session';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
-import type { CaptionPos, LibraryItem, ProjectSummary, TitleEdit, Transition } from './types';
+import type {
+  Asset,
+  CaptionPos,
+  LibraryItem,
+  ProjectSummary,
+  TitleEdit,
+  Transition,
+} from './types';
 import { usePlayback } from './usePlayback';
 import { holdOrApply, useRealtime, type RemoteDoc } from './useRealtime';
 
@@ -58,6 +66,9 @@ export function App() {
   const [captionRange, setCaptionRange] = useState<[number, number] | null>(null);
   // A selected title card, by its instant. Exclusive with the word selection.
   const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
+  // A selected clip, by its piece's start. Exclusive with the word/title selection.
+  const [selectedClip, setSelectedClip] = useState<number | null>(null);
+  const [assets, setAssets] = useState<Asset[]>([]);
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle' });
   const [twoWordFillers, setTwoWordFillers] = useState(false);
   const [showCuts, setShowCuts] = useState(true);
@@ -187,6 +198,25 @@ export function App() {
     };
   }, [projectId, words, duration, twoWordFillers]);
 
+  // The project's uploaded B-roll/music assets. Uploading is Task 12.
+  useEffect(() => {
+    if (!projectId) {
+      setAssets([]);
+      return;
+    }
+    let cancelled = false;
+    listAssets(projectId)
+      .then((a) => {
+        if (!cancelled) setAssets(a);
+      })
+      .catch(() => {
+        if (!cancelled) setAssets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
   useEffect(() => {
     if (!projectId) {
       queue.current = null;
@@ -245,6 +275,7 @@ export function App() {
     dispatch({ type: 'load', words: [], duration: 0 });
     setExportState({ status: 'idle' });
     setSelectedTitle(null);
+    setSelectedClip(null);
     setTitleDialog(null);
     setCaptionRange(null);
   }, []);
@@ -336,6 +367,7 @@ export function App() {
   const onWordClick = useCallback(
     (index: number, extend: boolean) => {
       setSelectedTitle(null);
+      setSelectedClip(null);
       dispatch({ type: 'select', index, extend });
       const word = editor.words[index];
       if (word && !extend) playback.seek(word.start);
@@ -419,8 +451,28 @@ export function App() {
   // Selecting a card and selecting words are exclusive: one clears the other.
   const onTitleClick = useCallback((at: number) => {
     setSelectedTitle(at);
+    setSelectedClip(null);
     dispatch({ type: 'clearSelection' });
   }, []);
+
+  // Selecting a clip divider is exclusive with a word/title selection.
+  const onClipClick = useCallback(
+    (start: number) => {
+      setSelectedClip(start);
+      setSelectedTitle(null);
+      dispatch({ type: 'clearSelection' });
+      playback.seek(start);
+    },
+    [playback],
+  );
+
+  /** Where a new split goes: the start of the selected words, else the playhead. */
+  const onSplit = useCallback(() => {
+    const at = selected
+      ? rangeForWords(editor.words, selected[0], selected[1], editor.duration).start
+      : playback.currentTime;
+    edit({ type: 'split', at });
+  }, [selected, editor.words, editor.duration, playback.currentTime, edit]);
 
   const onCaptionSubmit = useCallback(
     (text: string, position: CaptionPos) => {
@@ -438,6 +490,22 @@ export function App() {
       setSelectedTitle(null);
   }, [editor.edits, selectedTitle]);
 
+  // `ordered` for the current output layout, and the pieces the transcript
+  // draws as clips.
+  const ordered = useMemo(
+    () => orderedPieces(editor.duration, editor.edits, editor.splits, editor.order),
+    [editor.duration, editor.edits, editor.splits, editor.order],
+  );
+
+  // A peer's edit (or an undo) can remove the clip boundary we had selected.
+  useEffect(() => {
+    if (selectedClip === null) return;
+    if (!ordered.some((p) => Math.abs(p.start - selectedClip) < EPS)) setSelectedClip(null);
+  }, [ordered, selectedClip]);
+
+  const hasClipSelection =
+    selectedClip !== null && editor.splits.some((s) => Math.abs(s - selectedClip) < EPS);
+
   // Keyboard: Delete cuts, ⌘Z undoes, ⇧⌘Z redoes, Space plays, Esc clears, arrows move.
   useEffect(() => {
     if (!projectId) return;
@@ -447,11 +515,15 @@ export function App() {
       if (target?.closest('input, textarea, select, [contenteditable]')) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        // A selected card and a word selection never coexist, so this is
-        // unambiguous: Delete removes whichever one is showing.
+        // A selected card, a selected clip and a word selection never
+        // coexist, so this is unambiguous: Delete removes whichever one is
+        // showing.
         if (selectedTitle !== null) {
           edit({ type: 'removeTitle', at: selectedTitle });
           setSelectedTitle(null);
+        } else if (hasClipSelection && selectedClip !== null) {
+          edit({ type: 'unsplit', at: selectedClip });
+          setSelectedClip(null);
         } else {
           edit({ type: 'deleteSelection' });
         }
@@ -464,6 +536,7 @@ export function App() {
       } else if (e.key === 'Escape') {
         dispatch({ type: 'clearSelection' });
         setSelectedTitle(null);
+        setSelectedClip(null);
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         dispatch({
@@ -483,6 +556,8 @@ export function App() {
     captionRange,
     agentDialogOpen,
     selectedTitle,
+    selectedClip,
+    hasClipSelection,
     playback,
     showCuts,
     edit,
@@ -587,6 +662,7 @@ export function App() {
             <Toolbar
               hasSelection={selected !== null}
               hasTitleSelection={selectedTitle !== null}
+              hasClipSelection={hasClipSelection}
               canUndo={editor.undoable !== null}
               canRedo={editor.redoable !== null}
               readOnly={!canEdit}
@@ -596,14 +672,27 @@ export function App() {
               showCuts={showCuts}
               exportState={exportState}
               transition={editor.transition}
-              onDelete={() =>
-                selectedTitle !== null
-                  ? (edit({ type: 'removeTitle', at: selectedTitle }), setSelectedTitle(null))
-                  : edit({ type: 'deleteSelection' })
-              }
+              onDelete={() => {
+                if (selectedTitle !== null) {
+                  edit({ type: 'removeTitle', at: selectedTitle });
+                  setSelectedTitle(null);
+                } else if (hasClipSelection && selectedClip !== null) {
+                  edit({ type: 'unsplit', at: selectedClip });
+                  setSelectedClip(null);
+                } else {
+                  edit({ type: 'deleteSelection' });
+                }
+              }}
               onAddTitle={onAddTitle}
               onAddCaption={() => {
                 if (selected) setCaptionRange(selected);
+              }}
+              onSplit={onSplit}
+              onAddBroll={() => {
+                // Task 12: opens the B-roll dialog.
+              }}
+              onAddMusic={() => {
+                // Task 12: opens the music dialog.
               }}
               onTransition={(transition: Transition) => edit({ type: 'setTransition', transition })}
               onRemoveFillers={() => edit({ type: 'applyCuts', cuts: fillers })}
@@ -639,6 +728,13 @@ export function App() {
               onRenameSpeaker={onRenameSpeaker}
               readOnly={!canEdit}
               peers={peers}
+              ordered={ordered}
+              splits={editor.splits}
+              selectedClip={selectedClip}
+              onClipClick={onClipClick}
+              assets={assets}
+              onBrollClick={(start) => edit({ type: 'removeBroll', start })}
+              onAudioClick={(start) => edit({ type: 'removeAudio', start })}
             />
           </section>
         </main>

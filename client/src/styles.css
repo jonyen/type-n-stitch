@@ -1551,6 +1551,53 @@ input.speaker-tag {
   color: var(--accent);
 }
 
+.clip + .clip {
+  margin-top: 12px;
+}
+
+.clip-divider {
+  display: block;
+  width: 100%;
+  margin: 4px 0 8px;
+  padding: 4px 10px;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.clip-divider.split {
+  border-style: solid;
+}
+
+.clip-divider.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+  color: var(--accent);
+}
+
+.overlay-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.overlay-tag.broll {
+  background: #0d9488;
+}
+
+.overlay-tag.audio {
+  background: #d97706;
+}
+
 /* Title and caption dialogs */
 
 .modal .field {

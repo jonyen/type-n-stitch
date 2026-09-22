@@ -11,6 +11,8 @@ interface Props {
   hasSelection: boolean;
   /** A title card is selected instead of words; Delete removes it. */
   hasTitleSelection: boolean;
+  /** A clip divider is selected; Delete removes that split. */
+  hasClipSelection: boolean;
   canUndo: boolean;
   canRedo: boolean;
   /** Viewers and commenters see the editor, but cannot change it. */
@@ -26,6 +28,9 @@ interface Props {
   onDelete: () => void;
   onAddTitle: () => void;
   onAddCaption: () => void;
+  onSplit: () => void;
+  onAddBroll: () => void;
+  onAddMusic: () => void;
   onTransition: (transition: Transition) => void;
   onOverdub: () => void;
   onUndo: () => void;
@@ -50,6 +55,7 @@ function plural(n: number, noun: string): string {
 export function Toolbar({
   hasSelection,
   hasTitleSelection,
+  hasClipSelection,
   canUndo,
   canRedo,
   readOnly,
@@ -62,6 +68,9 @@ export function Toolbar({
   onDelete,
   onAddTitle,
   onAddCaption,
+  onSplit,
+  onAddBroll,
+  onAddMusic,
   onTransition,
   onOverdub,
   onUndo,
@@ -79,7 +88,7 @@ export function Toolbar({
         <button
           type="button"
           onClick={onDelete}
-          disabled={readOnly || (!hasSelection && !hasTitleSelection)}
+          disabled={readOnly || (!hasSelection && !hasTitleSelection && !hasClipSelection)}
           title="Delete / Backspace"
         >
           Delete
@@ -161,6 +170,30 @@ export function Toolbar({
           title="Draw text over the picture while the selected words play"
         >
           Add caption
+        </button>
+        <button
+          type="button"
+          onClick={onSplit}
+          disabled={readOnly}
+          title="Split into clips at the selected word, or at the playhead"
+        >
+          Split here
+        </button>
+        <button
+          type="button"
+          onClick={onAddBroll}
+          disabled={readOnly || !hasSelection}
+          title="Show a video shot over the selected words"
+        >
+          Add B-roll
+        </button>
+        <button
+          type="button"
+          onClick={onAddMusic}
+          disabled={readOnly}
+          title="Play music under the selected words, or the whole edit"
+        >
+          Add music
         </button>
         <label className="toggle" title="How the pieces either side of a cut meet">
           Transitions

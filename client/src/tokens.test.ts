@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { splitTurns, tokenize, turnContains } from './tokens';
+import { clipRuns, splitTurns, tokenize, tokenStart, turnContains } from './tokens';
 import type { Edit, TitleEdit, Word } from './types';
 
 const words: Word[] = [
@@ -10,6 +10,7 @@ const words: Word[] = [
   { id: 'w3', text: 'as', start: 2.0, end: 2.3 },
 ];
 const cut = (start: number, end: number): Edit => ({ kind: 'cut', start, end });
+const cutEdit = cut;
 const overdub: Edit = {
   kind: 'overdub',
   start: 1.25,
@@ -123,5 +124,23 @@ describe('title tokens', () => {
     expect(kinds).toEqual(['word', 'title@1', 'word', 'word', 'word']);
     const late: TitleEdit = { ...t, at: 19 };
     expect(tokenize(words, [late]).at(-1)).toMatchObject({ kind: 'title', before: 4 });
+  });
+});
+
+describe('clipRuns', () => {
+  it('groups tokens by owning piece and orders them', () => {
+    const edits: Edit[] = [
+      cutEdit(1.25, 2.0),
+      { kind: 'title', at: 5, duration: 1, text: 'T', subtitle: null, style: 'dark' },
+    ];
+    const tokens = tokenize(words, edits, true);
+    const ordered = [
+      { start: 2, end: 20 },
+      { start: 0, end: 1.25 },
+    ];
+    const clips = clipRuns(words, tokens, ordered);
+    expect(clips.map((c) => c.piece.start)).toEqual([2, 0]);
+    expect(clips[0]?.tokens.map(tokenStart)).toEqual([3, 4]); // word "as" then the trailing title
+    expect(clips[1]?.tokens.map(tokenStart)).toEqual([0, 1, 2]); // cut word 2 stays with the first source piece
   });
 });

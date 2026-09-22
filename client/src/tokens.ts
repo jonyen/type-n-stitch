@@ -1,7 +1,7 @@
 // Turning the word list plus the edit list into what the transcript draws.
 
-import { overdubs, titles, wordStatus } from './editlist';
-import type { Edit, OverdubEdit, TitleEdit, Word } from './types';
+import { EPS, overdubs, titles, wordStatus } from './editlist';
+import type { Edit, OverdubEdit, Range, TitleEdit, Word } from './types';
 
 export type Token =
   | { kind: 'word'; index: number; word: Word }
@@ -115,4 +115,38 @@ export function splitTurns(tokens: Token[], speakers: (number | null)[] | null):
 /** Display name for a speaker index: the user's name for them, or "Speaker n". */
 export function speakerLabel(speaker: number, names: string[]): string {
   return names[speaker]?.trim() || `Speaker ${speaker + 1}`;
+}
+
+export interface Clip {
+  piece: Range;
+  tokens: Token[];
+}
+
+/**
+ * Tokens grouped by the piece owning their first word, in `ordered` order.
+ * Cut words between pieces stay with the preceding piece; trailing titles
+ * with the last.
+ */
+export function clipRuns(words: Word[], tokens: Token[], ordered: Range[]): Clip[] {
+  const source = [...ordered].sort((a, b) => a.start - b.start);
+  // First word index each source piece owns; run k covers [firstIdx[k], firstIdx[k+1]).
+  const firstIdx = source.map((p, k) =>
+    k === 0 ? 0 : words.findIndex((w) => w.start >= p.start - EPS),
+  );
+  const runOf = (index: number) => {
+    let k = 0;
+    for (let i = 1; i < source.length; i++)
+      if ((firstIdx[i] ?? -1) !== -1 && index >= (firstIdx[i] as number)) k = i;
+    return k;
+  };
+  const buckets: Token[][] = source.map(() => []);
+  for (const token of tokens) {
+    const start = tokenStart(token);
+    const k = start >= words.length ? source.length - 1 : runOf(start);
+    buckets[k]?.push(token);
+  }
+  return ordered.map((piece) => {
+    const k = source.findIndex((p) => Math.abs(p.start - piece.start) < EPS);
+    return { piece, tokens: buckets[k] ?? [] };
+  });
 }

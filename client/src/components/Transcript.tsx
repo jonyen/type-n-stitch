@@ -7,9 +7,18 @@ import {
   type ReactNode,
 } from 'react';
 
-import { captions, cutTransitionAt, EPS, nextCutTransition, wordStatus } from '../editlist';
+import {
+  captions,
+  cutTransitionAt,
+  EPS,
+  formatTime,
+  nextCutTransition,
+  wordStatus,
+} from '../editlist';
+import { audios, brolls } from '../overlays';
 import type { Peer } from '../realtime';
 import {
+  clipRuns,
   speakerLabel,
   splitTurns,
   tokenize,
@@ -17,7 +26,7 @@ import {
   turnContains,
   type Token,
 } from '../tokens';
-import type { CaptionEdit, Edit, OverdubEdit, Transition, Word } from '../types';
+import type { Asset, Edit, OverdubEdit, Range, Transition, Word } from '../types';
 
 interface Props {
   words: Word[];
@@ -49,6 +58,16 @@ interface Props {
   /** Viewers and commenters read the transcript; they cannot rename speakers. */
   readOnly: boolean;
   peers: Peer[];
+  /** Output pieces, in output order. */
+  ordered: Range[];
+  /** Instants where the output is split into clips. */
+  splits: number[];
+  /** The `start` of the selected clip's piece, or null. Exclusive with a word/title selection. */
+  selectedClip: number | null;
+  onClipClick: (start: number) => void;
+  assets: Asset[];
+  onBrollClick: (start: number) => void;
+  onAudioClick: (start: number) => void;
 }
 
 export function Transcript({
@@ -71,6 +90,13 @@ export function Transcript({
   onRenameSpeaker,
   readOnly,
   peers,
+  ordered,
+  splits,
+  selectedClip,
+  onClipClick,
+  assets,
+  onBrollClick,
+  onAudioClick,
 }: Props) {
   const inSelection = (i: number) => selected !== null && i >= selected[0] && i <= selected[1];
 
@@ -141,13 +167,13 @@ export function Transcript({
     if (e.detail === 0) onWordClick(index, e.shiftKey);
   };
 
-  // The caption that begins at word `i`, so its tag is drawn once, after the
-  // first word it covers. A caption's range starts at that word's start.
-  const captionList = captions(edits);
-  const captionStartingAt = (i: number): CaptionEdit | undefined => {
+  // The item from `list` that begins at word `i`, so its tag is drawn once,
+  // after the first word it covers. An item's range starts at that word's
+  // start.
+  const startingAt = <T extends Range>(list: T[], i: number): T | undefined => {
     const word = words[i];
     if (!word) return undefined;
-    return captionList.find(
+    return list.find(
       (c) =>
         word.start >= c.start - EPS &&
         word.start < c.end - EPS &&
@@ -155,8 +181,9 @@ export function Transcript({
     );
   };
 
+  const captionList = captions(edits);
   const captionTag = (i: number): ReactNode => {
-    const caption = captionStartingAt(i);
+    const caption = startingAt(captionList, i);
     if (!caption) return null;
     return (
       <span
@@ -166,6 +193,34 @@ export function Transcript({
       >
         {caption.text}
       </span>
+    );
+  };
+
+  const nameOf = (id: string) => assets.find((a) => a.id === id)?.name ?? 'missing asset';
+  const overlayTags = (i: number): ReactNode => {
+    const b = startingAt(brolls(edits), i);
+    const a = startingAt(audios(edits), i);
+    return (
+      <>
+        {b && (
+          <span
+            className="overlay-tag broll"
+            title={readOnly ? 'B-roll' : 'Click to remove'}
+            onClick={readOnly ? undefined : () => onBrollClick(b.start)}
+          >
+            ▣ {nameOf(b.media)}
+          </span>
+        )}
+        {a && (
+          <span
+            className="overlay-tag audio"
+            title={readOnly ? 'Music' : 'Click to edit'}
+            onClick={readOnly ? undefined : () => onAudioClick(a.start)}
+          >
+            ♪ {nameOf(a.media)} {a.gain}dB
+          </span>
+        )}
+      </>
     );
   };
 
@@ -251,7 +306,8 @@ export function Transcript({
           >
             {overdub.text}
           </button>
-          {captionTag(first)}{' '}
+          {captionTag(first)}
+          {overlayTags(first)}{' '}
         </span>
       );
     }
@@ -284,42 +340,67 @@ export function Transcript({
         >
           {word.text}
         </button>
-        {captionTag(index)}{' '}
+        {captionTag(index)}
+        {overlayTags(index)}{' '}
       </span>
     );
   };
 
-  const turns = splitTurns(tokenize(words, edits, showCuts), speakers);
+  const tokens = tokenize(words, edits, showCuts);
+  const clips = clipRuns(words, tokens, ordered);
+  const isSplit = (start: number) => splits.some((s) => Math.abs(s - start) < EPS);
   return (
     <div ref={root} className="transcript" aria-label="Transcript">
-      {turns.map((turn) => {
-        const first = turn.tokens[0];
-        const key = first ? `turn-${tokenStart(first)}` : 'turn';
-        return (
-          <div
-            key={key}
-            className={[
-              'turn',
-              turn.speaker !== null ? `speaker-${turn.speaker % 6}` : '',
-              turnContains(turn, activeWord) ? 'speaking' : '',
-            ]
-              .filter(Boolean)
-              .join(' ')}
-          >
-            {turn.speaker !== null && (
-              <SpeakerTag
-                speaker={turn.speaker}
-                name={speakerLabel(turn.speaker, speakerNames)}
-                onRename={(name) => onRenameSpeaker(turn.speaker as number, name)}
-                readOnly={readOnly}
-              />
-            )}
-            <p className={turn.speaker !== null ? `speech speaker-${turn.speaker % 6}` : 'speech'}>
-              {turn.tokens.map(renderToken)}
-            </p>
-          </div>
-        );
-      })}
+      {clips.map((clip, k) => (
+        <section key={`clip-${clip.piece.start}`} className="clip" data-start={clip.piece.start}>
+          {clips.length > 1 && (
+            <button
+              type="button"
+              className={`clip-divider${selectedClip !== null && Math.abs(selectedClip - clip.piece.start) < EPS ? ' selected' : ''}${isSplit(clip.piece.start) ? ' split' : ''}`}
+              title={
+                isSplit(clip.piece.start)
+                  ? 'Click to select · Delete joins it to the clip before'
+                  : 'Clip boundary from a cut'
+              }
+              onClick={() => onClipClick(clip.piece.start)}
+            >
+              Clip {k + 1} · {formatTime(clip.piece.end - clip.piece.start)}
+            </button>
+          )}
+          {splitTurns(clip.tokens, speakers).map((turn) => {
+            const first = turn.tokens[0];
+            const key = first ? `turn-${tokenStart(first)}` : 'turn';
+            return (
+              <div
+                key={key}
+                className={[
+                  'turn',
+                  turn.speaker !== null ? `speaker-${turn.speaker % 6}` : '',
+                  turnContains(turn, activeWord) ? 'speaking' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                {turn.speaker !== null && (
+                  <SpeakerTag
+                    speaker={turn.speaker}
+                    name={speakerLabel(turn.speaker, speakerNames)}
+                    onRename={(name) => onRenameSpeaker(turn.speaker as number, name)}
+                    readOnly={readOnly}
+                  />
+                )}
+                <p
+                  className={
+                    turn.speaker !== null ? `speech speaker-${turn.speaker % 6}` : 'speech'
+                  }
+                >
+                  {turn.tokens.map(renderToken)}
+                </p>
+              </div>
+            );
+          })}
+        </section>
+      ))}
     </div>
   );
 }
