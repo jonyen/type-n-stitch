@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
-import { jumpTarget, overdubAt, titles, wordIndexAt } from './editlist';
+import { EPS, overdubAt, titles, wordIndexAt } from './editlist';
 import type { Edit, OverdubEdit, Range, TitleEdit, Word } from './types';
 
 /** The earliest title whose instant lies in (prev, now]; null when none or when moving backwards. */
@@ -50,6 +50,38 @@ export function restartAt(
   return null;
 }
 
+/** Index of the output piece containing `t`, else the next piece at or after `t`, else the last piece. 0 when `ordered` is empty. */
+export function pieceIndexAt(t: number, ordered: Range[]): number {
+  if (ordered.length === 0) return 0;
+  const inside = ordered.findIndex((p) => t >= p.start && t < p.end);
+  if (inside !== -1) return inside;
+  let best = -1;
+  ordered.forEach((p, i) => {
+    if (p.start >= t && (best === -1 || p.start < (ordered[best] as Range).start)) best = i;
+  });
+  return best === -1 ? ordered.length - 1 : best;
+}
+
+export type PlayStep =
+  { kind: 'play' } | { kind: 'seek'; to: number; index: number } | { kind: 'stop' };
+
+/**
+ * What the playhead does next, tracking the output piece it is on (`index`)
+ * rather than re-deriving it from source time alone: a source-time playhead
+ * cannot tell which output piece it is playing when a piece's source range
+ * overlaps another piece earlier in the same order (a reversed pair, say),
+ * so leaving a piece always advances to the *next output piece*, never back
+ * to whichever piece happens to contain the current source time.
+ */
+export function playStep(t: number, index: number, ordered: Range[]): PlayStep {
+  if (ordered.length === 0) return { kind: 'play' };
+  const piece = ordered[index];
+  if (piece && t < piece.end - EPS) return { kind: 'play' };
+  const next = ordered[index + 1];
+  if (next) return { kind: 'seek', to: next.start, index: index + 1 };
+  return { kind: 'stop' };
+}
+
 export interface Playback {
   playing: boolean;
   currentTime: number;
@@ -87,6 +119,8 @@ export function usePlayback(
   orderedRef.current = ordered;
 
   const wantPlaying = useRef(false);
+  /** The output piece currently playing, by index into `ordered`. */
+  const playIndex = useRef(0);
   const activeOverdub = useRef<OverdubEdit | null>(null);
   const overdubAudio = useRef<HTMLAudioElement | null>(null);
   const frame = useRef(0);
@@ -214,28 +248,29 @@ export function usePlayback(
     } else {
       const t = media.currentTime;
       const next = overdubAt(t, editsRef.current);
-      const skip = next ? null : jumpTarget(t, orderedRef.current);
+      const step = next ? null : playStep(t, playIndex.current, orderedRef.current);
+      const skipTo = step?.kind === 'seek' ? step.to : null;
       // The jump is decided first but taken last: a title inside the cut (or
       // the overdubbed range) would otherwise be stepped over in this tick
       // and never seen, because the crossing is checked against the time
       // `sync` recorded *after* the jump.
-      const after = tickSpan(t, skip === Infinity ? t : skip, next?.end ?? null);
+      const after = tickSpan(t, skipTo, next?.end ?? null);
       const crossed = titleCrossed(titles(editsRef.current), lastTime.current, after);
       if (crossed) {
         enterTitle(crossed);
       } else if (next) {
         enterOverdub(next);
-      } else if (skip !== null) {
-        if (skip === Infinity) {
-          wantPlaying.current = false;
-          media.pause();
-        } else {
-          media.currentTime = skip;
-        }
+      } else if (step?.kind === 'seek') {
+        media.currentTime = step.to;
+        playIndex.current = step.index;
+      } else if (step?.kind === 'stop') {
+        wantPlaying.current = false;
+        media.pause();
+        media.currentTime = duration;
       }
     }
     sync();
-  }, [enterOverdub, enterTitle, leaveOverdub, leaveTitle, mediaRef, sync]);
+  }, [duration, enterOverdub, enterTitle, leaveOverdub, leaveTitle, mediaRef, sync]);
 
   useEffect(() => {
     if (!playing) return;
@@ -259,9 +294,10 @@ export function usePlayback(
       if (!activeOverdub.current && !activeTitle.current) setPlaying(false);
     };
     const onEnded = () => {
-      const target = jumpTarget(duration, orderedRef.current);
-      if (target !== null && target !== Infinity) {
-        media.currentTime = target;
+      const step = playStep(duration, playIndex.current, orderedRef.current);
+      if (step.kind === 'seek') {
+        media.currentTime = step.to;
+        playIndex.current = step.index;
         void media.play();
         return;
       }
@@ -326,6 +362,8 @@ export function usePlayback(
     }
     if (media.paused) {
       const at = restartAt(media.currentTime, media.ended, duration, orderedRef.current);
+      const startAt = at ?? media.currentTime;
+      playIndex.current = pieceIndexAt(startAt, orderedRef.current);
       if (at !== null) media.currentTime = at;
       void media.play();
     } else {
@@ -346,6 +384,7 @@ export function usePlayback(
         audio().pause();
       }
       const to = Math.max(0, Math.min(t, duration));
+      playIndex.current = pieceIndexAt(to, orderedRef.current);
       media.currentTime = to;
       if (wantPlaying.current && media.paused) void media.play();
       sync();

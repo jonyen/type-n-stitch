@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import type { TitleEdit } from './types';
-import { nextTitleAt, restartAt, tickSpan, titleCrossed } from './usePlayback';
+import type { Range, TitleEdit } from './types';
+import {
+  nextTitleAt,
+  pieceIndexAt,
+  playStep,
+  restartAt,
+  tickSpan,
+  titleCrossed,
+} from './usePlayback';
 
 const t = (at: number): TitleEdit => ({
   kind: 'title',
@@ -68,6 +75,87 @@ describe('restartAt', () => {
     expect(restartAt(9.995, false, 10, ordered)).toBe(5);
     expect(restartAt(3, false, 10, ordered)).toBeNull();
     expect(restartAt(3, true, 10, ordered)).toBe(5);
+  });
+});
+
+/** Drives `playStep` until it stops, returning the sequence of piece indices visited. */
+function runToStop(ordered: Range[], startIndex: number, stepSize: number): number[] {
+  let index = startIndex;
+  let t = ordered[index]?.start ?? 0;
+  const visited = [index];
+  for (let guard = 0; guard < 1000; guard++) {
+    const step = playStep(t, index, ordered);
+    if (step.kind === 'stop') return visited;
+    if (step.kind === 'seek') {
+      index = step.index;
+      t = step.to;
+      visited.push(index);
+      continue;
+    }
+    t += stepSize;
+  }
+  throw new Error('runToStop did not stop');
+}
+
+describe('playStep', () => {
+  it('skips the gap of a plain cut, then stops at the end', () => {
+    // A cut over [3, 5) of a 10 s source: the kept pieces are [0,3) and [5,10).
+    const ordered: Range[] = [
+      { start: 0, end: 3 },
+      { start: 5, end: 10 },
+    ];
+    expect(playStep(1, 0, ordered)).toEqual({ kind: 'play' });
+    expect(playStep(3, 0, ordered)).toEqual({ kind: 'seek', to: 5, index: 1 });
+    expect(playStep(8, 1, ordered)).toEqual({ kind: 'play' });
+    expect(playStep(10, 1, ordered)).toEqual({ kind: 'stop' });
+    expect(runToStop(ordered, 0, 1)).toEqual([0, 1]);
+  });
+
+  it('stops in place at a trailing cut instead of looping', () => {
+    // A cut over [7.5, 10) of a 10 s source: only [0, 7.5) survives.
+    const ordered: Range[] = [{ start: 0, end: 7.5 }];
+    expect(playStep(7, 0, ordered)).toEqual({ kind: 'play' });
+    expect(playStep(7.5, 0, ordered)).toEqual({ kind: 'stop' });
+    // A second play restarts at the first (only) piece rather than staying stuck.
+    expect(restartAt(10, false, 10, ordered)).toBe(0);
+  });
+
+  it('plays a reversed two-piece order once through, then stops (not a loop)', () => {
+    const ordered: Range[] = [
+      { start: 5, end: 10 },
+      { start: 0, end: 5 },
+    ];
+    // Leaving piece 0 at its own end advances to piece 1, never back to
+    // whichever piece happens to contain the current source time (piece 1
+    // also covers time 5, the tail of piece 0, so a source-time-only lookup
+    // would wrongly re-enter piece 0 here).
+    expect(playStep(10, 0, ordered)).toEqual({ kind: 'seek', to: 0, index: 1 });
+    expect(playStep(5, 1, ordered)).toEqual({ kind: 'stop' });
+    expect(runToStop(ordered, 0, 1)).toEqual([0, 1]);
+  });
+});
+
+describe('pieceIndexAt', () => {
+  it('finds the piece containing t after seeking into the middle of the second output piece', () => {
+    const ordered: Range[] = [
+      { start: 5, end: 10 },
+      { start: 0, end: 5 },
+    ];
+    // t = 2 sits inside the second output piece ([0, 5)), not the first.
+    expect(pieceIndexAt(2, ordered)).toBe(1);
+    expect(pieceIndexAt(7, ordered)).toBe(0);
+  });
+
+  it('falls back to the next piece at or after t, else the last piece', () => {
+    const ordered: Range[] = [
+      { start: 0, end: 3 },
+      { start: 5, end: 10 },
+    ];
+    // 4 is in the gap between pieces: the next piece starts at 5.
+    expect(pieceIndexAt(4, ordered)).toBe(1);
+    // Past every piece: the last one.
+    expect(pieceIndexAt(20, ordered)).toBe(1);
+    expect(pieceIndexAt(0, [])).toBe(0);
   });
 });
 

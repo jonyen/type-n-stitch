@@ -56,6 +56,10 @@ function BrollVideo({
   const ref = useRef<HTMLVideoElement>(null);
   const [missing, setMissing] = useState(src === undefined);
   useEffect(() => {
+    // Clears the placeholder once `listAssets` resolves and the file shows up.
+    setMissing(src === undefined);
+  }, [src]);
+  useEffect(() => {
     const v = ref.current;
     if (!v) return;
     const want = assetTime(edit, t);
@@ -66,6 +70,16 @@ function BrollVideo({
       });
     if (!playing && !v.paused) v.pause();
   }, [edit, t, playing]);
+  // Explicit stop when this overlay unmounts (the B-roll range ended, or the
+  // whole player did), rather than relying on removal from the document to
+  // pause it. A plain cleanup on the sync effect above would fire every
+  // tick (it depends on `t`), so this is its own mount-only effect.
+  useEffect(
+    () => () => {
+      ref.current?.pause();
+    },
+    [],
+  );
   if (missing) return <div className="overlay-missing">B-roll file missing</div>;
   return (
     <video
@@ -105,6 +119,14 @@ function AudioBed({
       });
     if (!playing && !a.paused) a.pause();
   }, [edit, t, playing, ducked]);
+  // Explicit stop when this overlay unmounts, rather than relying on removal
+  // from the document to pause it; see the matching note in `BrollVideo`.
+  useEffect(
+    () => () => {
+      ref.current?.pause();
+    },
+    [],
+  );
   if (!src) return null;
   return <audio ref={ref} src={src} preload="auto" />;
 }
