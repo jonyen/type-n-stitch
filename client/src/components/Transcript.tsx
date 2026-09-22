@@ -353,20 +353,29 @@ export function Transcript({
     <div ref={root} className="transcript" aria-label="Transcript">
       {clips.map((clip, k) => (
         <section key={`clip-${clip.piece.start}`} className="clip" data-start={clip.piece.start}>
-          {clips.length > 1 && (
-            <button
-              type="button"
-              className={`clip-divider${selectedClip !== null && Math.abs(selectedClip - clip.piece.start) < EPS ? ' selected' : ''}${isSplit(clip.piece.start) ? ' split' : ''}`}
-              title={
-                isSplit(clip.piece.start)
-                  ? 'Click to select · Delete joins it to the clip before'
-                  : 'Clip boundary from a cut'
-              }
-              onClick={() => onClipClick(clip.piece.start)}
-            >
-              Clip {k + 1} · {formatTime(clip.piece.end - clip.piece.start)}
-            </button>
-          )}
+          {clips.length > 1 &&
+            (() => {
+              const split = isSplit(clip.piece.start);
+              // Only a split's divider can show "selected": that's the only
+              // one Delete acts on. A cut-derived boundary still jumps there
+              // on click, but never carries a selection Delete can't use.
+              const selected =
+                split && selectedClip !== null && Math.abs(selectedClip - clip.piece.start) < EPS;
+              return (
+                <button
+                  type="button"
+                  className={`clip-divider${selected ? ' selected' : ''}${split ? ' split' : ''}`}
+                  title={
+                    split
+                      ? 'Click to select · Delete joins it to the clip before'
+                      : 'Clip boundary from a cut — click to jump here'
+                  }
+                  onClick={() => onClipClick(clip.piece.start)}
+                >
+                  Clip {k + 1} · {formatTime(clip.piece.end - clip.piece.start)}
+                </button>
+              );
+            })()}
           {splitTurns(clip.tokens, speakers).map((turn) => {
             const first = turn.tokens[0];
             const key = first ? `turn-${tokenStart(first)}` : 'turn';

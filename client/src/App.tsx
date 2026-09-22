@@ -455,15 +455,17 @@ export function App() {
     dispatch({ type: 'clearSelection' });
   }, []);
 
-  // Selecting a clip divider is exclusive with a word/title selection.
+  // Clicking any divider jumps there; only a split's divider can be
+  // "selected" (Delete then joins it to the clip before). A cut-derived
+  // boundary just seeks, since there's no split for Delete to undo.
   const onClipClick = useCallback(
     (start: number) => {
-      setSelectedClip(start);
+      setSelectedClip(editor.splits.some((s) => Math.abs(s - start) < EPS) ? start : null);
       setSelectedTitle(null);
       dispatch({ type: 'clearSelection' });
       playback.seek(start);
     },
-    [playback],
+    [playback, editor.splits],
   );
 
   /** Where a new split goes: the start of the selected words, else the playhead. */

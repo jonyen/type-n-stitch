@@ -130,6 +130,8 @@ export interface Clip {
 export function clipRuns(words: Word[], tokens: Token[], ordered: Range[]): Clip[] {
   const source = [...ordered].sort((a, b) => a.start - b.start);
   // First word index each source piece owns; run k covers [firstIdx[k], firstIdx[k+1]).
+  // firstIdx[0] is hardcoded to 0 so any words before the first kept piece
+  // (e.g. a leading cut) attach to the first clip rather than being orphaned.
   const firstIdx = source.map((p, k) =>
     k === 0 ? 0 : words.findIndex((w) => w.start >= p.start - EPS),
   );
