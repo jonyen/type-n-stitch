@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { DropdownMenu } from 'radix-ui';
 
 import {
   exportMedia,
@@ -29,6 +30,7 @@ import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
 import { Presence } from './components/Presence';
 import { Projects } from './components/Projects';
+import { ThemeToggle } from './components/ThemeToggle';
 import { TitleDialog, type TitleFields } from './components/TitleDialog';
 import { Toolbar, type ExportState } from './components/Toolbar';
 import { Transcript } from './components/Transcript';
@@ -51,10 +53,12 @@ import type {
 } from './types';
 import { usePlayback } from './usePlayback';
 import { holdOrApply, useRealtime, type RemoteDoc } from './useRealtime';
+import { useTheme } from './useTheme';
 import { useThumbnails } from './useThumbnails';
 
 export function App() {
   const { user, setUser, signOut } = useSession();
+  const [theme, setTheme] = useTheme();
   const [needsSetup, setNeedsSetup] = useState(false);
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -674,6 +678,19 @@ export function App() {
         {project && <span className="header-file muted">{project.media.filename}</span>}
         {project && <Presence peers={peers} status={status} lastError={lastError} />}
         <Avatar user={user} withName size="sm" />
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger className="ghost" aria-label="Theme">
+            Theme
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content
+              sideOffset={6}
+              style={{ background: 'var(--raised)', padding: 4, borderRadius: 6 }}
+            >
+              <ThemeToggle value={theme} onChange={setTheme} />
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
         <button type="button" className="ghost" onClick={() => setAgentDialogOpen(true)}>
           Connect an agent
         </button>

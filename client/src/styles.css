@@ -1,70 +1,9 @@
+/* Legacy variable names, mapped onto the new tokens while components move to
+   CSS Modules. Removed with this file in the last task. */
 :root {
-  --bg: #f6f6f7;
-  --panel: #ffffff;
-  --text: #17181a;
-  --muted: #6c6f75;
-  --border: #e3e4e8;
-  --hover: rgba(0, 0, 0, 0.05);
-  --accent: #2563eb;
-  --accent-soft: rgba(37, 99, 235, 0.14);
-  --active: rgba(250, 204, 21, 0.45);
-  --cut: #c0392b;
-  --overdub: #7c3aed;
-  --overdub-soft: rgba(124, 58, 237, 0.12);
-  --title: #f59e0b;
-  --danger: #c0392b;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px rgba(0, 0, 0, 0.06);
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #101114;
-    --panel: #1a1b1f;
-    --text: #ececee;
-    --muted: #9a9ca3;
-    --border: #2a2c32;
-    --hover: rgba(255, 255, 255, 0.07);
-    --accent: #60a5fa;
-    --accent-soft: rgba(96, 165, 250, 0.2);
-    --active: rgba(250, 204, 21, 0.3);
-    --cut: #f87171;
-    --overdub: #a78bfa;
-    --overdub-soft: rgba(167, 139, 250, 0.16);
-    --title: #fbbf24;
-    --danger: #f87171;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
-  }
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  margin: 0;
-  min-height: 100%;
-}
-
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family:
-    -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  font-size: 15px;
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
-}
-
-button {
-  font: inherit;
-  color: inherit;
-}
-
-a {
-  color: var(--accent);
+  --panel: var(--surface);
+  --active: var(--playhead-soft);
+  --title: #fbbf24;
 }
 
 .muted {
