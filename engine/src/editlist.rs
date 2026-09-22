@@ -378,13 +378,33 @@ pub type CaptionWindow = Window;
 /// Overdubs hold one frame, so a range touching them covers the whole hold;
 /// titles get none.
 pub fn overlay_windows(segments: &[Segment], ranges: &[(usize, Range)]) -> Vec<Vec<Window>> {
+    windows_of(segments, ranges, false)
+}
+
+/// As `overlay_windows`, but `span_titles` makes a range that is open across
+/// the title's source instant cover the whole card. Only audio wants this:
+/// music under an intro must keep playing over the title, while a caption or
+/// a B-roll clip is not drawn on a card.
+fn windows_of(
+    segments: &[Segment],
+    ranges: &[(usize, Range)],
+    span_titles: bool,
+) -> Vec<Vec<Window>> {
     segments
         .iter()
         .map(|seg| {
             ranges
                 .iter()
                 .filter_map(|(index, r)| match seg.kind {
-                    SegmentKind::Title { .. } => None,
+                    SegmentKind::Title { .. } => (span_titles
+                        && r.start <= seg.source.start + EPS
+                        && r.end > seg.source.start + EPS)
+                        .then_some(Window {
+                            index: *index,
+                            start: 0.0,
+                            end: seg.output.len(),
+                            source_start: seg.source.start,
+                        }),
                     SegmentKind::Overdub { .. } => {
                         (r.start < seg.source.end && r.end > seg.source.start).then_some(Window {
                             index: *index,
@@ -434,11 +454,14 @@ pub fn broll_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
     )
 }
 
-/// Per segment, every music/audio overlay that intersects it.
+/// Per segment, every music/audio overlay that intersects it. Unlike the
+/// visual overlays, a music range spans title cards it is open across, so the
+/// bed does not drop out under an intro.
 pub fn audio_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
-    overlay_windows(
+    windows_of(
         segments,
         &ranges_of(edits, |e| matches!(e, Edit::Audio { .. })),
+        true,
     )
 }
 
@@ -940,6 +963,61 @@ mod tests {
         let tl = timeline(10.0, &edits);
         assert_eq!(broll_windows(&tl, &edits)[0][0].index, 0);
         assert_eq!(audio_windows(&tl, &edits)[0][0].index, 1);
+    }
+
+    #[test]
+    fn music_spans_a_title_but_captions_and_broll_do_not() {
+        // Pieces: [0,5) T [5,10). Every range is open across the title's instant.
+        let edits = [
+            title(5.0, 1.0),
+            caption(0.0, 10.0),
+            Edit::Broll {
+                start: 0.0,
+                end: 10.0,
+                media: "b".into(),
+                offset: 0.0,
+            },
+            Edit::Audio {
+                start: 0.0,
+                end: 10.0,
+                media: "m".into(),
+                offset: 0.0,
+                gain: 0.0,
+                duck: true,
+            },
+        ];
+        let tl = timeline(10.0, &edits);
+        assert!(matches!(tl[1].kind, SegmentKind::Title { .. }));
+        // The card is not a surface for a caption or a B-roll clip.
+        assert!(caption_windows(&tl, &edits)[1].is_empty());
+        assert!(broll_windows(&tl, &edits)[1].is_empty());
+        // The music bed covers the whole hold, from the title's instant.
+        assert_eq!(
+            audio_windows(&tl, &edits)[1],
+            vec![Window {
+                index: 3,
+                start: 0.0,
+                end: 1.0,
+                source_start: 5.0
+            }]
+        );
+    }
+
+    #[test]
+    fn music_that_stops_at_the_title_does_not_span_it() {
+        let edits = [
+            title(5.0, 1.0),
+            Edit::Audio {
+                start: 0.0,
+                end: 5.0,
+                media: "m".into(),
+                offset: 0.0,
+                gain: 0.0,
+                duck: false,
+            },
+        ];
+        let tl = timeline(10.0, &edits);
+        assert!(audio_windows(&tl, &edits)[1].is_empty());
     }
 
     #[test]

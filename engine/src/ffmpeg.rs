@@ -1247,6 +1247,83 @@ mod tests {
     }
 
     #[test]
+    fn music_plays_over_a_title_card_instead_of_being_silenced() {
+        // Pieces: [0,5) T(1 s) [5,10). The card's base stays silence, with the
+        // bed mixed on top of it, so the music does not drop out under an intro.
+        let edits = [
+            Edit::Audio {
+                start: 0.0,
+                end: 10.0,
+                media: "m1".into(),
+                offset: 0.0,
+                gain: 0.0,
+                duck: true,
+            },
+            Edit::Title {
+                at: 5.0,
+                duration: 1.0,
+                text: "T".into(),
+                subtitle: None,
+                style: TitleStyle::Dark,
+            },
+        ];
+        let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.assets = assets(&[("m1", "/assets/m1.mp3")]);
+            o.title_images = titles(&[(1, "/imgs/t.png")]);
+            o.words = leak([word(1.0, 2.0)]);
+        });
+        // Segment 1 is the card: silence as the base, music mixed onto it.
+        assert!(g.contains(&format!("anullsrc=r=48000:cl=stereo,atrim=end=1,asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE}[a1m];")), "{g}");
+        assert!(
+            g.contains(&format!("atrim=start=5:end=6,asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE},adelay=0:all=1,volume=0dB[a1x0];")),
+            "{g}"
+        );
+        assert!(
+            g.contains("[a1m][a1x0]amix=inputs=2:normalize=0:duration=first,afade=t=in"),
+            "{g}"
+        );
+        // A title has no words, so nothing ducks on the card.
+        assert!(!g.contains("[a1x0];volume=volume="), "{g}");
+    }
+
+    #[test]
+    fn a_caption_or_broll_spanning_a_title_draws_nothing_on_the_card() {
+        let edits = [
+            Edit::Title {
+                at: 5.0,
+                duration: 1.0,
+                text: "T".into(),
+                subtitle: None,
+                style: TitleStyle::Dark,
+            },
+            Edit::Caption {
+                start: 0.0,
+                end: 10.0,
+                text: "c".into(),
+                position: CaptionPos::BottomLeft,
+            },
+            Edit::Broll {
+                start: 0.0,
+                end: 10.0,
+                media: "b1".into(),
+                offset: 0.0,
+            },
+        ];
+        let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.assets = assets(&[("b1", "/assets/b1.mp4")]);
+            o.title_images = titles(&[(0, "/imgs/t.png")]);
+            o.caption_images = captions(&[(1, "/imgs/c.png", 10, 20)]);
+        });
+        // The card's video chain goes straight from the still to [v1].
+        assert!(!g.contains("[v1c0]"), "{g}");
+        assert!(!g.contains("[v1b0]"), "{g}");
+        assert!(
+            g.contains("trim=end=1,setpts=PTS-STARTPTS,fade=t=in"),
+            "{g}"
+        );
+    }
+
+    #[test]
     fn overdub_hold_ducks_music_for_its_whole_length() {
         let edits = [
             Edit::Overdub {
