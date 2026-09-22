@@ -50,6 +50,11 @@ function setup(overrides: Partial<TimelineProps> = {}): TimelineProps {
     onMoveClip: vi.fn(),
     onSelectOverlay: vi.fn(),
     onOpenAudio: vi.fn(),
+    tool: 'select',
+    duration: 10,
+    splits,
+    onSplit: vi.fn(),
+    onCut: vi.fn(),
     ...overrides,
   };
   render(<Timeline {...props} />);
@@ -141,5 +146,54 @@ describe('Timeline (Select tool)', () => {
     fireEvent.pointerDown(screen.getByTestId('timeline-lanes'), { clientX: 250, button: 0 });
     // Output 2.5 s is inside the first clip, which starts at source 5.
     expect(props.onSeek).toHaveBeenCalledWith(7.5);
+  });
+});
+
+describe('Timeline (Razor and Range)', () => {
+  const lanes = () => screen.getByTestId('timeline-lanes');
+
+  it('razor: shows where it will cut and splits at that word’s source time', () => {
+    const props = setup({ tool: 'razor' });
+    // Output 2.6 s snaps to output 3, the start of source word 8.
+    fireEvent.pointerMove(lanes(), { clientX: 260 });
+    expect(screen.getByTestId('razor-line').getAttribute('data-ok')).toBe('true');
+    fireEvent.pointerDown(lanes(), { clientX: 260, button: 0 });
+    expect(props.onSplit).toHaveBeenCalledWith(8);
+    expect(props.onSeek).not.toHaveBeenCalled();
+  });
+
+  it('razor: refuses an existing piece start', () => {
+    const props = setup({ tool: 'razor' });
+    // Output 0.1 snaps to output 0: word 5, which is already the split at 5.
+    fireEvent.pointerMove(lanes(), { clientX: 10 });
+    expect(screen.getByTestId('razor-line').getAttribute('data-ok')).toBe('false');
+    fireEvent.pointerDown(lanes(), { clientX: 10, button: 0 });
+    expect(props.onSplit).not.toHaveBeenCalled();
+  });
+
+  it('razor: a press on a clip splits instead of dragging it', () => {
+    const props = setup({ tool: 'razor' });
+    const first = screen.getByRole('button', { name: 'Clip 1: w5 w6 w7 w8…' });
+    fireEvent.pointerMove(lanes(), { clientX: 260 });
+    fireEvent.pointerDown(first, { clientX: 260, button: 0 });
+    expect(props.onSplit).toHaveBeenCalledWith(8);
+    expect(props.onSelectClip).not.toHaveBeenCalled();
+  });
+
+  it('range: cuts the dragged stretch, snapped to word starts, in one call', () => {
+    const props = setup({ tool: 'range' });
+    fireEvent.pointerDown(lanes(), { clientX: 110, button: 0 });
+    fireEvent.pointerMove(lanes(), { clientX: 390 });
+    expect(screen.getByTestId('range-band')).toBeTruthy();
+    fireEvent.pointerUp(lanes(), { clientX: 390 });
+    // Output [1, 4) is source [6, 9).
+    expect(props.onCut).toHaveBeenCalledTimes(1);
+    expect(props.onCut).toHaveBeenCalledWith([{ start: 6, end: 9 }]);
+  });
+
+  it('shows no razor line with the Select tool', () => {
+    setup();
+    fireEvent.pointerMove(lanes(), { clientX: 260 });
+    expect(screen.queryByTestId('razor-line')).toBeNull();
   });
 });

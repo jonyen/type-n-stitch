@@ -1,3 +1,5 @@
+import { isTypingTarget } from './tools';
+
 /**
  * True when the editor's global keyboard shortcuts (Delete, ⌘Z, Space, Escape,
  * arrows) should be ignored for this keydown: a form control or a Radix
@@ -9,8 +11,9 @@ export function shouldIgnoreGlobalKey(target: Element | null, defaultPrevented: 
   if (defaultPrevented) return true;
   if (!target) return false;
   return (
+    isTypingTarget(target) ||
     target.closest(
-      'input, textarea, select, [contenteditable], [role="menu"], [role="menubar"], [role="listbox"], [data-radix-popper-content-wrapper]',
+      '[role="menu"], [role="menubar"], [role="listbox"], [data-radix-popper-content-wrapper]',
     ) !== null
   );
 }

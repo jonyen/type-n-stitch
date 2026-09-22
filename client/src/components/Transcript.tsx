@@ -26,6 +26,7 @@ import {
   turnContains,
   type Token,
 } from '../tokens';
+import type { Tool } from '../tools';
 import type { Asset, Edit, OverdubEdit, Range, Transition, Word } from '../types';
 
 interface Props {
@@ -68,6 +69,10 @@ interface Props {
   assets: Asset[];
   onBrollClick: (start: number) => void;
   onAudioClick: (start: number) => void;
+  /** The active timeline tool; the transcript's cursor follows it. */
+  tool: Tool;
+  /** Fired on mouseup after a press that started on a word (the end of a drag or a click). */
+  onWordDragEnd?: () => void;
 }
 
 export function Transcript({
@@ -97,6 +102,8 @@ export function Transcript({
   assets,
   onBrollClick,
   onAudioClick,
+  tool,
+  onWordDragEnd,
 }: Props) {
   const inSelection = (i: number) => selected !== null && i >= selected[0] && i <= selected[1];
 
@@ -110,15 +117,24 @@ export function Transcript({
   // Mouse-down on a word starts a drag; every word the pointer enters while
   // the button is held extends the selection, like selecting text.
   const dragging = useRef(false);
+  const dragEnd = useRef(onWordDragEnd);
   useEffect(() => {
-    const stop = () => {
+    dragEnd.current = onWordDragEnd;
+  }, [onWordDragEnd]);
+  useEffect(() => {
+    const end = () => {
+      if (dragging.current) dragEnd.current?.();
       dragging.current = false;
     };
-    window.addEventListener('mouseup', stop);
-    window.addEventListener('blur', stop);
+    // Losing focus mid-drag abandons it rather than completing it.
+    const cancel = () => {
+      dragging.current = false;
+    };
+    window.addEventListener('mouseup', end);
+    window.addEventListener('blur', cancel);
     return () => {
-      window.removeEventListener('mouseup', stop);
-      window.removeEventListener('blur', stop);
+      window.removeEventListener('mouseup', end);
+      window.removeEventListener('blur', cancel);
     };
   }, []);
 
@@ -352,7 +368,7 @@ export function Transcript({
   const clips = clipRuns(words, tokens, ordered);
   const isSplit = (start: number) => splits.some((s) => Math.abs(s - start) < EPS);
   return (
-    <div ref={root} className="transcript" aria-label="Transcript">
+    <div ref={root} className="transcript" data-tool={tool} aria-label="Transcript">
       {clips.map((clip, k) => (
         <section key={`clip-${clip.piece.start}`} className="clip" data-start={clip.piece.start}>
           {clips.length > 1 &&

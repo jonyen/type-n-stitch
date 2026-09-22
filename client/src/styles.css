@@ -308,6 +308,14 @@ button.ghost:hover {
   gap: 18px;
 }
 
+.transcript[data-tool='razor'] .token {
+  cursor: crosshair;
+}
+
+.transcript[data-tool='range'] .token {
+  cursor: col-resize;
+}
+
 .speech {
   margin: 0;
 }

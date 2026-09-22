@@ -29,6 +29,7 @@ import { Projects } from './components/Projects';
 import { SelectionToolbar } from './components/SelectionToolbar';
 import { Timeline, type OverlayRef } from './components/Timeline';
 import { TitleDialog, type TitleFields } from './components/TitleDialog';
+import { ToolToolbar } from './components/ToolToolbar';
 import { TopBar, type ExportState } from './components/TopBar';
 import { Transcript } from './components/Transcript';
 import { cx } from './cx';
@@ -44,7 +45,8 @@ import { useSession } from './session';
 import styles from './App.module.css';
 import ui from './styles/ui.module.css';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
-import { timelineSegments } from './timeline';
+import { canSplitAt, timelineSegments } from './timeline';
+import type { Tool } from './tools';
 import type {
   Asset,
   AudioEdit,
@@ -91,6 +93,12 @@ export function App() {
   const [selectedClip, setSelectedClip] = useState<number | null>(null);
   // A selected B-roll or music bar. Exclusive with every other selection.
   const [selectedOverlay, setSelectedOverlay] = useState<OverlayRef | null>(null);
+  // The timeline's mouse tool, also used by the transcript. Persists until changed.
+  const [tool, setTool] = useState<Tool>('select');
+  // Viewers stay on Select.
+  useEffect(() => {
+    if (!canEdit) setTool('select');
+  }, [canEdit]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle' });
   const [twoWordFillers, setTwoWordFillers] = useState(false);
@@ -338,6 +346,7 @@ export function App() {
     setCaptionRange(null);
     setBrollRange(null);
     setAudioDialog(null);
+    setTool('select');
   }, []);
 
   // Opening a project pushes a history entry, so the browser's Back button
@@ -426,15 +435,25 @@ export function App() {
 
   const onWordClick = useCallback(
     (index: number, extend: boolean) => {
+      const word = editor.words[index];
+      if (tool === 'razor') {
+        if (word && canEdit && canSplitAt(word.start, editor.edits, editor.splits, editor.duration))
+          edit({ type: 'split', at: word.start });
+        return;
+      }
       setSelectedTitle(null);
       setSelectedClip(null);
       setSelectedOverlay(null);
       dispatch({ type: 'select', index, extend });
-      const word = editor.words[index];
       if (word && !extend) playback.seek(word.start);
     },
-    [editor.words, playback],
+    [tool, canEdit, editor.words, editor.edits, editor.splits, editor.duration, edit, playback],
   );
+
+  // The Range tool cuts the dragged words on release.
+  const onWordDragEnd = useCallback(() => {
+    if (tool === 'range') edit({ type: 'deleteSelection' });
+  }, [tool, edit]);
 
   const onWordDrag = useCallback((index: number) => {
     dispatch({ type: 'select', index, extend: true });
@@ -822,6 +841,8 @@ export function App() {
               assets={assets}
               onBrollClick={(start) => edit({ type: 'removeBroll', start })}
               onAudioClick={openAudio}
+              tool={tool}
+              onWordDragEnd={onWordDragEnd}
             />
             <SelectionToolbar
               anchorIndex={selected?.[0] ?? null}
@@ -833,7 +854,8 @@ export function App() {
                   selectedTitle !== null ||
                   hasClipSelection ||
                   selectedOverlay !== null) &&
-                canEdit
+                canEdit &&
+                tool === 'select'
               }
               onDelete={deleteSelected}
               onOverdub={() => setOverdubOpen(true)}
@@ -846,6 +868,21 @@ export function App() {
             />
           </section>
           <section className={styles.dock} aria-label="Timeline">
+            <ToolToolbar
+              tool={tool}
+              onChange={setTool}
+              readOnly={!canEdit}
+              shortcuts={
+                !(
+                  overdubOpen ||
+                  titleDialog ||
+                  captionRange ||
+                  agentDialogOpen ||
+                  brollRange ||
+                  audioDialog
+                )
+              }
+            />
             <Timeline
               words={editor.words}
               edits={editor.edits}
@@ -863,6 +900,16 @@ export function App() {
               onMoveClip={(piece, before) => edit({ type: 'moveClip', piece, before })}
               onSelectOverlay={onSelectOverlay}
               onOpenAudio={openAudio}
+              tool={tool}
+              duration={editor.duration}
+              splits={editor.splits}
+              onSplit={(at) => edit({ type: 'split', at })}
+              onCut={(ranges) =>
+                edit({
+                  type: 'applyCuts',
+                  cuts: ranges.map((r) => ({ kind: 'cut' as const, ...r })),
+                })
+              }
             />
           </section>
         </main>

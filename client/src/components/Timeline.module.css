@@ -158,3 +158,47 @@
     display: none;
   }
 }
+
+.lanes[data-tool='razor'] {
+  cursor: crosshair;
+}
+
+.lanes[data-tool='razor'][data-illegal='true'] {
+  cursor: not-allowed;
+}
+
+.lanes[data-tool='range'] {
+  cursor: col-resize;
+}
+
+.lanes[data-tool='razor'] .clip,
+.lanes[data-tool='razor'] .bar,
+.lanes[data-tool='range'] .clip,
+.lanes[data-tool='range'] .bar {
+  cursor: inherit;
+}
+
+.razor {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 0;
+  border-left: 2px dashed var(--cut);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.razor.illegal {
+  border-left-color: var(--faint);
+}
+
+.band {
+  position: absolute;
+  top: 18px;
+  bottom: 0;
+  background: var(--cut-soft);
+  border-left: 1px solid var(--cut);
+  border-right: 1px solid var(--cut);
+  pointer-events: none;
+  z-index: 4;
+}

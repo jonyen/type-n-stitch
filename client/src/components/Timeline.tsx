@@ -11,11 +11,15 @@ import {
   outputToSource,
   overlaySpans,
   pxToOutput,
+  rangeCuts,
+  razorAt,
   rulerTicks,
+  snappedBand,
   sourceToOutput,
   timelineLength,
   type Segment,
 } from '../timeline';
+import type { Tool } from '../tools';
 import type { Asset, AudioEdit, BrollEdit, Edit, Range, Word } from '../types';
 import { ScrubPreview } from './ScrubPreview';
 import styles from './Timeline.module.css';
@@ -43,6 +47,14 @@ export interface TimelineProps {
   onMoveClip: (piece: number, before: number | null) => void;
   onSelectOverlay: (ref: OverlayRef | null) => void;
   onOpenAudio: (start: number) => void;
+  tool: Tool;
+  /** Media length in source seconds, for the split rules. */
+  duration: number;
+  splits: number[];
+  /** Split at this source time. */
+  onSplit: (at: number) => void;
+  /** Cut these source ranges, as one operation. */
+  onCut: (ranges: Range[]) => void;
 }
 
 interface Drag {
@@ -63,6 +75,8 @@ export function Timeline(props: TimelineProps) {
   const scrubbing = useRef(false);
   const [hover, setHover] = useState<{ t: number; x: number; width: number } | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
+  const [razor, setRazor] = useState<{ x: number; ok: boolean; at: number } | null>(null);
+  const [band, setBand] = useState<{ from: number; range: Range | null } | null>(null);
 
   const pct = (t: number) =>
     `${length > 0 ? (Math.min(Math.max(t, 0), length) / length) * 100 : 0}%`;
@@ -74,24 +88,49 @@ export function Timeline(props: TimelineProps) {
     return { t: pxToOutput(clientX, r.left, r.width, length), x: clientX - r.left, width: r.width };
   };
 
-  // Background: click to seek, drag to scrub.
+  const razorHit = (t: number) => {
+    const hit = razorAt(t, words, segments, edits, props.splits, props.duration);
+    return hit.ok ? { x: hit.x, ok: true, at: hit.at } : { x: hit.x, ok: false, at: NaN };
+  };
+
+  // Background. Select: click to seek, drag to scrub. Razor: click to split.
+  // Range: drag a band to cut.
   const onLanesDown = (e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const p = pointerAt(e.clientX);
     if (!p) return;
+    if (props.tool === 'razor') {
+      const hit = razorHit(p.t);
+      if (hit.ok && !readOnly) props.onSplit(hit.at);
+      return;
+    }
     e.currentTarget.setPointerCapture(e.pointerId);
+    if (props.tool === 'range') {
+      if (!readOnly) setBand({ from: p.t, range: null });
+      return;
+    }
     scrubbing.current = true;
     props.onSelectOverlay(null);
     props.onSeek(outputToSource(p.t, segments));
   };
+
   const onLanesMove = (e: PointerEvent<HTMLDivElement>) => {
     const p = pointerAt(e.clientX);
     if (!p) return;
     setHover(p);
+    if (props.tool === 'razor') setRazor(razorHit(p.t));
+    if (band) setBand({ from: band.from, range: snappedBand(band.from, p.t, words, segments) });
     if (scrubbing.current) props.onSeek(outputToSource(p.t, segments));
   };
-  const onLanesUp = () => {
+
+  const onLanesUp = (e: PointerEvent<HTMLDivElement>) => {
     scrubbing.current = false;
+    if (!band) return;
+    const p = pointerAt(e.clientX);
+    setBand(null);
+    if (!p) return;
+    const cuts = rangeCuts(band.from, p.t, words, segments);
+    if (cuts.length > 0) props.onCut(cuts);
   };
 
   // Clips: press and release to select, drag to reorder.
@@ -101,6 +140,8 @@ export function Timeline(props: TimelineProps) {
       return r.left + r.width / 2;
     });
   const onClipDown = (k: number, e: PointerEvent<HTMLButtonElement>) => {
+    // Razor and Range presses fall through to the lanes.
+    if (props.tool !== 'select') return;
     e.stopPropagation();
     if (e.button !== 0) return;
     const piece = ordered[k];
@@ -151,8 +192,12 @@ export function Timeline(props: TimelineProps) {
           aria-label={label}
           aria-pressed={selected}
           title={kind === 'audio' ? `${label} · double-click to edit` : label}
-          onPointerDown={(ev) => ev.stopPropagation()}
-          onClick={() => props.onSelectOverlay({ kind, start: e.start })}
+          onPointerDown={(ev) => {
+            if (props.tool === 'select') ev.stopPropagation();
+          }}
+          onClick={() => {
+            if (props.tool === 'select') props.onSelectOverlay({ kind, start: e.start });
+          }}
           onDoubleClick={kind === 'audio' ? () => props.onOpenAudio(e.start) : undefined}
         >
           <span>{nameOf(e.media)}</span>
@@ -172,12 +217,15 @@ export function Timeline(props: TimelineProps) {
         ref={lanes}
         className={styles.lanes}
         data-testid="timeline-lanes"
+        data-tool={props.tool}
+        data-illegal={props.tool === 'razor' && razor !== null && !razor.ok}
         onPointerDown={onLanesDown}
         onPointerMove={onLanesMove}
         onPointerUp={onLanesUp}
         onPointerCancel={onLanesUp}
         onPointerLeave={() => {
           if (!scrubbing.current) setHover(null);
+          setRazor(null);
         }}
       >
         <div className={styles.ruler}>
@@ -245,6 +293,21 @@ export function Timeline(props: TimelineProps) {
             title={p.user.displayName}
           />
         ))}
+        {props.tool === 'razor' && razor && (
+          <span
+            data-testid="razor-line"
+            data-ok={razor.ok}
+            className={cx(styles.razor, !razor.ok && styles.illegal)}
+            style={{ left: pct(razor.x) }}
+          />
+        )}
+        {band?.range && (
+          <span
+            data-testid="range-band"
+            className={styles.band}
+            style={{ left: pct(band.range.start), width: pct(band.range.end - band.range.start) }}
+          />
+        )}
         <span
           className={styles.playhead}
           style={{ left: pct(sourceToOutput(currentTime, segments)) }}
