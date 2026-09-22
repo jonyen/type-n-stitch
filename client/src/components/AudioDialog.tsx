@@ -80,6 +80,11 @@ export function AudioDialog({
             onChange={(e) => setGain(e.target.value)}
           />
         </label>
+        {validGain && db > 0 && (
+          <p className="muted">
+            Boost above 0 dB is applied on export; the preview cannot play louder than the source.
+          </p>
+        )}
         <label className="toggle">
           <input type="checkbox" checked={duck} onChange={(e) => setDuck(e.target.checked)} /> Duck
           under speech

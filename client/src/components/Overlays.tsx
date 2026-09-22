@@ -112,6 +112,9 @@ function AudioBed({
     if (!a) return;
     const want = assetTime(edit, t);
     if (Math.abs(a.currentTime - want) > 0.3) a.currentTime = want;
+    // `HTMLMediaElement.volume` tops out at 1, so a positive gain cannot be
+    // previewed: the clamp keeps the value legal. The export honours the full
+    // −30..+12 dB range, and `AudioDialog` says so when the gain is a boost.
     a.volume = Math.min(1, gainToLinear(edit.gain) * (ducked ? DUCK : 1));
     if (playing && a.paused)
       void a.play().catch(() => {

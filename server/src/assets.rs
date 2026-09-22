@@ -22,6 +22,11 @@ use crate::{media, AppState};
 
 const ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "m4a", "mp4", "mov", "aac", "ogg", "webm"];
 
+/// How many B-roll/music files one project may hold. Without it any editor can
+/// fill the disk under `<media dir>/assets/`, since the only other limit is the
+/// global request body cap.
+const MAX_ASSETS_PER_PROJECT: i64 = 64;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
@@ -195,6 +200,15 @@ async fn store(
             ALLOWED_EXTENSIONS.join(", ")
         )));
     }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_assets WHERE project_id = ?")
+        .bind(&project.id)
+        .fetch_one(&state.db)
+        .await?;
+    if count >= MAX_ASSETS_PER_PROJECT {
+        return Err(AppError::bad_request(format!(
+            "this project already has {MAX_ASSETS_PER_PROJECT} assets, the per-project limit; delete one first"
+        )));
+    }
     let id = Uuid::new_v4().to_string();
     let dir = assets_dir(state, project);
     tokio::fs::create_dir_all(&dir)
@@ -241,6 +255,8 @@ async fn store(
     .await
     {
         let _ = tokio::fs::remove_file(&path).await;
+        // The poster was written before the row, so it needs clearing too.
+        let _ = tokio::fs::remove_file(dir.join(format!("{id}.jpg"))).await;
         return Err(e.into());
     }
     Ok(asset_from(
@@ -484,6 +500,42 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         let (status, body, _) = call(app(&state), req(&ada)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    #[tokio::test]
+    async fn upload_past_the_per_project_cap_is_400_naming_the_limit() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        for _ in 0..MAX_ASSETS_PER_PROJECT {
+            seed_asset(&state, &project, MediaKind::Audio, 1.0).await;
+        }
+        // A well-formed .mp3 upload: only the cap can turn this one away.
+        let body = "--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.mp3\"\r\n\r\nhi\r\n--x--\r\n";
+        let req = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/projects/{}/assets", project.id))
+            .header(axum::http::header::COOKIE, &ada)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=x",
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let (status, body, _) = call(app(&state), req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains(&MAX_ASSETS_PER_PROJECT.to_string()),
+            "{body}"
+        );
+        // Rejected before anything is written, so the count is unchanged.
+        assert_eq!(
+            list_for(&state.db, &project).await.unwrap().len(),
+            MAX_ASSETS_PER_PROJECT as usize
+        );
     }
 
     /// A file with an allowed extension but unreadable content fails at the

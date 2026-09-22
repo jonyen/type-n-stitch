@@ -720,7 +720,12 @@ impl McpSession {
             "id": project.id,
             "title": project.title,
             "duration": meta.duration,
-            "outputDuration": engine::output_duration(&engine::timeline(meta.duration, &doc.edits)),
+            "outputDuration": engine::output_duration(&engine::timeline_with(
+                meta.duration,
+                &doc.edits,
+                &doc.splits,
+                &doc.order,
+            )),
             "cuts": doc.edits.iter().filter(|e| matches!(e, engine::Edit::Cut { .. })).count(),
             "overdubs": doc.edits.iter().filter(|e| matches!(e, engine::Edit::Overdub { .. })).count(),
             "speakerNames": doc.speaker_names,
@@ -1409,7 +1414,12 @@ fn report(open: &Open, doc: &DocState, touched: Option<(usize, usize)>) -> Value
     };
     json!({
         "headSeq": doc.head_seq,
-        "outputDuration": engine::output_duration(&engine::timeline(open.duration, &doc.edits)),
+        "outputDuration": engine::output_duration(&engine::timeline_with(
+            open.duration,
+            &doc.edits,
+            &doc.splits,
+            &doc.order,
+        )),
         "cuts": doc.edits.iter().filter(|e| matches!(e, Edit::Cut { .. })).count(),
         "overdubs": doc.edits.iter().filter(|e| matches!(e, Edit::Overdub { .. })).count(),
         "undoable": doc.undoable.is_some(),

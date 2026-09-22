@@ -36,7 +36,7 @@ import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
-import { audios } from './overlays';
+import { audios, brolls } from './overlays';
 import { type PresenceState } from './realtime';
 import { useSession } from './session';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
@@ -228,10 +228,28 @@ export function App() {
       .then(setAssets)
       .catch(() => setAssets([]));
   }, [projectId]);
+  // Media ids we have already gone looking for and not found, so a B-roll or
+  // music edit naming an id the server does not have cannot loop the fetch.
+  const soughtAssets = useRef(new Set<string>());
   useEffect(() => {
     setAssets([]);
+    soughtAssets.current.clear();
     refreshAssets();
   }, [refreshAssets]);
+  // A peer can upload a clip and use it before we have ever listed the
+  // project's assets, which would draw the missing-file placeholder until the
+  // next reload. Any applied fold that names an id we do not hold refetches
+  // the list once; ids still unknown after that are remembered, so the set of
+  // unknown ids has to actually change before we ask again.
+  useEffect(() => {
+    const have = new Set(assets.map((a) => a.id));
+    const unknown = [...brolls(editor.edits), ...audios(editor.edits)]
+      .map((e) => e.media)
+      .filter((id) => !have.has(id) && !soughtAssets.current.has(id));
+    if (unknown.length === 0) return;
+    for (const id of unknown) soughtAssets.current.add(id);
+    refreshAssets();
+  }, [editor.edits, assets, refreshAssets]);
   const onUploadAsset = useCallback(
     async (file: File) => {
       if (!projectId) throw new Error('no project');
