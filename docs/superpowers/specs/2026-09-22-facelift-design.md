@@ -44,7 +44,8 @@ repo already shipped two dialogs that forgot to take focus).
 
 One row. Left to right: logo, project name and source filename; undo and
 redo; **Clean up ▾** (remove fillers, tighten pauses, the "you know / I mean"
-toggle); **Insert ▾** (title card, caption, B-roll, music); the project
+toggle); **Insert ▾** (title card, caption, B-roll, music, and "Split here" — the razor is
+pointer-only, so splitting also needs a keyboard path); the project
 transition setting; then, right-aligned, collaborator avatars with the
 connection dot, **Agent**, and **Export** — the only filled accent button. Export progress and the finished download appear in a popover
 anchored to Export, not as text in the page.
@@ -86,7 +87,8 @@ and focus return are handled once.
 
 Dark, light, or system, in the account menu. The choice is stored in
 `localStorage` (wrapped in try/catch; the app renders correctly without it).
-With no stored choice the system preference decides.
+With no stored choice the app is dark. "System" follows the operating
+system's light or dark setting.
 
 ## Tools and the timeline
 
@@ -116,8 +118,9 @@ export function outputToSource(t: number, segments: Segment[]): number;
 export function sourceToOutput(t: number, segments: Segment[]): number;
 ```
 
-The existing `pieces()` is reimplemented on top of `timelineSegments` so the
-preview has one layout, not two. These functions are tested with the engine's
+`timelineSegments` is built on the existing `pieces()` (which already mirrors
+the engine's piece layout) by adding output positions, so the preview has one
+layout, not two. These functions are tested with the engine's
 own `editlist.rs` cases (reorder, a title at a clip boundary, overdub holds,
 cut then title, holds owned by no piece) so the timeline cannot disagree with
 the export.
@@ -172,7 +175,7 @@ so collaboration, undo and the agent tools keep working unchanged.
 `client/src/styles/tokens.css` defines every colour, space, radius, shadow
 and type size as a custom property. Dark values are the default on `:root`;
 light values apply under `:root[data-theme="light"]`, and under
-`@media (prefers-color-scheme: light)` when no `data-theme` is set.
+`@media (prefers-color-scheme: light)` when `data-theme="system"`.
 
 | Token                            | Dark                   | Light                 |
 | -------------------------------- | ---------------------- | --------------------- |
@@ -260,11 +263,12 @@ Each step leaves the app usable.
 
 1. Tokens, fonts, global CSS, theme toggle, CSS Modules conventions. The app
    turns dark.
-2. Top bar with Radix menus and the export popover.
+2. Top bar with Radix menus and the export popover, plus the floating
+   selection toolbar, so the actions the old toolbar held never disappear.
 3. Timeline: segments mirror, ruler, lanes, playhead; remove the clip strip
    and scrubber marks.
 4. Tool toolbar and the three tools, on the timeline and in the transcript.
-5. Transcript panel and the floating selection toolbar.
+5. Transcript panel restyle.
 6. Every dialog on the shared Radix frame.
 7. Home and login.
 8. Delete `styles.css`; full verification pass; README screenshot.
