@@ -1001,6 +1001,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undoing_a_source_is_refused_while_anyone_has_edited_after_it() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let bob = sign_up(&state, "bob@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        crate::test_util::add_member(&state, &ada, &project.id, "bob@example.com", "editor").await;
+        let owner = me(&state, &ada).await;
+        let second = seed_source(&state, 4.0, &["d"]).await;
+        add_source(&state, &project, &owner, &second).await.unwrap(); // seq 1, 10..14
+
+        // Bob puts a title inside Ada's new video.
+        let title = json!({ "opId": "t", "kind": "addtitle", "at": 12.0, "duration": 2.0,
+                            "text": "Hi", "subtitle": null, "style": "dark" });
+        let (status, body) = post_ops(&state, &bob, &project.id, vec![title]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let undo = json!({ "opId": "u", "kind": "undo", "targetSeq": 1 });
+        let (status, body) = post_ops(&state, &ada, &project.id, vec![undo]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("changed since"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
     async fn layers_check_track_media_length_sound_and_their_target() {
         let (state, _d) = state().await;
         let ada = sign_up(&state, "ada@example.com").await;

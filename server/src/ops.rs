@@ -342,6 +342,23 @@ async fn validate(
                         "remove the videos added after this one first",
                     ));
                 }
+                // Any later live edit, by anyone, may sit inside this video
+                // (a title, a cut, a layer); undoing it would strand them.
+                let (edited,): (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM edit_ops WHERE project_id = ? AND seq > ?
+                     AND undone_by IS NULL
+                     AND json_extract(op, '$.kind') NOT IN ('undo', 'redo')",
+                )
+                .bind(&project.id)
+                .bind(target_seq)
+                .fetch_one(&mut **tx)
+                .await?;
+                if edited > 0 {
+                    return Err(AppError::bad_request_at(
+                        index,
+                        "the project has changed since this video was added; undo those changes first",
+                    ));
+                }
             }
             Ok(())
         }

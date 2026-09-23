@@ -176,6 +176,15 @@ describe('titles and joins', () => {
     expect(p[0]?.source).toEqual({ start: 0, end: 5 });
     expect(p[3]?.source).toEqual({ start: 6, end: 10 });
   });
+  it('pieces drop holds past the stitched end, like the engine', () => {
+    const p = pieces(10, [
+      title(10, 1),
+      title(12, 1),
+      { kind: 'overdub', start: 11, end: 12, text: 'x', audioUrl: '/a', audioDuration: 2 },
+    ]);
+    expect(p.map((x) => x.kind)).toEqual(['source', 'title']);
+    expect(p[1]?.index).toBe(0);
+  });
   it('joins: override, then project default, always dip around titles, none around overdubs', () => {
     const edits: Edit[] = [
       { kind: 'cut', start: 2, end: 3, transition: 'none' },

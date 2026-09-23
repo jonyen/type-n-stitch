@@ -287,12 +287,14 @@ pub fn timeline_with(duration: f64, edits: &[Edit], splits: &[f64], order: &[f64
         .filter(|(_, e)| matches!(e, Edit::Overdub { .. }))
         .map(|(i, e)| (i, e.range()))
         .filter(|(_, r)| !r.is_empty())
+        // A hold past the stitched end (say, a video undone under it) plays nothing.
+        .filter(|(_, r)| r.start < duration - EPS)
         .collect();
     let titles: Vec<(usize, f64)> = edits
         .iter()
         .enumerate()
         .filter_map(|(i, e)| match e {
-            Edit::Title { at, .. } => Some((i, *at)),
+            Edit::Title { at, .. } if *at <= duration + EPS => Some((i, *at)),
             _ => None,
         })
         .collect();
@@ -858,6 +860,20 @@ mod tests {
             ]
         );
         assert_eq!(tl[2].output, r(6.0, 8.0));
+    }
+
+    #[test]
+    fn holds_past_the_stitched_end_are_dropped() {
+        // An undone source can leave a title or an overdub beyond the end.
+        let tl = timeline(
+            10.0,
+            &[title(10.0, 1.0), title(12.0, 1.0), overdub(11.0, 12.0, 2.0)],
+        );
+        assert_eq!(
+            kinds(&tl),
+            vec![&SegmentKind::Source, &SegmentKind::Title { index: 0 }]
+        );
+        assert_eq!(output_duration(&tl), 11.0);
     }
 
     #[test]

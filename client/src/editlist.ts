@@ -206,11 +206,14 @@ export function pieces(
   const dubs = edits
     .map((e, index) => ({ e, index }))
     .filter((x): x is { e: OverdubEdit; index: number } => x.e.kind === 'overdub')
-    .filter(({ e }) => e.end > e.start);
+    .filter(({ e }) => e.end > e.start)
+    // A hold past the stitched end (say, a video undone under it) plays nothing.
+    .filter(({ e }) => e.start < duration - EPS);
   const holes = normalizeCuts(dubs.map(({ e }) => e));
   const cards = edits
     .map((e, index) => ({ e, index }))
-    .filter((x): x is { e: TitleEdit; index: number } => x.e.kind === 'title');
+    .filter((x): x is { e: TitleEdit; index: number } => x.e.kind === 'title')
+    .filter(({ e }) => e.at <= duration + EPS);
 
   const owned: Piece[][] = Array.from({ length: ordered.length + 1 }, () => []);
   for (const { e, index } of dubs) {
