@@ -8,8 +8,8 @@ use std::process::Command;
 
 use engine::text;
 use engine::{
-    build_ffmpeg_args, oriented, CaptionPos, Edit, ExportOptions, MediaKind, OutputFormat,
-    TitleStyle, Transition, VideoInfo,
+    build_ffmpeg_args, oriented, CaptionPos, Edit, ExportOptions, MediaKind, OutputFormat, Source,
+    SourceInput, TitleStyle, Transition, VideoInfo,
 };
 
 fn sample() -> Option<PathBuf> {
@@ -127,15 +127,22 @@ fn renders_cuts_and_an_overdub_to_the_expected_length() {
 
     let output = dir.join("out.mp4");
     let args = build_ffmpeg_args(
-        &input,
+        &[SourceInput {
+            source: Source {
+                media: "m0".into(),
+                offset: 0.0,
+                duration: source_duration,
+            },
+            path: input.clone(),
+            kind: MediaKind::Video,
+            video: None,
+        }],
         &edits,
         &ExportOptions {
-            duration: source_duration,
             kind: MediaKind::Video,
             format: OutputFormat::Mp4,
             output: &output,
             overdub_audio: &overdub_audio,
-            video: None,
             title_images: &HashMap::new(),
             caption_images: &HashMap::new(),
             transition: Transition::None,
@@ -171,15 +178,22 @@ fn renders_audio_only_export_from_a_video_source() {
     let output = dir.join("out.mp3");
     let none = HashMap::new();
     let args = build_ffmpeg_args(
-        &input,
+        &[SourceInput {
+            source: Source {
+                media: "m0".into(),
+                offset: 0.0,
+                duration: source_duration,
+            },
+            path: input.clone(),
+            kind: MediaKind::Video,
+            video: None,
+        }],
         &edits,
         &ExportOptions {
-            duration: source_duration,
             kind: MediaKind::Video,
             format: OutputFormat::Mp3,
             output: &output,
             overdub_audio: &none,
-            video: None,
             title_images: &HashMap::new(),
             caption_images: &HashMap::new(),
             transition: Transition::None,
@@ -293,15 +307,22 @@ fn renders_a_title_card_a_caption_and_a_dip_from_rasterised_pngs() {
     let output = dir.path().join("out.mp4");
     let none = HashMap::new();
     let args = build_ffmpeg_args(
-        &clip,
+        &[SourceInput {
+            source: Source {
+                media: "m0".into(),
+                offset: 0.0,
+                duration: 3.0,
+            },
+            path: clip.clone(),
+            kind: MediaKind::Video,
+            video: Some(video),
+        }],
         &edits,
         &ExportOptions {
-            duration: 3.0,
             kind: MediaKind::Video,
             format: OutputFormat::Mp4,
             output: &output,
             overdub_audio: &none,
-            video: Some(video),
             title_images: &title_images,
             caption_images: &caption_images,
             transition: Transition::Dip,
@@ -395,15 +416,22 @@ fn render_title_at(clip: &Path, dir: &Path, video: VideoInfo, tag: &str) -> (boo
     let output = dir.join(format!("out-{tag}.mp4"));
     let none = HashMap::new();
     let args = build_ffmpeg_args(
-        clip,
+        &[SourceInput {
+            source: Source {
+                media: "m0".into(),
+                offset: 0.0,
+                duration: 3.0,
+            },
+            path: clip.to_path_buf(),
+            kind: MediaKind::Video,
+            video: Some(video),
+        }],
         &edits,
         &ExportOptions {
-            duration: 3.0,
             kind: MediaKind::Video,
             format: OutputFormat::Mp4,
             output: &output,
             overdub_audio: &none,
-            video: Some(video),
             title_images: &title_images,
             caption_images: &HashMap::new(),
             transition: Transition::None,

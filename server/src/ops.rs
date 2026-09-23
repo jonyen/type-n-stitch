@@ -1841,4 +1841,64 @@ mod tests {
             "nothing stored"
         );
     }
+
+    #[tokio::test]
+    async fn export_sources_lists_every_file_with_stitched_words() {
+        let (state, _d, _ada, _bob, project) = setup(None).await;
+        let project = project_of(&state, &project).await;
+        let second = seed_media(&state, 5.0).await;
+        let words = vec![engine::Word {
+            id: "w0".into(),
+            text: "hi".into(),
+            start: 1.0,
+            end: 1.5,
+        }];
+        tokio::fs::write(
+            state
+                .config
+                .data_dir
+                .join(&second)
+                .join(crate::routes::WORDS_CACHE),
+            serde_json::to_vec(&words).unwrap(),
+        )
+        .await
+        .unwrap();
+        let doc_sources = [engine::Source {
+            media: second.clone(),
+            offset: 10.0,
+            duration: 5.0,
+        }];
+
+        let (inputs, stitched) = crate::routes::export_sources(&state, &project, &doc_sources)
+            .await
+            .unwrap();
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(
+            inputs[0].source,
+            engine::Source {
+                media: project.media_id.clone(),
+                offset: 0.0,
+                duration: 10.0
+            }
+        );
+        assert_eq!(
+            inputs[0].path,
+            state
+                .config
+                .data_dir
+                .join(&project.media_id)
+                .join("source.mp4")
+        );
+        assert_eq!(inputs[1].source, doc_sources[0]);
+        assert_eq!(
+            inputs[1].path,
+            state.config.data_dir.join(&second).join("source.mp4")
+        );
+        assert_eq!(inputs[1].kind, engine::MediaKind::Video);
+        // The first file has no transcript: ducking is best-effort, not an error.
+        assert_eq!(stitched.len(), 1);
+        assert_eq!(stitched[0].id, "1:w0");
+        assert_eq!(stitched[0].start, 11.0);
+    }
 }

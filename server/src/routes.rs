@@ -12,10 +12,10 @@ use anyhow::Context;
 use axum::extract::{Multipart, Path as UrlPath, State};
 use axum::Json;
 use engine::{
-    assign_speakers, build_ffmpeg_args, filler_cuts, output_duration, pause_cuts,
-    silence_pause_cuts, text, thumbnail_args, thumbnail_sheet, timeline_with, Edit, ExportError,
-    ExportOptions, MediaKind, OutputFormat, Range, SpeakerTurn, SuggestOptions, ThumbnailSheet,
-    VideoInfo, Word, DEFAULT_VIDEO,
+    assign_speakers, build_ffmpeg_args, canvas, filler_cuts, output_duration, pause_cuts,
+    silence_pause_cuts, sources_kind, stitched_duration, text, thumbnail_args, thumbnail_sheet,
+    timeline_with, Edit, ExportError, ExportOptions, MediaKind, OutputFormat, ProjectDoc, Range,
+    Source, SourceInput, SpeakerTurn, SuggestOptions, ThumbnailSheet, VideoInfo, Word,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -673,27 +673,18 @@ pub async fn export(
         .map(Json)
 }
 
-/// Fold the log, plan the render and start ffmpeg in the background for
-/// `project`, returning a job id to poll. `format` overrides the source
-/// kind's default (`mp4`, `mp3` or `wav`).
-pub async fn start_export(
-    state: &Arc<AppState>,
-    project: &Project,
-    format: Option<&str>,
-) -> AppResult<ExportStarted> {
-    let id = project.media_id.clone();
-    let dir = media_dir(state, &id)?;
-    let mut meta = read_meta(&dir).await?;
+/// A media item's source file and meta. Media probed before frame sizes were
+/// recorded is probed once more and the answer remembered, so later exports
+/// skip the extra ffprobe. A failure is not fatal — the render falls back to
+/// `DEFAULT_VIDEO` — but it is worth saying out loud.
+async fn source_meta(state: &AppState, id: &str) -> AppResult<(PathBuf, Meta)> {
+    let (path, mut meta) = crate::sources::source_file(state, id).await?;
     if meta.kind == MediaKind::Video && meta.video.is_none() {
-        // Media probed before dimensions were recorded: probe once more and
-        // remember, so later exports skip the extra ffprobe. A failure is not
-        // fatal — the render falls back to `DEFAULT_VIDEO` — but it is worth
-        // saying out loud.
-        match media::probe(&dir.join(format!("source.{}", meta.ext))).await {
+        match media::probe(&path).await {
             Ok(probe) => {
                 meta.video = probe.video;
                 let json = serde_json::to_vec_pretty(&meta)?;
-                if let Err(e) = write_json_atomic(&dir.join("meta.json"), &json).await {
+                if let Err(e) = write_json_atomic(&path.with_file_name("meta.json"), &json).await {
                     tracing::warn!(id, "could not record the frame size: {e:#}");
                 }
             }
@@ -703,7 +694,58 @@ pub async fn start_export(
             ),
         }
     }
+    Ok((path, meta))
+}
+
+/// Every main-track file of `project` in stitched order, as the planner wants
+/// them, and the stitched transcript for ducking. The project's own media is
+/// source 0; `doc_sources` (the fold's) follow. A source with no transcript
+/// yet contributes no words: ducking is best-effort.
+pub(crate) async fn export_sources(
+    state: &AppState,
+    project: &Project,
+    doc_sources: &[Source],
+) -> AppResult<(Vec<SourceInput>, Vec<Word>)> {
+    let doc = ProjectDoc {
+        sources: doc_sources.to_vec(),
+        ..ProjectDoc::default()
+    };
+    let placed = crate::sources::timeline(state, project, &doc).await?;
+    let mut inputs = Vec::with_capacity(placed.len());
+    for source in &placed {
+        let (path, meta) = source_meta(state, &source.media).await?;
+        inputs.push(SourceInput {
+            source: source.clone(),
+            path,
+            kind: meta.kind,
+            video: meta.video,
+        });
+    }
+    let words = crate::sources::stitched_words(state, &placed)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(project = project.id, "exporting without ducking: {e:?}");
+            Vec::new()
+        });
+    Ok((inputs, words))
+}
+
+/// Fold the log, plan the render and start ffmpeg in the background for
+/// `project`, returning a job id to poll. `format` overrides the source
+/// kind's default (`mp4`, `mp3` or `wav`).
+pub async fn start_export(
+    state: &Arc<AppState>,
+    project: &Project,
+    format: Option<&str>,
+) -> AppResult<ExportStarted> {
+    let id = project.media_id.clone();
+    // Overdub WAVs and the rendered file live under the project's first media.
+    let dir = media_dir(state, &id)?;
     let (_, doc) = load_doc(state, &project.id).await?;
+    let (sources, words) = export_sources(state, project, &doc.sources).await?;
+    let kind = sources_kind(&sources);
+    let video = canvas(&sources);
+    let duration = stitched_duration(&sources.iter().map(|s| s.source.clone()).collect::<Vec<_>>());
     // A title or caption with nothing but whitespace draws nothing; dropping
     // it here keeps the planner from asking for an image that would be blank.
     // `validate` rejects blank text on the way in, so this only catches
@@ -717,7 +759,7 @@ pub async fn start_export(
         })
         .collect();
     let format = match format {
-        None => OutputFormat::for_kind(meta.kind),
+        None => OutputFormat::for_kind(kind),
         Some("mp4") => OutputFormat::Mp4,
         Some("mp3") => OutputFormat::Mp3,
         Some("wav") => OutputFormat::Wav,
@@ -725,13 +767,11 @@ pub async fn start_export(
     };
     let overdub_audio = overdub_files(&id, &dir, &edits)?;
     let asset_files = crate::assets::asset_files(state, project, &edits).await?;
-    let words = read_words(&dir).await.unwrap_or_default();
     let (output, name) = next_numbered(&dir, "export", format.extension()).await?;
-    let source = dir.join(format!("source.{}", meta.ext));
 
     // An audio-only render draws no picture, so it needs no images at all.
-    let render_video = meta.kind == MediaKind::Video && format == OutputFormat::Mp4;
-    let video = meta.video.unwrap_or(DEFAULT_VIDEO);
+    // Text is rasterised at the canvas, the frame every source is fitted to.
+    let render_video = kind == MediaKind::Video && format == OutputFormat::Mp4;
     let (title_images, caption_images) = if render_video {
         let dir = dir.clone();
         let edits = edits.clone();
@@ -743,15 +783,13 @@ pub async fn start_export(
     };
 
     let args = build_ffmpeg_args(
-        &source,
+        &sources,
         &edits,
         &ExportOptions {
-            duration: meta.duration,
-            kind: meta.kind,
+            kind,
             format,
             output: &output,
             overdub_audio: &overdub_audio,
-            video: meta.video,
             title_images: &title_images,
             caption_images: &caption_images,
             transition: doc.transition,
@@ -769,12 +807,7 @@ pub async fn start_export(
         }
         other => AppError::bad_request(other.to_string()),
     })?;
-    let planned = output_duration(&timeline_with(
-        meta.duration,
-        &edits,
-        &doc.splits,
-        &doc.order,
-    ));
+    let planned = output_duration(&timeline_with(duration, &edits, &doc.splits, &doc.order));
 
     let job_id = Uuid::new_v4().to_string();
     set_job(

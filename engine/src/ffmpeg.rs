@@ -1,9 +1,11 @@
 //! Planning the ffmpeg render for an edit list.
 //!
-//! Every output piece becomes one `trim`/`atrim` chain on the source (or, for
-//! an overdub, a frozen first frame plus the synthesized WAV), and the pieces
-//! are joined with the `concat` filter. Audio is resampled to a common
-//! format first because `concat` refuses mismatched streams.
+//! The main track is one or more source files laid end to end in stitched
+//! time; each is its own input, in order. Every output piece becomes one
+//! `trim`/`atrim` chain on the file that holds it (or, for an overdub, a
+//! frozen first frame plus the synthesized WAV), fitted onto the canvas, and
+//! the pieces are joined with the `concat` filter. Audio is resampled to a
+//! common format first because `concat` refuses mismatched streams.
 //!
 //! Text is not drawn by ffmpeg: the installed builds have no `drawtext`, so
 //! `crate::text` rasterises title cards and caption boxes into PNGs and this
@@ -20,9 +22,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::editlist::{
     audio_windows, broll_windows, caption_windows, joins, timeline_with, Segment, SegmentKind,
-    Window, FADE,
+    Window, EPS, FADE,
 };
-use crate::types::{Edit, MediaKind, Range, Transition, Word};
+use crate::types::{Edit, MediaKind, Range, Source, Transition, Word};
+use crate::{locate, stitched_duration};
 
 /// Container/codec for the rendered file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,16 +87,45 @@ pub fn oriented(video: VideoInfo, rotation: i32) -> VideoInfo {
     }
 }
 
+/// One main-track file as the planner sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceInput {
+    /// Where it sits on the stitched timeline.
+    pub source: Source,
+    /// The local file ffmpeg opens.
+    pub path: PathBuf,
+    pub kind: MediaKind,
+    /// Frame size and rate, when the file has a picture and it was probed.
+    pub video: Option<VideoInfo>,
+}
+
+/// The frame every source is fitted onto: the first file with a picture
+/// (an unprobed one counts as `DEFAULT_VIDEO`), else `DEFAULT_VIDEO`.
+pub fn canvas(sources: &[SourceInput]) -> VideoInfo {
+    sources
+        .iter()
+        .find(|s| s.kind == MediaKind::Video)
+        .and_then(|s| s.video)
+        .unwrap_or(DEFAULT_VIDEO)
+}
+
+/// `Video` when any source has a picture: the project renders to mp4.
+pub fn sources_kind(sources: &[SourceInput]) -> MediaKind {
+    if sources.iter().any(|s| s.kind == MediaKind::Video) {
+        MediaKind::Video
+    } else {
+        MediaKind::Audio
+    }
+}
+
 #[derive(Debug)]
 pub struct ExportOptions<'a> {
-    pub duration: f64,
+    /// `Video` when any source has a picture; see `sources_kind`.
     pub kind: MediaKind,
     pub format: OutputFormat,
     pub output: &'a Path,
     /// Local audio file for each overdub edit's `audio_url`.
     pub overdub_audio: &'a HashMap<String, PathBuf>,
-    /// Frame size and rate of the source picture; titles must match it.
-    pub video: Option<VideoInfo>,
     /// PNG for each `Edit::Title`, by edit index, rendered at the frame size.
     pub title_images: &'a HashMap<usize, PathBuf>,
     /// PNG and its `overlay` placement for each `Edit::Caption`, by edit index.
@@ -128,13 +160,20 @@ pub enum ExportError {
 const AUDIO_NORMALIZE: &str = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
 
 /// Build the full ffmpeg argv (without the program name) that renders `edits`
-/// applied to `input` into `opts.output`.
+/// over the main-track `sources` into `opts.output`. Input `k` is `sources[k]`.
 pub fn build_ffmpeg_args(
-    input: &Path,
+    sources: &[SourceInput],
     edits: &[Edit],
     opts: &ExportOptions,
 ) -> Result<Vec<String>, ExportError> {
-    let segments = timeline_with(opts.duration, edits, opts.splits, opts.order);
+    if sources.is_empty() {
+        return Err(ExportError::NothingToExport);
+    }
+    let placed: Vec<Source> = sources.iter().map(|s| s.source.clone()).collect();
+    let segments = split_at_joins(
+        timeline_with(stitched_duration(&placed), edits, opts.splits, opts.order),
+        &placed,
+    );
     if segments.is_empty() {
         return Err(ExportError::NothingToExport);
     }
@@ -144,17 +183,20 @@ pub fn build_ffmpeg_args(
     }
     let render_video = with_video && opts.format == OutputFormat::Mp4;
 
-    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-i"]
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
         .map(String::from)
         .to_vec();
-    args.push(input.to_string_lossy().into_owned());
+    for s in sources {
+        args.push("-i".into());
+        args.push(s.path.to_string_lossy().into_owned());
+    }
 
-    let video_info = opts.video.unwrap_or(DEFAULT_VIDEO);
+    let video_info = canvas(sources);
     let windows = caption_windows(&segments, edits);
 
-    // Overdub WAVs and title cards become extra inputs, numbered in the order
-    // they are pushed; the source is always input 0.
-    let mut next_input = 1;
+    // Overdub WAVs, title cards, captions and inserts become extra inputs,
+    // numbered in the order they are pushed after the sources.
+    let mut next_input = sources.len();
     let mut overdub_input: HashMap<usize, usize> = HashMap::new();
     let mut title_input: HashMap<usize, usize> = HashMap::new();
     for seg in &segments {
@@ -262,10 +304,34 @@ pub fn build_ffmpeg_args(
     let mut concat_inputs = String::new();
     for (i, seg) in segments.iter().enumerate() {
         let hold = seg.output.len();
+        let (k, local) = place(&placed, seg.source);
+        let file = &sources[k];
+        let picture = file.kind == MediaKind::Video;
         let (v, a) = match seg.kind {
-            SegmentKind::Source => (render_video.then(|| video_trim(seg)), audio_trim(seg)),
+            SegmentKind::Source => (
+                render_video.then(|| {
+                    if picture {
+                        video_trim(k, local, &fit(file, video_info))
+                    } else {
+                        black(video_info, hold)
+                    }
+                }),
+                audio_trim(k, local),
+            ),
             SegmentKind::Overdub { index } => (
-                render_video.then(|| freeze_frame(seg, opts.duration, hold)),
+                render_video.then(|| {
+                    if picture {
+                        freeze_frame(
+                            k,
+                            local.start,
+                            file.source.duration,
+                            hold,
+                            &fit(file, video_info),
+                        )
+                    } else {
+                        black(video_info, hold)
+                    }
+                }),
                 overdub_audio(overdub_input[&index], hold),
             ),
             SegmentKind::Title { index } => (
@@ -380,33 +446,110 @@ pub fn build_ffmpeg_args(
     Ok(args)
 }
 
-fn video_trim(seg: &Segment) -> String {
+fn video_trim(input: usize, r: Range, fit: &str) -> String {
     format!(
-        "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS,setsar=1",
-        fmt(seg.source.start),
-        fmt(seg.source.end)
+        "[{input}:v]trim=start={}:end={},setpts=PTS-STARTPTS{fit},setsar=1",
+        fmt(r.start),
+        fmt(r.end)
     )
 }
 
-fn audio_trim(seg: &Segment) -> String {
+fn audio_trim(input: usize, r: Range) -> String {
     format!(
-        "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE}",
-        fmt(seg.source.start),
-        fmt(seg.source.end)
+        "[{input}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE}",
+        fmt(r.start),
+        fmt(r.end)
     )
 }
 
-/// Take the first frame of the range and clone it for `hold` seconds.
-fn freeze_frame(seg: &Segment, duration: f64, hold: f64) -> String {
+/// Take the frame at local time `at` of a file `duration` long and clone it
+/// for `hold` seconds.
+fn freeze_frame(input: usize, at: f64, duration: f64, hold: f64, fit: &str) -> String {
     // A one-second window guarantees at least one frame at any sane frame rate.
-    let window_end = (seg.source.start + 1.0).min(duration);
+    let window_end = (at + 1.0).min(duration);
     format!(
-        "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS,select=eq(n\\,0),\
-         tpad=stop_mode=clone:stop_duration={hold},trim=end={hold},setpts=PTS-STARTPTS,setsar=1",
-        fmt(seg.source.start),
+        "[{input}:v]trim=start={}:end={},setpts=PTS-STARTPTS,select=eq(n\\,0),\
+         tpad=stop_mode=clone:stop_duration={hold},trim=end={hold},setpts=PTS-STARTPTS{fit},setsar=1",
+        fmt(at),
         fmt(window_end),
         hold = fmt(hold),
     )
+}
+
+/// Black at the canvas size for `hold` seconds: the picture of an audio-only source.
+fn black(canvas: VideoInfo, hold: f64) -> String {
+    format!(
+        "color=c=black:s={}x{}:r={}:d={},format=yuv420p,setsar=1",
+        canvas.width,
+        canvas.height,
+        rate(canvas.fps),
+        fmt(hold)
+    )
+}
+
+/// Filters that bring `file`'s picture onto the canvas: nothing when it
+/// already matches, else scale to fit, letterbox and resample the frame rate.
+fn fit(file: &SourceInput, canvas: VideoInfo) -> String {
+    let v = file.video.unwrap_or(DEFAULT_VIDEO);
+    if v.width == canvas.width && v.height == canvas.height && (v.fps - canvas.fps).abs() < 1e-3 {
+        return String::new();
+    }
+    format!(
+        ",scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps={}",
+        rate(canvas.fps),
+        w = canvas.width,
+        h = canvas.height,
+    )
+}
+
+/// A frame rate for ffmpeg: NTSC rates as their exact fraction, others as
+/// a plain number.
+fn rate(fps: f64) -> String {
+    let ntsc = fps * 1001.0 / 1000.0;
+    if (ntsc - ntsc.round()).abs() < 1e-3 && (fps - fps.round()).abs() > 1e-3 {
+        format!("{}000/1001", ntsc.round() as i64)
+    } else {
+        fmt(fps)
+    }
+}
+
+/// The input holding a piece, and the piece's range in that file's own time.
+fn place(placed: &[Source], r: Range) -> (usize, Range) {
+    match locate(placed, r.start) {
+        Some((k, local)) => (k, Range::new(local, local + r.len())),
+        None => (0, r),
+    }
+}
+
+/// Split every source piece at each join strictly inside it, so each piece
+/// reads one file. Holds and titles are placed by their start and left whole.
+fn split_at_joins(segments: Vec<Segment>, placed: &[Source]) -> Vec<Segment> {
+    let joins: Vec<f64> = placed.iter().skip(1).map(|s| s.offset).collect();
+    let mut out = Vec::with_capacity(segments.len());
+    for seg in segments {
+        if seg.kind != SegmentKind::Source {
+            out.push(seg);
+            continue;
+        }
+        let shift = seg.output.start - seg.source.start;
+        let mut cursor = seg.source.start;
+        for &j in &joins {
+            if j > cursor + EPS && j < seg.source.end - EPS {
+                out.push(Segment {
+                    source: Range::new(cursor, j),
+                    output: Range::new(cursor + shift, j + shift),
+                    kind: SegmentKind::Source,
+                });
+                cursor = j;
+            }
+        }
+        out.push(Segment {
+            source: Range::new(cursor, seg.source.end),
+            output: Range::new(cursor + shift, seg.output.end),
+            kind: SegmentKind::Source,
+        });
+    }
+    out
 }
 
 /// The synthesized WAV, padded or trimmed to exactly `hold` seconds.
@@ -583,16 +726,10 @@ mod tests {
         overdub_audio: &'a HashMap<String, PathBuf>,
     ) -> ExportOptions<'a> {
         ExportOptions {
-            duration: 10.0,
             kind,
             format,
             output,
             overdub_audio,
-            video: Some(VideoInfo {
-                width: 1280,
-                height: 720,
-                fps: 30.0,
-            }),
             title_images: titles(&[]),
             caption_images: captions(&[]),
             transition: Transition::None,
@@ -632,8 +769,54 @@ mod tests {
         filter_complex(&args).to_owned()
     }
 
+    const HD: VideoInfo = VideoInfo {
+        width: 1280,
+        height: 720,
+        fps: 30.0,
+    };
+
+    /// One main-track file at `offset` for `duration` seconds.
+    fn file(
+        media: &str,
+        path: &str,
+        offset: f64,
+        duration: f64,
+        kind: MediaKind,
+        video: Option<VideoInfo>,
+    ) -> SourceInput {
+        SourceInput {
+            source: Source {
+                media: media.into(),
+                offset,
+                duration,
+            },
+            path: PathBuf::from(path),
+            kind,
+            video,
+        }
+    }
+
+    /// The ten-second single file every older test renders.
+    fn single(kind: MediaKind) -> Vec<SourceInput> {
+        match kind {
+            MediaKind::Video => vec![file("m0", "in.mp4", 0.0, 10.0, kind, Some(HD))],
+            MediaKind::Audio => vec![file("m0", "in.mp3", 0.0, 10.0, kind, None)],
+        }
+    }
+
     /// The whole argv, so tests can look at the inputs as well as the graph.
     fn args_with(
+        edits: &[Edit],
+        kind: MediaKind,
+        format: OutputFormat,
+        tweak: impl FnOnce(&mut ExportOptions),
+    ) -> Result<Vec<String>, ExportError> {
+        args_from(&single(kind), edits, kind, format, tweak)
+    }
+
+    /// Same, over an explicit list of main-track files.
+    fn args_from(
+        sources: &[SourceInput],
         edits: &[Edit],
         kind: MediaKind,
         format: OutputFormat,
@@ -643,12 +826,7 @@ mod tests {
         let out = PathBuf::from(format!("out.{}", format.extension()));
         let mut options = opts(kind, format, &out, &none);
         tweak(&mut options);
-        let input = if kind == MediaKind::Video {
-            "in.mp4"
-        } else {
-            "in.mp3"
-        };
-        build_ffmpeg_args(Path::new(input), edits, &options)
+        build_ffmpeg_args(sources, edits, &options)
     }
 
     /// Does `args` contain `needle` as a contiguous run?
@@ -715,7 +893,7 @@ mod tests {
             transition: None,
         }];
         let args = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &edits,
             &opts(MediaKind::Video, OutputFormat::Mp4, out, &none),
         )
@@ -750,7 +928,7 @@ mod tests {
             audio_duration: 2.5,
         }];
         let args = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &edits,
             &opts(MediaKind::Video, OutputFormat::Mp4, out, &audio),
         )
@@ -777,7 +955,7 @@ mod tests {
             transition: None,
         }];
         let args = build_ffmpeg_args(
-            Path::new("in.mp3"),
+            &single(MediaKind::Audio),
             &edits,
             &opts(MediaKind::Audio, OutputFormat::Mp3, out, &none),
         )
@@ -794,7 +972,7 @@ mod tests {
         let none = HashMap::new();
         let out = Path::new("out.wav");
         let args = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &[],
             &opts(MediaKind::Video, OutputFormat::Wav, out, &none),
         )
@@ -813,7 +991,7 @@ mod tests {
             transition: None,
         }];
         let err = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &edits,
             &opts(MediaKind::Video, OutputFormat::Mp4, out, &none),
         )
@@ -833,7 +1011,7 @@ mod tests {
             audio_duration: 1.0,
         }];
         let err = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &edits,
             &opts(MediaKind::Video, OutputFormat::Mp4, out, &none),
         )
@@ -849,7 +1027,7 @@ mod tests {
         let none = HashMap::new();
         let out = Path::new("out.mp4");
         let err = build_ffmpeg_args(
-            Path::new("in.mp3"),
+            &single(MediaKind::Audio),
             &[],
             &opts(MediaKind::Audio, OutputFormat::Mp4, out, &none),
         )
@@ -909,8 +1087,9 @@ mod tests {
             subtitle: None,
             style: TitleStyle::Dark,
         }];
-        let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
-            o.video = None;
+        let mut sources = single(MediaKind::Video);
+        sources[0].video = None;
+        let args = args_from(&sources, &edits, MediaKind::Video, OutputFormat::Mp4, |o| {
             o.title_images = titles(&[(0, "/imgs/t.png")]);
         })
         .unwrap();
@@ -1052,7 +1231,7 @@ mod tests {
         let mut options = opts(MediaKind::Video, OutputFormat::Mp4, &out, &audio);
         options.title_images = titles(&[(0, "/imgs/title-0.png")]);
         options.caption_images = captions(&[(2, "/imgs/cap-2.png", 64, 540)]);
-        let args = build_ffmpeg_args(Path::new("in.mp4"), &edits, &options).unwrap();
+        let args = build_ffmpeg_args(&single(MediaKind::Video), &edits, &options).unwrap();
 
         // The files given to `-i`, in argv order: source, title, overdub, caption.
         let inputs: Vec<&str> = args
@@ -1380,7 +1559,7 @@ mod tests {
         let out = PathBuf::from("out.mp4");
         let mut o = opts(MediaKind::Video, OutputFormat::Mp4, &out, &overdub_audio);
         o.assets = assets(&[("m1", "/assets/m1.mp3")]);
-        let args = build_ffmpeg_args(Path::new("in.mp4"), &edits, &o).unwrap();
+        let args = build_ffmpeg_args(&single(MediaKind::Video), &edits, &o).unwrap();
         let g = filter_complex(&args);
         // Segment 1 is the 2 s hold: the envelope covers [0,2].
         assert!(g.contains("(t--0.12)/0.12,(2.12-t)/0.12"), "{g}");
@@ -1429,6 +1608,207 @@ mod tests {
         assert_eq!(
             args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap_err(),
             ExportError::MissingAsset("m1".into())
+        );
+    }
+
+    const FHD: VideoInfo = VideoInfo {
+        width: 1920,
+        height: 1080,
+        fps: 30.0,
+    };
+    const PAL: VideoInfo = VideoInfo {
+        width: 1280,
+        height: 720,
+        fps: 25.0,
+    };
+    const AN: &str = AUDIO_NORMALIZE;
+    /// What a 720p25 file gets to sit on a 1080p30 canvas.
+    const FIT: &str = ",scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30";
+
+    /// A 1080p30 file for 4 s, then a 720p25 file for 6 s.
+    fn two_files() -> Vec<SourceInput> {
+        vec![
+            file("m0", "a.mp4", 0.0, 4.0, MediaKind::Video, Some(FHD)),
+            file("m1", "b.mov", 4.0, 6.0, MediaKind::Video, Some(PAL)),
+        ]
+    }
+
+    #[test]
+    fn one_source_graph_is_exactly_what_it_was() {
+        let g = graph(&[cut(2.0, 4.0)], MediaKind::Video, OutputFormat::Mp4);
+        assert_eq!(
+            g,
+            format!(
+                "[0:v]trim=start=0:end=2,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=2,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 [0:v]trim=start=4:end=10,setpts=PTS-STARTPTS,setsar=1[v1];\
+                 [0:a]atrim=start=4:end=10,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn two_sources_are_trimmed_from_their_own_files_and_fitted_to_the_first() {
+        // The fold's permanent split at the join is in `splits`, as AddSource leaves it.
+        let args = args_from(
+            &two_files(),
+            &[cut(1.0, 2.0)],
+            MediaKind::Video,
+            OutputFormat::Mp4,
+            |o| o.splits = &[4.0],
+        )
+        .unwrap();
+        assert_eq!(
+            &args[..8],
+            &[
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                "a.mp4",
+                "-i",
+                "b.mov"
+            ]
+        );
+        assert_eq!(
+            filter_complex(&args),
+            format!(
+                "[0:v]trim=start=0:end=1,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=1,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 [0:v]trim=start=2:end=4,setpts=PTS-STARTPTS,setsar=1[v1];\
+                 [0:a]atrim=start=2:end=4,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [1:v]trim=start=0:end=6,setpts=PTS-STARTPTS{FIT},setsar=1[v2];\
+                 [1:a]atrim=start=0:end=6,asetpts=PTS-STARTPTS,{AN}[a2];\
+                 [v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[outv][outa]"
+            )
+        );
+        assert!(args.windows(2).any(|w| w == ["-c:v", "libx264"]));
+    }
+
+    #[test]
+    fn a_piece_that_crosses_a_join_is_split_there() {
+        // No splits at all: the planner still reads each file for its own part.
+        let g = filter_complex(
+            &args_from(
+                &two_files(),
+                &[],
+                MediaKind::Video,
+                OutputFormat::Mp4,
+                |_| {},
+            )
+            .unwrap(),
+        )
+        .to_owned();
+        assert_eq!(
+            g,
+            format!(
+                "[0:v]trim=start=0:end=4,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=4,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 [1:v]trim=start=0:end=6,setpts=PTS-STARTPTS{FIT},setsar=1[v1];\
+                 [1:a]atrim=start=0:end=6,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn an_overdub_on_the_second_file_freezes_that_files_frame_on_the_canvas() {
+        let edits = [Edit::Overdub {
+            start: 5.0,
+            end: 6.0,
+            text: "hi".into(),
+            audio_url: "/data/m/od.wav".into(),
+            audio_duration: 2.0,
+        }];
+        let od = leak(HashMap::from([(
+            "/data/m/od.wav".to_owned(),
+            PathBuf::from("/srv/od.wav"),
+        )]));
+        let args = args_from(
+            &two_files(),
+            &edits,
+            MediaKind::Video,
+            OutputFormat::Mp4,
+            |o| {
+                o.overdub_audio = od;
+            },
+        )
+        .unwrap();
+        // Pieces: [0,4) file 0, [4,5) file 1, the 2 s hold, [6,10) file 1.
+        assert!(has_run(&args, &["-i", "/srv/od.wav"]), "{args:?}");
+        let g = filter_complex(&args);
+        assert!(
+            g.contains(&format!(
+                "[1:v]trim=start=1:end=2,setpts=PTS-STARTPTS,select=eq(n\\,0),\
+                 tpad=stop_mode=clone:stop_duration=2,trim=end=2,setpts=PTS-STARTPTS{FIT},setsar=1[v2];"
+            )),
+            "{g}"
+        );
+        assert!(g.contains("[2:a]aresample=48000"), "{g}");
+        assert!(
+            g.contains(&format!(
+                "[1:v]trim=start=2:end=6,setpts=PTS-STARTPTS{FIT},setsar=1[v3];"
+            )),
+            "{g}"
+        );
+        assert!(g.ends_with("concat=n=4:v=1:a=1[outv][outa]"), "{g}");
+    }
+
+    #[test]
+    fn an_audio_only_source_shows_black_on_the_canvas() {
+        let sources = [
+            file("m0", "a.mp4", 0.0, 4.0, MediaKind::Video, Some(FHD)),
+            file("m1", "b.m4a", 4.0, 6.0, MediaKind::Audio, None),
+        ];
+        let g = filter_complex(
+            &args_from(&sources, &[], MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap(),
+        )
+        .to_owned();
+        assert_eq!(
+            g,
+            format!(
+                "[0:v]trim=start=0:end=4,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=4,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 color=c=black:s=1920x1080:r=30:d=6,format=yuv420p,setsar=1[v1];\
+                 [1:a]atrim=start=0:end=6,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn the_canvas_is_the_first_file_with_a_picture() {
+        assert_eq!(canvas(&two_files()), FHD);
+        assert_eq!(sources_kind(&two_files()), MediaKind::Video);
+        let audio_first = [
+            file("m0", "a.m4a", 0.0, 4.0, MediaKind::Audio, None),
+            file("m1", "b.mov", 4.0, 6.0, MediaKind::Video, Some(PAL)),
+        ];
+        assert_eq!(canvas(&audio_first), PAL);
+        assert_eq!(sources_kind(&audio_first), MediaKind::Video);
+        let audio_only = [file("m0", "a.m4a", 0.0, 4.0, MediaKind::Audio, None)];
+        assert_eq!(canvas(&audio_only), DEFAULT_VIDEO);
+        assert_eq!(sources_kind(&audio_only), MediaKind::Audio);
+        let unprobed = [file("m0", "a.mp4", 0.0, 4.0, MediaKind::Video, None)];
+        assert_eq!(canvas(&unprobed), DEFAULT_VIDEO);
+    }
+
+    #[test]
+    fn rate_writes_ntsc_rates_as_fractions() {
+        assert_eq!(rate(30.0), "30");
+        assert_eq!(rate(25.0), "25");
+        assert_eq!(rate(30000.0 / 1001.0), "30000/1001");
+        assert_eq!(rate(24000.0 / 1001.0), "24000/1001");
+        assert_eq!(rate(60000.0 / 1001.0), "60000/1001");
+    }
+
+    #[test]
+    fn no_sources_is_nothing_to_export() {
+        assert_eq!(
+            args_from(&[], &[], MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap_err(),
+            ExportError::NothingToExport
         );
     }
 }
