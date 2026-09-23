@@ -154,7 +154,7 @@
   }
 
   .overlayLane,
-  .overlayLabel {
+  .labels .overlayLabel {
     display: none;
   }
 }

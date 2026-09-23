@@ -71,6 +71,11 @@
     box-shadow 0.12s;
 }
 
+.card input::placeholder {
+  color: var(--faint);
+  opacity: 1;
+}
+
 .card input:focus {
   outline: none;
   border-color: var(--accent);

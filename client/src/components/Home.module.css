@@ -21,6 +21,7 @@
   background: var(--surface);
   color: var(--text);
   font-size: var(--text-lg);
+  cursor: pointer;
   transition:
     border-color 0.15s,
     background 0.15s;

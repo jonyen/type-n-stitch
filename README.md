@@ -6,7 +6,7 @@ stitched result. It's a small homage to [Descript](https://www.descript.com)'s t
 built by me in an afternoon with Claude Code: a Rust media engine, an axum server, and a React
 front end, all running locally on whisper.cpp, ffmpeg and VoiceStudio.
 
-![type-n-stitch editing a talking-head clip: struck-through words are cuts, the purple italic run is an overdub](docs/screenshot.png)
+![type-n-stitch editing a talking-head clip: viewer on the left, transcript on the right, and the clips, B-roll and music lanes of the timeline along the bottom](docs/screenshot.png)
 
 ## How it works
 
@@ -31,7 +31,10 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    a WebSocket (`GET /api/projects/:id/ws`); after each append the server pushes its fold to all
    of them, and presence frames carry each person's playhead, selection, caret and whether they
    are playing. Edits still go over `POST …/ops`, one at a time from a queue that retries after a
-   dropped connection — the socket only fans out.
+   dropped connection — the socket only fans out. On the timeline, the Razor tool (C) splits a
+   clip at the nearest word start and the Range tool (X) cuts out a dragged stretch, snapped to
+   word boundaries and undone in one step; Select (V) seeks, reorders clips and picks B-roll or
+   music bars.
 3. **Preview.** The browser plays the original file and honours the edit list live: an
    animation-frame loop seeks past cuts as the playhead reaches them, and for an overdub it
    pauses the picture on the first frame, plays the WAV through a second `Audio` element, then

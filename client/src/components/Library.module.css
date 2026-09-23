@@ -58,6 +58,7 @@
   font-size: var(--text-base);
   text-align: left;
   overflow: hidden;
+  cursor: pointer;
   transition:
     border-color 0.15s,
     box-shadow 0.15s;

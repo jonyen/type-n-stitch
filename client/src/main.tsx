@@ -4,7 +4,6 @@ import { Tooltip } from 'radix-ui';
 
 import { App } from './App';
 import './styles/global.css';
-import './styles.css';
 
 const root = document.getElementById('root');
 if (!root) throw new Error('missing #root');

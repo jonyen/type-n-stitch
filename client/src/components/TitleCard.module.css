@@ -1,0 +1,69 @@
+/* Stand-ins for what the engine rasterises at export: the card and caption
+   colours are the export's, not the app theme's, and the face is the same
+   Inter files the engine draws with. Sizes use the frame's container units. */
+
+.card {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  padding: 6%;
+  font-family: Inter, system-ui, sans-serif;
+  text-align: center;
+}
+
+.dark {
+  background: #111;
+  color: #fff;
+}
+
+.light {
+  background: #f6f6f7;
+  color: #17181a;
+}
+
+.accent {
+  background: #2563eb;
+  color: #fff;
+}
+
+.text {
+  font-size: clamp(20px, 6cqw, 48px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.sub {
+  margin-top: 0.4em;
+  font-size: clamp(13px, 3cqw, 22px);
+  opacity: 0.8;
+}
+
+.caption {
+  position: absolute;
+  max-width: 80%;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-family: Inter, system-ui, sans-serif;
+  font-size: clamp(12px, 2.6cqw, 18px);
+  pointer-events: none;
+}
+
+.bottomLeft {
+  left: 5%;
+  bottom: 12%;
+}
+
+.bottomCenter {
+  left: 50%;
+  bottom: 12%;
+  transform: translateX(-50%);
+}
+
+.topLeft {
+  top: 8%;
+  left: 5%;
+}
