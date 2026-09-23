@@ -9,6 +9,7 @@ import {
 } from 'react';
 
 import {
+  addSource,
   exportMedia,
   exportProgress,
   fetchProject,
@@ -30,6 +31,7 @@ import { AudioDialog } from './components/AudioDialog';
 import { BrollDialog } from './components/BrollDialog';
 import { CaptionDialog } from './components/CaptionDialog';
 import { Dropzone } from './components/Dropzone';
+import { ImportList } from './components/ImportList';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
@@ -43,6 +45,7 @@ import { Transcript } from './components/Transcript';
 import { cx } from './cx';
 import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
+import { byName, importFailures, runImport, type ImportItem } from './importQueue';
 import { handledUpstream, shouldIgnoreGlobalKey } from './keyboardGuard';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
@@ -50,6 +53,7 @@ import { audios, layers } from './overlays';
 import { type PresenceState } from './realtime';
 import { deleteAction } from './selection';
 import { useSession } from './session';
+import { sourceViewsOf } from './sources';
 import styles from './App.module.css';
 import ui from './styles/ui.module.css';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
@@ -61,6 +65,7 @@ import type {
   CaptionPos,
   LibraryItem,
   ProjectSummary,
+  SourceView,
   TitleEdit,
   Transition,
 } from './types';
@@ -117,6 +122,14 @@ export function App() {
   const [suggestions, setSuggestions] = useState<Suggestions>({ fillers: [], pauses: [] });
 
   const [speakers, setSpeakers] = useState<(number | null)[] | null>(null);
+  // The project's files as the server lists them: names, urls, transcript
+  // status. Not read yet: Task 7 wires it into Player/Timeline/Transcript.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [sourceViews, setSourceViews] = useState<SourceView[]>([]);
+  // The home screen's import, file by file, while it runs.
+  const [imports, setImports] = useState<ImportItem[]>([]);
+  // Insert → Add video…, file by file. Failed files stay until dismissed.
+  const [uploads, setUploads] = useState<ImportItem[]>([]);
 
   // The output layout for the current edit list, so playback can jump
   // between output pieces and the transcript can draw clip boundaries.
@@ -294,6 +307,38 @@ export function App() {
     [projectId],
   );
 
+  // Insert → Add video…: append at the end, one file at a time. The timeline
+  // grows as each upload lands; the fold (broadcast, or the refetch below) confirms it.
+  const onAddVideos = useCallback(
+    async (files: File[]) => {
+      if (!projectId || !canEdit || files.length === 0) return;
+      const append = async (id: string, file: File, onProgress: (f: number) => void) => {
+        const view = await addSource(id, file, onProgress);
+        dispatch({
+          type: 'addSource',
+          media: view.mediaId,
+          offset: view.offset,
+          duration: view.duration,
+        });
+        setSourceViews((list) =>
+          [...list.filter((v) => v.index !== view.index), view].sort((a, b) => a.index - b.index),
+        );
+        return view;
+      };
+      const result = await runImport(byName(files), { append }, setUploads, projectId);
+      setUploads(result.items.filter((item) => item.status === 'error'));
+      try {
+        const fetched = await fetchProject(projectId);
+        setSourceViews(sourceViewsOf(fetched.project));
+        // Only when nothing of ours is in flight: an older fold must not hide an optimistic edit.
+        if (queue.current?.pending === 0) settle(fetched.doc);
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [projectId, canEdit, settle],
+  );
+
   useEffect(() => {
     if (!projectId) {
       queue.current = null;
@@ -359,6 +404,8 @@ export function App() {
     setCaptionRange(null);
     setBrollRange(null);
     setAudioDialog(null);
+    setSourceViews([]);
+    setUploads([]);
     setTool('select');
   }, []);
 
@@ -393,13 +440,14 @@ export function App() {
       setBusy(label);
       const summary = await fetchSummary();
       setBusy('Transcribing');
-      const [words, { doc }] = await Promise.all([
+      const [words, fetched] = await Promise.all([
         transcribeMedia(summary.id),
         fetchProject(summary.id),
       ]);
       dispatch({ type: 'load', words, duration: summary.media.duration, media: summary.media.id });
-      dispatch({ type: 'sync', doc });
-      confirmed.current = doc;
+      dispatch({ type: 'sync', doc: fetched.doc });
+      confirmed.current = fetched.doc;
+      setSourceViews(sourceViewsOf(fetched.project));
       setProject(summary);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -413,8 +461,28 @@ export function App() {
     [load],
   );
 
-  const onFile = useCallback(
-    (file: File) => load(`Uploading ${file.name}`, () => uploadMedia(file)),
+  // Several files make one project: the first creates it, the rest are
+  // appended in the order chosen. Failures are reported once it opens.
+  const onImport = useCallback(
+    async (files: File[]) => {
+      setLoadError(null);
+      setBusy(
+        files.length === 1
+          ? `Uploading ${files[0]?.name ?? ''}`
+          : `Importing ${files.length} files`,
+      );
+      const result = await runImport(files, { create: uploadMedia, append: addSource }, setImports);
+      const failed = importFailures(result.items);
+      setImports([]);
+      const created = result.project;
+      if (!created) {
+        setBusy(null);
+        setLoadError(failed ?? 'Nothing was imported.');
+        return;
+      }
+      await load(`Opening ${created.title}`, () => Promise.resolve(created));
+      if (failed) setLoadError(failed);
+    },
     [load],
   );
 
@@ -770,6 +838,8 @@ export function App() {
           if (selected) setBrollRange(selected);
         },
         onAddMusic: () => setAudioDialog({ range: selected }),
+        onAddVideos: (files: File[]) => void onAddVideos(files),
+        addingVideos: uploads.some((u) => u.status === 'queued' || u.status === 'uploading'),
         onOverdub: () => {
           if (selected) setOverdubRange(selected);
         },
@@ -800,7 +870,13 @@ export function App() {
 
       {!project ? (
         <div className={styles.home}>
-          <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError}>
+          <Dropzone
+            onImport={(files) => void onImport(files)}
+            onLibraryClip={onLibraryClip}
+            busy={busy}
+            error={loadError}
+            imports={imports}
+          >
             <Projects items={projects} onOpen={onOpenProject} disabled={busy !== null} />
           </Dropzone>
         </div>
@@ -820,6 +896,20 @@ export function App() {
             </p>
           )}
           <section className={styles.viewer} aria-label="Viewer">
+            {uploads.length > 0 && (
+              <div className={styles.uploads}>
+                <ImportList items={uploads} />
+                {uploads.every((u) => u.status === 'error') && (
+                  <button
+                    type="button"
+                    className={cx(ui.button, ui.ghost)}
+                    onClick={() => setUploads([])}
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </div>
+            )}
             <Player
               media={project.media}
               mediaRef={mediaRef}
