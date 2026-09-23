@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { editorReducer, initialEditor, selectedRange, type EditorState } from './editor';
+import {
+  editorReducer,
+  initialEditor,
+  selectedRange,
+  spanRange,
+  wordSpan,
+  type EditorState,
+} from './editor';
 import { orderedPieces } from './editlist';
 import type { DocState } from './ops';
 import type { Word } from './types';
@@ -634,5 +641,59 @@ describe('sources', () => {
     expect(s.words).toBe(more);
     expect(s.selection).toBeNull();
     expect(s.sources).toBe(first.sources);
+  });
+});
+
+describe('dialog word spans', () => {
+  const w = (id: string, text: string, start: number): Word => ({
+    id,
+    text,
+    start,
+    end: start + 1,
+  });
+  const a = w('0', 'a', 0);
+  const b = w('1', 'b', 1);
+  const c = w('1:0', 'c', 10);
+  const d = w('1:1', 'd', 11);
+  const e = w('2:0', 'e', 20);
+  const f = w('2:1', 'f', 21);
+
+  it("a dialog opened before a source's words arrive still submits the words it was opened on", () => {
+    // Three videos; the second is still being transcribed, so its words are missing.
+    let s = editorReducer(initialEditor, {
+      type: 'load',
+      words: [a, b, e, f],
+      duration: 10,
+      media: 'm0',
+    });
+    s = editorReducer(s, { type: 'addSource', media: 'm1', offset: 10, duration: 10 });
+    s = editorReducer(s, { type: 'addSource', media: 'm2', offset: 20, duration: 10 });
+
+    // Open the caption dialog on e..f, words [2, 3].
+    const opened = wordSpan(s.words, [2, 3]);
+    expect(opened).toEqual({ from: '2:0', to: '2:1' });
+
+    // The second video's words land in the middle, shifting every index after them.
+    s = editorReducer(s, { type: 'setWords', words: [a, b, c, d, e, f] });
+
+    // Submit: the span resolves to e..f's new indices, not c..d.
+    if (!opened) throw new Error('no span');
+    const range = spanRange(s.words, opened);
+    expect(range).toEqual([4, 5]);
+    if (!range) throw new Error('no range');
+    s = editorReducer(s, {
+      type: 'addCaption',
+      text: 'hi',
+      position: 'bottomCenter',
+      range,
+    });
+    const caption = s.edits.find((x) => x.kind === 'caption');
+    // e..f: from e to its video's end (the stale [2, 3] would caption c..d, 10..20).
+    expect(caption && [caption.start, caption.end]).toEqual([20, 30]);
+  });
+
+  it('a span whose words are gone resolves to nothing', () => {
+    expect(spanRange([a, b], { from: '2:0', to: '2:1' })).toBeNull();
+    expect(wordSpan([a, b], [0, 5])).toBeNull();
   });
 });

@@ -174,6 +174,31 @@ export function selectedRange(selection: Selection | null): [number, number] | n
   return [Math.min(selection.anchor, selection.focus), Math.max(selection.anchor, selection.focus)];
 }
 
+/**
+ * A word range held by word ids. Indices shift when another source's words
+ * arrive in the middle (`setWords`); ids do not, so a dialog holds this from
+ * open to submit.
+ */
+export interface WordSpan {
+  from: string;
+  to: string;
+}
+
+/** The ids of the words at `range`'s ends, or null if either is missing. */
+export function wordSpan(words: Word[], range: [number, number]): WordSpan | null {
+  const from = words[range[0]];
+  const to = words[range[1]];
+  return from && to ? { from: from.id, to: to.id } : null;
+}
+
+/** `span`'s current word range, or null once either word is gone. */
+export function spanRange(words: Word[], span: WordSpan): [number, number] | null {
+  const from = words.findIndex((w) => w.id === span.from);
+  const to = words.findIndex((w) => w.id === span.to);
+  if (from === -1 || to === -1) return null;
+  return [Math.min(from, to), Math.max(from, to)];
+}
+
 function withEdits(state: EditorState, edits: Edit[]): EditorState {
   return { ...state, edits, selection: null };
 }

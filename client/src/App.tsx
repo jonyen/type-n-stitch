@@ -44,7 +44,15 @@ import { TopBar, type ExportState } from './components/TopBar';
 import { Transcript } from './components/Transcript';
 import { cx } from './cx';
 import { EPS, isJoin, orderedPieces, rangeForWords, titles } from './editlist';
-import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
+import {
+  editorReducer,
+  initialEditor,
+  selectedRange,
+  spanRange,
+  wordSpan,
+  type EditorAction,
+  type WordSpan,
+} from './editor';
 import { byName, importFailures, runImport, type ImportItem } from './importQueue';
 import { handledUpstream, shouldIgnoreGlobalKey } from './keyboardGuard';
 import { createOpQueue, type OpQueue } from './opQueue';
@@ -93,27 +101,31 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editor, dispatch] = useReducer(editorReducer, initialEditor);
-  // The word range the overdub dialog was opened on; like `captionRange`, a
-  // peer clearing the selection must not unmount the dialog under the user
-  // (and leave the shortcuts off, since they wait for it to close).
-  const [overdubRange, setOverdubRange] = useState<[number, number] | null>(null);
+  // The words the overdub dialog was opened on; like `captionSpan`, a peer
+  // clearing the selection must not unmount the dialog under the user (and
+  // leave the shortcuts off, since they wait for it to close). The dialogs
+  // hold word ids, not indices: another source's words can land in between.
+  const [overdubSpan, setOverdubSpan] = useState<WordSpan | null>(null);
   // The title dialog, adding at `at` or editing `initial`.
   const [titleDialog, setTitleDialog] = useState<{ at: number; initial?: TitleEdit } | null>(null);
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
-  // The word range the caption dialog was opened on. Holding it here keeps
-  // the dialog mounted (and the caption anchored) when a peer's `sync` clears
+  // The words the caption dialog was opened on. Holding them here keeps the
+  // dialog mounted (and the caption anchored) when a peer's `sync` clears
   // the selection while someone is still typing.
-  const [captionRange, setCaptionRange] = useState<[number, number] | null>(null);
-  // The layer dialog: adding over the word range it was opened on, or
-  // changing an existing layer's track, frame or sound.
-  const [layerDialog, setLayerDialog] = useState<
-    { range: [number, number] } | { edit: LayerEdit } | null
-  >(null);
-  // The music dialog: adding over `range` (null means the whole edit), or
+  const [captionSpan, setCaptionSpan] = useState<WordSpan | null>(null);
+  // The layer dialog: adding over the words it was opened on, or changing
+  // an existing layer's track, frame or sound.
+  const [layerDialog, setLayerDialog] = useState<{ span: WordSpan } | { edit: LayerEdit } | null>(
+    null,
+  );
+  // The music dialog: adding over `span` (null means the whole edit), or
   // editing an existing `edit`.
   const [audioDialog, setAudioDialog] = useState<
-    { range: [number, number] | null } | { edit: AudioEdit } | null
+    { span: WordSpan | null } | { edit: AudioEdit } | null
   >(null);
+  // Where the overdub and caption words are now.
+  const overdubRange = overdubSpan && spanRange(editor.words, overdubSpan);
+  const captionRange = captionSpan && spanRange(editor.words, captionSpan);
   // A selected title card, by its instant. Exclusive with the word selection.
   const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
   // A selected clip, by its piece's start. Exclusive with the word/title selection.
@@ -248,6 +260,12 @@ export function App() {
   );
 
   const selected = selectedRange(editor.selection);
+  /** What a dialog holds for the selected words: their ids, which outlast indices. */
+  const selectedSpan = () => (selected ? wordSpan(editor.words, selected) : null);
+  const openLayerDialog = () => {
+    const span = selectedSpan();
+    if (span) setLayerDialog({ span });
+  };
   const fillers = pending(suggestions.fillers, editor.edits);
   const pauses = pending(suggestions.pauses, editor.edits);
 
@@ -491,8 +509,8 @@ export function App() {
     setSelectedClip(null);
     setSelectedOverlay(null);
     setTitleDialog(null);
-    setOverdubRange(null);
-    setCaptionRange(null);
+    setOverdubSpan(null);
+    setCaptionSpan(null);
     setLayerDialog(null);
     setAudioDialog(null);
     setSourceViews([]);
@@ -684,7 +702,7 @@ export function App() {
       if (!projectId || !overdubRange) return;
       const { audioUrl, duration } = await synthesizeOverdub(projectId, text);
       edit({ type: 'overdub', text, audioUrl, audioDuration: duration, range: overdubRange });
-      setOverdubRange(null);
+      setOverdubSpan(null);
     },
     [projectId, overdubRange, edit],
   );
@@ -784,7 +802,7 @@ export function App() {
     (text: string, position: CaptionPos) => {
       if (!captionRange) return;
       edit({ type: 'addCaption', text, position, range: captionRange });
-      setCaptionRange(null);
+      setCaptionSpan(null);
     },
     [captionRange, edit],
   );
@@ -870,9 +888,9 @@ export function App() {
     keyHandler.current = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (
-        overdubRange ||
+        overdubSpan ||
         titleDialog ||
-        captionRange ||
+        captionSpan ||
         agentDialogOpen ||
         layerDialog ||
         audioDialog
@@ -901,9 +919,9 @@ export function App() {
       }
     };
   }, [
-    overdubRange,
+    overdubSpan,
     titleDialog,
-    captionRange,
+    captionSpan,
     agentDialogOpen,
     layerDialog,
     audioDialog,
@@ -935,9 +953,10 @@ export function App() {
         .join(' ');
       return { text, length: end - start };
     }
-    const [from, to] = layerDialog.range;
-    const r = rangeForWords(editor.words, from, to, editor.duration, editor.sources);
-    return { text: wordsIn(layerDialog.range), length: r.end - r.start };
+    const range = spanRange(editor.words, layerDialog.span);
+    if (!range) return { text: '', length: 0 };
+    const r = rangeForWords(editor.words, range[0], range[1], editor.duration, editor.sources);
+    return { text: wordsIn(range), length: r.end - r.start };
   })();
 
   if (user === undefined)
@@ -964,16 +983,16 @@ export function App() {
         hasSelection: selected !== null,
         onAddTitle,
         onAddCaption: () => {
-          if (selected) setCaptionRange(selected);
+          setCaptionSpan(selectedSpan());
         },
         onAddLayer: () => {
-          if (selected) setLayerDialog({ range: selected });
+          openLayerDialog();
         },
-        onAddMusic: () => setAudioDialog({ range: selected }),
+        onAddMusic: () => setAudioDialog({ span: selectedSpan() }),
         onAddVideos: (files: File[]) => void onAddVideos(files),
         addingVideos: uploads.some((u) => u.status === 'queued' || u.status === 'uploading'),
         onOverdub: () => {
-          if (selected) setOverdubRange(selected);
+          setOverdubSpan(selectedSpan());
         },
         onSplit,
         transition: editor.transition,
@@ -1121,13 +1140,13 @@ export function App() {
               }
               onDelete={deleteSelected}
               onOverdub={() => {
-                if (selected) setOverdubRange(selected);
+                setOverdubSpan(selectedSpan());
               }}
               onCaption={() => {
-                if (selected) setCaptionRange(selected);
+                setCaptionSpan(selectedSpan());
               }}
               onLayer={() => {
-                if (selected) setLayerDialog({ range: selected });
+                openLayerDialog();
               }}
               onDismiss={clearAll}
             />
@@ -1139,9 +1158,9 @@ export function App() {
               readOnly={!canEdit}
               shortcuts={
                 !(
-                  overdubRange ||
+                  overdubSpan ||
                   titleDialog ||
-                  captionRange ||
+                  captionSpan ||
                   agentDialogOpen ||
                   layerDialog ||
                   audioDialog
@@ -1182,11 +1201,11 @@ export function App() {
         </main>
       )}
 
-      {overdubRange && (
+      {overdubSpan && (
         <OverdubDialog
           original={wordsIn(overdubRange)}
           onSubmit={onOverdubSubmit}
-          onCancel={() => setOverdubRange(null)}
+          onCancel={() => setOverdubSpan(null)}
         />
       )}
 
@@ -1201,11 +1220,11 @@ export function App() {
 
       {agentDialogOpen && <AgentDialog onCancel={() => setAgentDialogOpen(false)} />}
 
-      {captionRange && (
+      {captionSpan && (
         <CaptionDialog
           original={captionText}
           onSubmit={onCaptionSubmit}
-          onCancel={() => setCaptionRange(null)}
+          onCancel={() => setCaptionSpan(null)}
         />
       )}
 
@@ -1236,15 +1255,17 @@ export function App() {
               )
                 setSelectedOverlay({ kind: 'layer', track: choice.track, start });
             } else {
-              edit({
-                type: 'addLayer',
-                track: choice.track,
-                media: choice.media,
-                offset: choice.offset,
-                frame: choice.frame,
-                audio: choice.audio,
-                range: layerDialog.range,
-              });
+              const range = spanRange(editor.words, layerDialog.span);
+              if (range)
+                edit({
+                  type: 'addLayer',
+                  track: choice.track,
+                  media: choice.media,
+                  offset: choice.offset,
+                  frame: choice.frame,
+                  audio: choice.audio,
+                  range,
+                });
             }
             setLayerDialog(null);
           }}
@@ -1267,13 +1288,17 @@ export function App() {
         <AudioDialog
           assets={assets}
           initial={'edit' in audioDialog ? audioDialog.edit : undefined}
-          wholeEdit={'range' in audioDialog && audioDialog.range === null}
+          wholeEdit={'span' in audioDialog && audioDialog.span === null}
           onUpload={onUploadAsset}
           onSubmit={(asset, gain, duck) => {
             if ('edit' in audioDialog)
               edit({ type: 'editAudio', start: audioDialog.edit.start, gain, duck });
-            else if (asset)
-              edit({ type: 'addAudio', media: asset.id, gain, duck, range: audioDialog.range });
+            else if (asset) {
+              // The whole edit, or the words the dialog was opened on (gone: nothing).
+              const range = audioDialog.span && spanRange(editor.words, audioDialog.span);
+              if (!audioDialog.span || range)
+                edit({ type: 'addAudio', media: asset.id, gain, duck, range });
+            }
             setAudioDialog(null);
           }}
           onRemove={
