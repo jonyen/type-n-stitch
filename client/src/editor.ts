@@ -201,8 +201,10 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         ...initialEditor,
         words: action.words,
         duration: action.duration,
+        // A named source seeds source 0 even at duration 0 (an unprobed or
+        // audio-only file); with no media there is nothing to seed.
         sources:
-          action.duration > 0
+          action.media !== undefined || action.duration > 0
             ? [{ media: action.media ?? '', offset: 0, duration: action.duration }]
             : [],
       };

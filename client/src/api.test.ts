@@ -47,6 +47,8 @@ class FakeXhr {
   } = { onprogress: null };
   onload: (() => void) | null = null;
   onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  ontimeout: (() => void) | null = null;
   open(method: string, url: string) {
     this.method = method;
     this.url = url;
@@ -119,6 +121,18 @@ describe('addSource', () => {
   it('says the server is unreachable on a network error', async () => {
     const done = addSource('p1', file);
     (FakeXhr.last as unknown as FakeXhr).onerror?.();
+    await expect(done).rejects.toMatchObject({ status: 0 });
+  });
+
+  it('says the server is unreachable if the upload is aborted', async () => {
+    const done = addSource('p1', file);
+    (FakeXhr.last as unknown as FakeXhr).onabort?.();
+    await expect(done).rejects.toMatchObject({ status: 0 });
+  });
+
+  it('says the server is unreachable if the upload times out', async () => {
+    const done = addSource('p1', file);
+    (FakeXhr.last as unknown as FakeXhr).ontimeout?.();
     await expect(done).rejects.toMatchObject({ status: 0 });
   });
 });

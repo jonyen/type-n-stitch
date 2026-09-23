@@ -570,6 +570,10 @@ async fn validate(
             }
             Ok(())
         }
+        // The client's B-roll delete now sends this; validated exactly as
+        // `Op::RemoveBroll` was, so removal keeps working between this task
+        // and Task 3.
+        Op::RemoveLayer { track: 2, start } => check_range(*start, *start),
         Op::AddSource { .. }
         | Op::AddLayer { .. }
         | Op::SetLayer { .. }
@@ -1498,5 +1502,51 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["edits"].as_array().unwrap().len(), 1);
         assert_eq!(body["edits"][0]["gain"], 3.0);
+    }
+
+    #[tokio::test]
+    async fn removelayer_on_track_2_is_accepted_but_track_3_is_not_supported_yet() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let p = project_of(&state, &project).await;
+        let clip = seed_asset(&state, &p, MediaKind::Video, 3.0).await;
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({
+                "opId": "add",
+                "kind": "addlayer",
+                "track": 2,
+                "start": 1.0,
+                "end": 3.0,
+                "media": clip.id,
+                "offset": 1.0,
+                "frame": "full",
+                "audio": null,
+            })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["edits"].as_array().unwrap().len(), 1);
+        // A track-2 RemoveLayer is accepted and actually removes the layer.
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "rm2", "kind": "removelayer", "track": 2, "start": 1.0 })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["edits"].as_array().unwrap().len(), 0);
+        // A track-3 RemoveLayer is not supported yet.
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project,
+            vec![json!({ "opId": "rm3", "kind": "removelayer", "track": 3, "start": 1.0 })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "not supported yet");
     }
 }

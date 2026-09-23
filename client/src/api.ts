@@ -84,6 +84,8 @@ export function upload<T>(
       };
     }
     xhr.onerror = () => reject(new ApiError(UNREACHABLE, 0));
+    xhr.onabort = () => reject(new ApiError(UNREACHABLE, 0));
+    xhr.ontimeout = () => reject(new ApiError(UNREACHABLE, 0));
     xhr.onload = () => {
       let body: unknown = null;
       try {

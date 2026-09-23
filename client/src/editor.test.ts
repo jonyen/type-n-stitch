@@ -516,6 +516,17 @@ describe('sources', () => {
     );
   });
 
+  it('seeds source 0 from `media` even when the duration is 0', () => {
+    const zero = editorReducer(initialEditor, {
+      type: 'load',
+      words: [],
+      duration: 0,
+      media: 'm0',
+    });
+    expect(zero.sources).toEqual([{ media: 'm0', offset: 0, duration: 0 }]);
+    expect(zero.duration).toBe(0);
+  });
+
   it('addSource appends at the end with its join, and the duration is stitched', () => {
     const s = editorReducer(first, { type: 'addSource', media: 'm1', offset: 20, duration: 12.5 });
     expect(s.sources).toEqual([
