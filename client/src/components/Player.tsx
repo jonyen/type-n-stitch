@@ -1,17 +1,29 @@
-import { useMemo, type RefObject } from 'react';
+import { useCallback, useMemo, useSyncExternalStore } from 'react';
 
 import { cx } from '../cx';
-import { captionsAt, cutRanges, formatTime, joins, nearDipJoin, overdubs } from '../editlist';
+import {
+  captionsAt,
+  cutRanges,
+  formatTime,
+  joins,
+  locate,
+  nearDipJoin,
+  overdubs,
+  stitchedDuration,
+} from '../editlist';
+import type { StitchedMedia } from '../stitchedMedia';
 import { timelineLength, type Segment } from '../timeline';
-import type { Asset, Edit, Media, Transition, Word } from '../types';
+import type { Asset, Edit, SourceView, Transition, Word } from '../types';
 import type { Playback } from '../usePlayback';
 import { Overlays } from './Overlays';
 import styles from './Player.module.css';
 import { Caption, TitleCard } from './TitleCard';
 
 interface Props {
-  media: Media;
-  mediaRef: RefObject<HTMLVideoElement | null>;
+  /** The main track's files in stitched order, placed as the fold places them. */
+  sources: SourceView[];
+  /** The clock that plays them through one <video>; the element attaches to it. */
+  stitched: StitchedMedia;
   edits: Edit[];
   assets: Asset[];
   words: Word[];
@@ -23,8 +35,8 @@ interface Props {
 }
 
 export function Player({
-  media,
-  mediaRef,
+  sources,
+  stitched,
   edits,
   assets,
   words,
@@ -40,25 +52,50 @@ export function Player({
   const cutCount = cutRanges(edits).length;
   const overdubCount = overdubs(edits).length;
 
+  // The canvas is the first file with a picture (16:9 until one is known);
+  // every file is contained inside it, as the export letterboxes each one
+  // onto that file's resolution.
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      stitched.addEventListener('aspect', onChange);
+      return () => stitched.removeEventListener('aspect', onChange);
+    },
+    [stitched],
+  );
+  const aspect = useSyncExternalStore(subscribe, () => stitched.aspect);
+  // No picture anywhere: today's audio frame, as the export renders no video.
+  const audioOnly = sources.length > 0 && sources.every((s) => s.kind === 'audio');
+  const here = locate(sources, playback.currentTime);
+  // An audio-only file further along shows black under its words.
+  const dark = !audioOnly && here !== null && sources[here.index]?.kind === 'audio';
+  const total = stitchedDuration(sources);
+
   return (
     <div className={styles.player}>
       <div
         className={cx(
           styles.frame,
-          media.kind === 'audio' && styles.audio,
+          audioOnly && styles.audio,
+          dark && styles.dark,
           fading && styles.fading,
         )}
+        style={audioOnly ? undefined : { aspectRatio: aspect ?? 16 / 9 }}
       >
         <video
-          ref={mediaRef}
-          src={media.url}
+          ref={stitched.attach}
           preload="auto"
           playsInline
           onClick={playback.toggle}
           muted={playback.overdubbing !== null}
         />
-        <Overlays edits={edits} assets={assets} words={words} playback={playback} />
-        {media.kind === 'audio' && <div className={styles.audioBadge}>audio</div>}
+        <Overlays
+          edits={edits}
+          assets={assets}
+          sources={sources}
+          words={words}
+          playback={playback}
+        />
+        {(audioOnly || dark) && <div className={styles.audioBadge}>audio</div>}
         {playback.overdubbing && (
           <div className={styles.overdubBadge}>Overdub: “{playback.overdubbing.text}”</div>
         )}
@@ -83,7 +120,9 @@ export function Player({
           <span className={styles.total}> / {formatTime(outputLength)}</span>
         </span>
         <span className={styles.meta}>
-          source {formatTime(media.duration)}
+          {sources.length > 1
+            ? `${sources.length} videos · ${formatTime(total)}`
+            : `source ${formatTime(total)}`}
           {cutCount > 0 && ` · ${cutCount} ${cutCount === 1 ? 'cut' : 'cuts'}`}
           {overdubCount > 0 && ` · ${overdubCount} ${overdubCount === 1 ? 'overdub' : 'overdubs'}`}
         </span>

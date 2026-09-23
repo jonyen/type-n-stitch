@@ -1,8 +1,9 @@
 import { DropdownMenu, Popover } from 'radix-ui';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { cx } from '../cx';
 import { formatTime } from '../editlist';
+import { MEDIA_ACCEPT } from '../importQueue';
 import type { ConnectionStatus, Peer } from '../realtime';
 import ui from '../styles/ui.module.css';
 import type { ThemeChoice } from '../theme';
@@ -36,8 +37,12 @@ export interface EditorControls {
   hasSelection: boolean;
   onAddTitle: () => void;
   onAddCaption: () => void;
-  onAddBroll: () => void;
+  onAddLayer: () => void;
   onAddMusic: () => void;
+  /** Append these files to the end of the main track. */
+  onAddVideos: (files: File[]) => void;
+  /** An Add video… is still uploading; another waits for it. */
+  addingVideos: boolean;
   onOverdub: () => void;
   onSplit: () => void;
   transition: Transition;
@@ -138,6 +143,7 @@ export function TopBar({
 
 function EditorTools({ editor }: { editor: EditorControls }) {
   const off = editor.readOnly;
+  const videoInput = useRef<HTMLInputElement>(null);
   return (
     <div className={styles.group}>
       <Tip label="Undo (⌘Z)">
@@ -204,6 +210,15 @@ function EditorTools({ editor }: { editor: EditorControls }) {
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content className={styles.menu} sideOffset={6} align="start">
+            <DropdownMenu.Item
+              className={styles.item}
+              disabled={editor.addingVideos}
+              onSelect={() => videoInput.current?.click()}
+            >
+              Add video…
+              <span className={styles.hint}>appended at the end</span>
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator className={styles.separator} />
             <DropdownMenu.Item className={styles.item} onSelect={editor.onAddTitle}>
               Title card
             </DropdownMenu.Item>
@@ -217,9 +232,9 @@ function EditorTools({ editor }: { editor: EditorControls }) {
             <DropdownMenu.Item
               className={styles.item}
               disabled={!editor.hasSelection}
-              onSelect={editor.onAddBroll}
+              onSelect={editor.onAddLayer}
             >
-              B-roll…
+              Layer…
             </DropdownMenu.Item>
             <DropdownMenu.Item className={styles.item} onSelect={editor.onAddMusic}>
               Music…
@@ -239,6 +254,19 @@ function EditorTools({ editor }: { editor: EditorControls }) {
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
+      <input
+        ref={videoInput}
+        type="file"
+        accept={MEDIA_ACCEPT}
+        multiple
+        hidden
+        data-testid="add-video-input"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = '';
+          if (files.length > 0) editor.onAddVideos(files);
+        }}
+      />
 
       <label className={styles.transition}>
         <span className={ui.muted}>Transitions</span>

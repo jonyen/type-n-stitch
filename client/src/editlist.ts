@@ -8,6 +8,7 @@ import type {
   Edit,
   OverdubEdit,
   Range,
+  Source,
   TitleEdit,
   Transition,
   Word,
@@ -121,10 +122,37 @@ function complement(from: number, to: number, holes: Range[]): Range[] {
 const RANK: Record<Piece['kind'], number> = { title: 0, overdub: 1, source: 2 };
 
 /**
+ * Lay piece starts out in output order. With no `order`, source order.
+ * Otherwise each start joins a parent: the greatest `order` entry at or
+ * before it (entries whose piece has since gone still count), else the
+ * smallest entry. Groups follow `order`; each group is in source order. So a
+ * cut, split or head trim made after a move keeps what remains of a piece
+ * where the piece was. Mirrors the engine's `order_starts`.
+ */
+export function orderStarts(starts: number[], order: number[]): number[] {
+  const sorted = [...starts].sort((a, b) => a - b);
+  if (order.length === 0) return sorted;
+  const parent = (s: number): number => {
+    let best = -1;
+    order.forEach((o, i) => {
+      if (o <= s + EPS && (best === -1 || o > (order[best] as number))) best = i;
+    });
+    if (best !== -1) return best;
+    let least = 0;
+    order.forEach((o, i) => {
+      if (o < (order[least] as number)) least = i;
+    });
+    return least;
+  };
+  const parents = sorted.map(parent);
+  const out: number[] = [];
+  order.forEach((_, i) => sorted.forEach((s, j) => parents[j] === i && out.push(s)));
+  return out;
+}
+
+/**
  * The kept source split at every reorder split point, then laid out in
- * output order: entries named in `order` first (in that order, deduped),
- * then any remaining pieces in source order. Mirrors the engine's
- * `ordered_pieces`.
+ * output order by `orderStarts`. Mirrors the engine's `ordered_pieces`.
  */
 export function orderedPieces(
   duration: number,
@@ -144,14 +172,10 @@ export function orderedPieces(
     }
     source.push({ start: cursor, end: kept.end });
   }
-  const same = (a: number, b: number) => Math.abs(a - b) < EPS;
-  const out: Range[] = [];
-  for (const s of order) {
-    const r = source.find((x) => same(x.start, s));
-    if (r && !out.some((o) => same(o.start, s))) out.push(r);
-  }
-  for (const r of source) if (!out.some((o) => same(o.start, r.start))) out.push(r);
-  return out;
+  return orderStarts(
+    source.map((r) => r.start),
+    order,
+  ).map((s) => source.find((r) => r.start === s) as Range);
 }
 
 /** Index of the ordered piece that owns source time `t`: containing it, or the next one after it. */
@@ -182,11 +206,14 @@ export function pieces(
   const dubs = edits
     .map((e, index) => ({ e, index }))
     .filter((x): x is { e: OverdubEdit; index: number } => x.e.kind === 'overdub')
-    .filter(({ e }) => e.end > e.start);
+    .filter(({ e }) => e.end > e.start)
+    // A hold past the stitched end (say, a video undone under it) plays nothing.
+    .filter(({ e }) => e.start < duration - EPS);
   const holes = normalizeCuts(dubs.map(({ e }) => e));
   const cards = edits
     .map((e, index) => ({ e, index }))
-    .filter((x): x is { e: TitleEdit; index: number } => x.e.kind === 'title');
+    .filter((x): x is { e: TitleEdit; index: number } => x.e.kind === 'title')
+    .filter(({ e }) => e.at <= duration + EPS);
 
   const owned: Piece[][] = Array.from({ length: ordered.length + 1 }, () => []);
   for (const { e, index } of dubs) {
@@ -303,11 +330,24 @@ export function nearDipJoin(t: number, list: Piece[], joinList: Join[]): boolean
  * word's start (or the end of the media), so the pause after the last word
  * goes with it and no half-gaps are left behind.
  */
-export function rangeForWords(words: Word[], from: number, to: number, duration: number): Range {
+export function rangeForWords(
+  words: Word[],
+  from: number,
+  to: number,
+  duration: number,
+  sources: readonly Placed[] = [],
+): Range {
   const first = words[from];
   if (!first) throw new Error(`no word at index ${from}`);
   const next = words[to + 1];
-  return { start: first.start, end: next ? next.start : duration };
+  const end = next ? next.start : duration;
+  // A word never owns time in another file: the last word before a join stops
+  // at its own file's end, transcribed next file or not. The server's MCP
+  // `word_range` clamps the same way.
+  const last = words[to];
+  const own = last ? locate(sources, last.start) : null;
+  const src = own ? sources[own.index] : undefined;
+  return { start: first.start, end: src ? Math.min(end, src.offset + src.duration) : end };
 }
 
 export type WordStatus = 'kept' | 'cut' | 'overdub';
@@ -393,4 +433,47 @@ export function pieceStarts(edits: Edit[], splits: number[]): number[] {
     if (!inCut && !starts.some((x) => Math.abs(x - s) < EPS)) starts.push(s);
   }
   return starts.sort((a, b) => a - b);
+}
+
+type Placed = Pick<Source, 'offset' | 'duration'>;
+
+/** Where the stitched sources end: the last one's offset plus its duration. 0 with none. */
+export function stitchedDuration(sources: readonly Placed[]): number {
+  const last = sources[sources.length - 1];
+  return last ? last.offset + last.duration : 0;
+}
+
+/**
+ * The source holding stitched instant `t` and the time inside it. An instant
+ * within EPS of a join belongs to the later source; the stitched end is the
+ * last source at its full duration. Null before 0, past the end, or with no
+ * sources. Mirrors the engine's `locate`.
+ */
+export function locate(
+  sources: readonly Placed[],
+  t: number,
+): { index: number; local: number } | null {
+  const last = sources.length - 1;
+  const end = stitchedDuration(sources);
+  if (last < 0 || t < -EPS || t > end + EPS) return null;
+  if (t >= end - EPS) return { index: last, local: (sources[last] as Placed).duration };
+  let index = 0;
+  for (let i = last; i >= 0; i--) {
+    if (t >= (sources[i] as Placed).offset - EPS) {
+      index = i;
+      break;
+    }
+  }
+  const s = sources[index] as Placed;
+  return { index, local: Math.min(Math.max(t - s.offset, 0), s.duration) };
+}
+
+/** The instants where one source ends and the next begins: every offset after the first. */
+export function sourceJoins(sources: readonly Placed[]): number[] {
+  return sources.slice(1).map((s) => s.offset);
+}
+
+/** True when `at` is a join. The fold never unsplits one. */
+export function isJoin(at: number, sources: readonly Placed[]): boolean {
+  return sourceJoins(sources).some((j) => Math.abs(j - at) < EPS);
 }

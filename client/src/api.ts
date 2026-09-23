@@ -1,7 +1,16 @@
 // Thin fetch wrappers over the Rust server. Errors carry the server's message.
 
 import type { ClientOp, DocState } from './ops';
-import type { Asset, CutEdit, LibraryItem, ProjectSummary, TokenInfo, User, Word } from './types';
+import type {
+  Asset,
+  CutEdit,
+  LibraryItem,
+  ProjectSummary,
+  SourceView,
+  TokenInfo,
+  User,
+  Word,
+} from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -24,22 +33,27 @@ export function setUnauthorizedHandler(fn: (() => void) | null): void {
   onUnauthorized = fn;
 }
 
+const UNREACHABLE = 'Could not reach the server. Is `cargo run -p server` running?';
+
+/** The server's `{ error }` text, else the status line. */
+function errorMessage(body: unknown, status: number, statusText: string): string {
+  return body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
+    ? body.error
+    : `${status} ${statusText}`;
+}
+
 export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(url, init);
   } catch {
-    throw new ApiError('Could not reach the server. Is `cargo run -p server` running?', 0);
+    throw new ApiError(UNREACHABLE, 0);
   }
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     // A failed sign-in is also a 401; it must not wipe an existing session.
     if (response.status === 401 && !url.startsWith('/api/auth/')) onUnauthorized?.();
-    const message =
-      body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
-        ? body.error
-        : `${response.status} ${response.statusText}`;
-    throw new ApiError(message, response.status);
+    throw new ApiError(errorMessage(body, response.status, response.statusText), response.status);
   }
   return body as T;
 }
@@ -52,10 +66,65 @@ function postJson<T>(url: string, payload: unknown): Promise<T> {
   });
 }
 
-export function uploadMedia(file: File): Promise<ProjectSummary> {
+/**
+ * A multipart POST that reports how much of the body has gone up (fetch
+ * cannot), with `request`'s errors. Progress ends at 1 once the server answers.
+ */
+export function upload<T>(
+  url: string,
+  form: FormData,
+  onProgress?: (fraction: number) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && e.total > 0) onProgress(e.loaded / e.total);
+      };
+    }
+    xhr.onerror = () => reject(new ApiError(UNREACHABLE, 0));
+    xhr.onabort = () => reject(new ApiError(UNREACHABLE, 0));
+    xhr.ontimeout = () => reject(new ApiError(UNREACHABLE, 0));
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        body = null;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        if (xhr.status === 401) onUnauthorized?.();
+        reject(new ApiError(errorMessage(body, xhr.status, xhr.statusText), xhr.status));
+        return;
+      }
+      onProgress?.(1);
+      resolve(body as T);
+    };
+    xhr.send(form);
+  });
+}
+
+function fileForm(file: File): FormData {
   const form = new FormData();
   form.append('file', file, file.name);
-  return request<ProjectSummary>('/api/projects', { method: 'POST', body: form });
+  return form;
+}
+
+export function uploadMedia(
+  file: File,
+  onProgress?: (fraction: number) => void,
+): Promise<ProjectSummary> {
+  return upload<ProjectSummary>('/api/projects', fileForm(file), onProgress);
+}
+
+/** Append a file to the end of the project's main track (editors and owners). */
+export function addSource(
+  projectId: string,
+  file: File,
+  onProgress?: (fraction: number) => void,
+): Promise<SourceView> {
+  return upload<SourceView>(`/api/projects/${projectId}/sources`, fileForm(file), onProgress);
 }
 
 export function listLibrary(): Promise<LibraryItem[]> {
@@ -78,11 +147,18 @@ export function submitOps(id: string, ops: ClientOp[]): Promise<DocState> {
   return postJson(`/api/projects/${id}/ops`, { ops });
 }
 
+/**
+ * The stitched words of every source whose transcript is ready, and each
+ * source's status. Waits for source 0 only; the server transcribes the
+ * others in the background and starts any that is `pending`. `sources` is
+ * absent from a server that predates sources.
+ */
+export function transcribeProject(id: string): Promise<{ words: Word[]; sources?: SourceView[] }> {
+  return request(`/api/projects/${id}/transcribe`, { method: 'POST' });
+}
+
 export async function transcribeMedia(id: string): Promise<Word[]> {
-  const { words } = await request<{ words: Word[] }>(`/api/projects/${id}/transcribe`, {
-    method: 'POST',
-  });
-  return words;
+  return (await transcribeProject(id)).words;
 }
 
 export interface Suggestions {

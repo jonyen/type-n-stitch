@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Tooltip } from 'radix-ui';
 import { describe, expect, it, vi } from 'vitest';
@@ -22,10 +22,12 @@ function controls(exportState: ExportState, headSeq: number): EditorControls {
     hasSelection: false,
     onAddTitle: vi.fn(),
     onAddCaption: vi.fn(),
-    onAddBroll: vi.fn(),
+    onAddLayer: vi.fn(),
     onAddMusic: vi.fn(),
+    onAddVideos: vi.fn(),
     onOverdub: vi.fn(),
     onSplit: vi.fn(),
+    addingVideos: false,
     transition: 'none',
     onTransition: vi.fn(),
     peers: [],
@@ -37,8 +39,8 @@ function controls(exportState: ExportState, headSeq: number): EditorControls {
   };
 }
 
-function setup(exportState: ExportState, headSeq: number) {
-  const editor = controls(exportState, headSeq);
+function setup(exportState: ExportState, headSeq: number, overrides: Partial<EditorControls> = {}) {
+  const editor = { ...controls(exportState, headSeq), ...overrides };
   render(
     <Tooltip.Provider>
       <TopBar
@@ -103,5 +105,48 @@ describe('Export', () => {
     expect(screen.getByRole('progressbar')).toBeTruthy();
     // Reopening never starts a second render.
     expect(editor.onExport).not.toHaveBeenCalled();
+  });
+});
+
+describe('Insert → Add video…', () => {
+  it('opens a multi-file picker and hands over every chosen file', async () => {
+    const user = userEvent.setup();
+    const editor = setup({ status: 'idle' }, 1);
+    const input = screen.getByTestId('add-video-input') as HTMLInputElement;
+    expect(input.multiple).toBe(true);
+    const click = vi.spyOn(input, 'click').mockImplementation(() => undefined);
+    await user.click(screen.getByRole('button', { name: 'Insert ▾' }));
+    await user.click(await screen.findByRole('menuitem', { name: /Add video/ }));
+    expect(click).toHaveBeenCalledOnce();
+    const a = new File(['a'], 'a.mp4', { type: 'video/mp4' });
+    const b = new File(['b'], 'b.mov', { type: 'video/quicktime' });
+    fireEvent.change(input, { target: { files: [a, b] } });
+    expect(editor.onAddVideos).toHaveBeenCalledWith([a, b]);
+  });
+
+  it('is disabled while videos are being added', async () => {
+    const user = userEvent.setup();
+    setup({ status: 'idle' }, 1, { addingVideos: true });
+    await user.click(screen.getByRole('button', { name: 'Insert ▾' }));
+    const item = await screen.findByRole('menuitem', { name: /Add video/ });
+    expect(item.getAttribute('aria-disabled')).toBe('true');
+  });
+});
+
+describe('Insert', () => {
+  it('adds a layer from Insert → Layer… when words are selected', async () => {
+    const user = userEvent.setup();
+    const editor = setup({ status: 'idle' }, 0, { hasSelection: true });
+    await user.click(screen.getByRole('button', { name: 'Insert ▾' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Layer…' }));
+    expect(editor.onAddLayer).toHaveBeenCalledOnce();
+  });
+
+  it('offers no B-roll item any more', async () => {
+    const user = userEvent.setup();
+    setup({ status: 'idle' }, 0, { hasSelection: true });
+    await user.click(screen.getByRole('button', { name: 'Insert ▾' }));
+    await screen.findByRole('menuitem', { name: 'Layer…' });
+    expect(screen.queryByRole('menuitem', { name: /B-roll/ })).toBeNull();
   });
 });

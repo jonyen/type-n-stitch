@@ -84,6 +84,22 @@ impl AppError {
         }
     }
 
+    /// A multipart body that could not be read, keeping axum's status: 413
+    /// when it ran past the upload limit, 400 when it was malformed.
+    /// `context` goes before axum's own words.
+    pub fn multipart(err: &axum::extract::multipart::MultipartError, context: &str) -> Self {
+        let text = err.body_text();
+        Self {
+            status: err.status(),
+            message: if context.is_empty() {
+                text
+            } else {
+                format!("{context}: {text}")
+            },
+            index: None,
+        }
+    }
+
     pub fn status(&self) -> StatusCode {
         self.status
     }

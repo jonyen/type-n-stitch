@@ -2,7 +2,7 @@
 // append, who else is here and where they are. Writes do not go here —
 // they stay on POST /ops (see opQueue.ts). Reconnects with backoff.
 
-import type { Edit } from './types';
+import type { Edit, Source } from './types';
 
 export interface PeerInfo {
   id: string;
@@ -32,6 +32,7 @@ export type ServerMsg =
       speakerNames: string[];
       splits?: number[];
       order?: number[];
+      sources?: Source[];
       peers: Peer[];
       you: Peer;
     }
@@ -44,6 +45,7 @@ export type ServerMsg =
       speakerNames: string[];
       splits?: number[];
       order?: number[];
+      sources?: Source[];
     }
   | { t: 'presence'; connId: string; user: PeerInfo; state: PresenceState }
   | { t: 'left'; connId: string }
@@ -54,6 +56,7 @@ export type ServerMsg =
       speakerNames: string[];
       splits?: number[];
       order?: number[];
+      sources?: Source[];
     }
   | { t: 'pong' }
   | { t: 'error'; code: string; detail: string };

@@ -106,6 +106,22 @@ pub fn assign_speakers(words: &[Word], turns: &[SpeakerTurn]) -> Vec<Option<u32>
         .collect()
 }
 
+/// Speaker labels for the stitched transcript, parallel to `stitch_words`
+/// over the same sources. Each part is one source's speaker count and its
+/// per-word labels, in source order. A source's labels move up by the
+/// speakers of every source before it, so speaker 0 in two videos stays two
+/// people. Returns the stitched count and labels.
+pub fn stitch_speakers(parts: &[(u32, &[Option<u32>])]) -> (u32, Vec<Option<u32>>) {
+    let mut base = 0u32;
+    let mut labels = Vec::with_capacity(parts.iter().map(|(_, w)| w.len()).sum());
+    for (count, words) in parts {
+        labels.extend(words.iter().map(|s| s.map(|s| s + base)));
+        let used = words.iter().flatten().map(|s| s + 1).max().unwrap_or(0);
+        base += (*count).max(used);
+    }
+    (base, labels)
+}
+
 fn distance(t: f64, turn: &SpeakerTurn) -> f64 {
     if t < turn.start {
         turn.start - t
@@ -213,5 +229,32 @@ Started
         opts.num_speakers = Some(2);
         let args = diarize_args("a.wav", &opts);
         assert!(args.contains(&"--clustering.num-clusters=2".to_owned()));
+    }
+
+    #[test]
+    fn stitched_speakers_are_namespaced_per_source() {
+        let first = [Some(0), Some(1), None, Some(0)];
+        let third = [Some(2), Some(0)];
+        let (count, labels) = stitch_speakers(&[(2, &first), (0, &[]), (3, &third)]);
+        assert_eq!(count, 5);
+        assert_eq!(
+            labels,
+            vec![Some(0), Some(1), None, Some(0), Some(4), Some(2)]
+        );
+    }
+
+    #[test]
+    fn a_count_below_the_labels_never_merges_two_sources() {
+        // A label of 2 with a stated count of 1: the base still clears it.
+        let (count, labels) = stitch_speakers(&[(1, &[Some(0), Some(2)]), (1, &[Some(0)])]);
+        assert_eq!(labels, vec![Some(0), Some(2), Some(3)]);
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn stitching_one_source_is_the_identity() {
+        let words = [Some(1), None, Some(0)];
+        assert_eq!(stitch_speakers(&[(2, &words)]), (2, words.to_vec()));
+        assert_eq!(stitch_speakers(&[]), (0, vec![]));
     }
 }

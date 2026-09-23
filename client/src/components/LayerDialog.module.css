@@ -1,0 +1,121 @@
+.preview {
+  width: 100%;
+  max-height: 180px;
+  margin-top: var(--space-2);
+  border-radius: var(--radius);
+  background: #000;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.label {
+  flex: none;
+  width: 48px;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.option:hover {
+  background: var(--hover);
+}
+
+.option.on {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* A 16:9 miniature of the frame, with the layer drawn where it will sit. */
+.thumb {
+  position: relative;
+  flex: none;
+  width: 24px;
+  height: 14px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  opacity: 0.85;
+}
+
+.pane {
+  position: absolute;
+  background: currentColor;
+}
+
+.full {
+  inset: 1px;
+}
+
+.pipTopLeft,
+.pipTopRight,
+.pipBottomLeft,
+.pipBottomRight {
+  width: 8px;
+  height: 5px;
+}
+
+.pipTopLeft {
+  top: 1px;
+  left: 1px;
+}
+
+.pipTopRight {
+  top: 1px;
+  right: 1px;
+}
+
+.pipBottomLeft {
+  bottom: 1px;
+  left: 1px;
+}
+
+.pipBottomRight {
+  bottom: 1px;
+  right: 1px;
+}
+
+.sound {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.level {
+  flex: 1;
+  min-width: 160px;
+}
+
+@media (max-width: 600px) {
+  .row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+}

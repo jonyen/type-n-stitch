@@ -4,14 +4,16 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { shouldIgnoreGlobalKey } from '../keyboardGuard';
+import type { OverlayRef } from '../selection';
 import { SelectionToolbar } from './SelectionToolbar';
 
 function toolbar(
-  overlay: { kind: 'broll' | 'audio'; start: number } | null,
+  overlay: OverlayRef | null,
   onDismiss = vi.fn(),
   anchorIndex: number | null = null,
 ) {
   const onDelete = vi.fn();
+  const onLayer = vi.fn();
   render(
     <SelectionToolbar
       anchorIndex={anchorIndex}
@@ -22,11 +24,11 @@ function toolbar(
       onDelete={onDelete}
       onOverdub={vi.fn()}
       onCaption={vi.fn()}
-      onBroll={vi.fn()}
+      onLayer={onLayer}
       onDismiss={onDismiss}
     />,
   );
-  return onDelete;
+  return { onDelete, onLayer };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -38,11 +40,33 @@ function layout(visible: boolean) {
   );
 }
 
-describe('SelectionToolbar over a selected overlay bar', () => {
-  it('offers Delete only, below the bar', () => {
+describe('SelectionToolbar over words', () => {
+  it('offers Layer where B-roll was', () => {
     layout(true);
-    render(<button type="button" data-overlay="broll:2" />);
-    const onDelete = toolbar({ kind: 'broll', start: 2 });
+    render(<button type="button" data-index="3" />);
+    const { onLayer } = toolbar(null, vi.fn(), 3);
+    const bar = screen.getByRole('toolbar', { name: 'Selection' });
+    expect(Array.from(bar.querySelectorAll('button'), (b) => b.textContent)).toEqual([
+      'Delete',
+      'Overdub',
+      'Caption',
+      'Layer',
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Layer' }));
+    expect(onLayer).toHaveBeenCalledOnce();
+  });
+});
+
+describe('SelectionToolbar over a selected overlay bar', () => {
+  it('offers Delete only, below the layer’s bar on its own track', () => {
+    layout(true);
+    render(
+      <>
+        <button type="button" data-overlay="v3:2" />
+        <button type="button" data-overlay="v2:2" />
+      </>,
+    );
+    const { onDelete } = toolbar({ kind: 'layer', track: 2, start: 2 });
     const bar = screen.getByRole('toolbar', { name: 'Selection' });
     expect(bar.getAttribute('data-side')).toBe('bottom');
     expect(Array.from(bar.querySelectorAll('button'), (b) => b.textContent)).toEqual(['Delete']);

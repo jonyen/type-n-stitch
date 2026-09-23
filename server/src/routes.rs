@@ -12,10 +12,10 @@ use anyhow::Context;
 use axum::extract::{Multipart, Path as UrlPath, State};
 use axum::Json;
 use engine::{
-    assign_speakers, build_ffmpeg_args, filler_cuts, output_duration, pause_cuts,
-    silence_pause_cuts, text, thumbnail_args, thumbnail_sheet, timeline_with, Edit, ExportError,
-    ExportOptions, MediaKind, OutputFormat, Range, SpeakerTurn, SuggestOptions, ThumbnailSheet,
-    VideoInfo, Word, DEFAULT_VIDEO,
+    assign_speakers, build_ffmpeg_args, canvas, filler_cuts, output_duration, pause_cuts,
+    silence_pause_cuts, sources_kind, stitched_duration, text, thumbnail_args, thumbnail_sheet,
+    timeline_with, Edit, ExportError, ExportOptions, MediaKind, OutputFormat, ProjectDoc, Range,
+    Source, SourceInput, SpeakerTurn, SuggestOptions, ThumbnailSheet, VideoInfo, Word,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -89,7 +89,7 @@ pub async fn upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?
+        .map_err(|e| AppError::multipart(&e, ""))?
     {
         if field.name() == Some("file") {
             let meta = store_upload(&state, field).await?;
@@ -102,7 +102,10 @@ pub async fn upload(
     Err(AppError::bad_request("missing `file` field"))
 }
 
-async fn store_upload(
+/// Store a multipart `file` field as a new media item and probe it. On any
+/// failure after the directory exists, the directory is removed, so a
+/// rejected upload leaves nothing behind.
+pub(crate) async fn store_upload(
     state: &AppState,
     mut field: axum::extract::multipart::Field<'_>,
 ) -> AppResult<Meta> {
@@ -127,21 +130,30 @@ async fn store_upload(
     let source_name = format!("source.{ext}");
     let source = dir.join(&source_name);
 
-    let mut file = tokio::fs::File::create(&source)
-        .await
-        .context("creating upload")?;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| AppError::bad_request(format!("upload interrupted: {e}")))?
-    {
-        file.write_all(&chunk).await.context("writing upload")?;
+    let stored = async {
+        let mut file = tokio::fs::File::create(&source)
+            .await
+            .context("creating upload")?;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| AppError::multipart(&e, "upload interrupted"))?
+        {
+            file.write_all(&chunk).await.context("writing upload")?;
+        }
+        file.flush().await.context("flushing upload")?;
+        media::probe(&source)
+            .await
+            .map_err(|e| AppError::bad_request(format!("could not read media: {e:#}")))
     }
-    file.flush().await.context("flushing upload")?;
-
-    let probe = media::probe(&source)
-        .await
-        .map_err(|e| AppError::bad_request(format!("could not read media: {e:#}")))?;
+    .await;
+    let probe = match stored {
+        Ok(probe) => probe,
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            return Err(e);
+        }
+    };
     let meta = Meta {
         url: format!("/data/{id}/{source_name}"),
         id,
@@ -158,16 +170,25 @@ async fn store_upload(
     Ok(meta)
 }
 
-#[derive(Serialize)]
-pub struct Transcript {
-    words: Vec<Word>,
-}
-
 /// Transcript cache file. Bump the version when the whisper invocation changes
 /// in a way that alters the words (v2: disfluency prompt keeps "um"/"uh").
 pub(crate) const WORDS_CACHE: &str = "words-v2.json";
 
-/// `POST /api/projects/:id/transcribe` — whisper.cpp word timestamps (cached).
+#[derive(Serialize)]
+pub struct Transcript {
+    /// Every ready source's words in stitched time.
+    words: Vec<Word>,
+    /// Every source, with how far its transcript has got.
+    sources: Vec<crate::sources::SourceView>,
+}
+
+/// `POST /api/projects/:id/transcribe` — the project's stitched words, and
+/// each source's transcript status.
+///
+/// The first source is transcribed before answering, as it always was, so
+/// a client that predates sources gets its words exactly as before. Every
+/// other source is transcribed in the background; the client asks again
+/// while any is `pending` or `running`.
 ///
 /// Deliberately open to every member, viewers included: the transcript *is*
 /// the document, so a viewer cannot see the project without it. The result is
@@ -176,21 +197,15 @@ pub async fn transcribe(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
 ) -> AppResult<Json<Transcript>> {
-    let id = access.project.media_id.clone();
-    let words = transcribe_item(&state, &id).await?;
-    Ok(Json(Transcript { words }))
-}
-
-/// Transcript words plus speaker labels for a media item, tolerating a
-/// diarization failure the way the client does: labels come back `None` and
-/// the transcript is still usable on its own.
-pub async fn transcript_for(
-    state: &AppState,
-    media_id: &str,
-) -> AppResult<(Vec<Word>, Option<Speakers>)> {
-    let words = transcribe_item(state, media_id).await?;
-    let speakers = speakers_item(state, media_id).await.ok();
-    Ok((words, speakers))
+    transcribe_item(&state, &access.project.media_id).await?;
+    let (_, doc) = load_doc(&state, &access.project.id).await?;
+    let sources = crate::sources::timeline(&state, &access.project, &doc).await?;
+    for source in sources.iter().skip(1) {
+        crate::sources::start_transcription(&state, &source.media);
+    }
+    let words = crate::sources::stitched_words(&state, &sources).await?;
+    let sources = crate::sources::views(&state, &sources).await?;
+    Ok(Json(Transcript { words, sources }))
 }
 
 /// Words for a media item, running whisper.cpp only if nothing is cached.
@@ -201,26 +216,56 @@ pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>>
         return Ok(serde_json::from_str(&json).context("parsing cached words")?);
     }
 
-    let meta = read_meta(&dir).await?;
-    let source = dir.join(format!("source.{}", meta.ext));
-    let wav = dir.join("whisper.wav");
-    media::to_whisper_wav(&source, &wav)
+    whisper_guarded(state, &dir, || async {
+        let meta = read_meta(&dir).await?;
+        let source = dir.join(format!("source.{}", meta.ext));
+        let wav = dir.join("whisper.wav");
+        media::to_whisper_wav(&source, &wav)
+            .await
+            .map_err(|e| AppError::upstream(format!("{e:#}")))?;
+        let words = media::transcribe(
+            &state.config.whisper_bin,
+            &state.config.whisper_model,
+            &wav,
+            &dir.join("whisper"),
+        )
         .await
         .map_err(|e| AppError::upstream(format!("{e:#}")))?;
-    let words = media::transcribe(
-        &state.config.whisper_bin,
-        &state.config.whisper_model,
-        &wav,
-        &dir.join("whisper"),
-    )
-    .await
-    .map_err(|e| AppError::upstream(format!("{e:#}")))?;
 
-    tokio::fs::write(&cached, serde_json::to_vec(&words)?)
+        // Atomically: a client polling `/transcribe` must never read half a file.
+        write_json_atomic(&cached, &serde_json::to_vec(&words)?)
+            .await
+            .context("caching words")?;
+        tracing::info!(id, words = words.len(), "transcribed");
+        Ok(words)
+    })
+    .await
+}
+
+/// Run `whisper` (a transcription of the media in `dir` that caches its
+/// words there) holding a slot of `AppState::whisper`, unless the words were
+/// cached while it waited. Every run goes through here, the foreground
+/// `/transcribe` and background jobs alike, so with one slot whisper never
+/// runs twice on one directory at once, and a caller that queued behind a
+/// run of the same media reads its words instead of running again.
+pub(crate) async fn whisper_guarded<F, Fut>(
+    state: &AppState,
+    dir: &Path,
+    whisper: F,
+) -> AppResult<Vec<Word>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<Word>>>,
+{
+    let _slot = state
+        .whisper
+        .acquire()
         .await
-        .context("caching words")?;
-    tracing::info!(id, words = words.len(), "transcribed");
-    Ok(words)
+        .context("whisper slots closed")?;
+    if let Ok(json) = tokio::fs::read_to_string(dir.join(WORDS_CACHE)).await {
+        return Ok(serde_json::from_str(&json).context("parsing cached words")?);
+    }
+    whisper().await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,9 +279,10 @@ pub struct Speakers {
 }
 
 /// Speaker cache file. Bump the version when diarization settings change.
-const SPEAKERS_CACHE: &str = "speakers-v1.json";
+pub(crate) const SPEAKERS_CACHE: &str = "speakers-v1.json";
 
-/// `POST /api/projects/:id/speakers` — who says each word (cached).
+/// `POST /api/projects/:id/speakers` — who says each stitched word (cached
+/// per media), namespaced per source.
 ///
 /// Readable by every member, viewers included: speaker turns are part of
 /// viewing the transcript, and the answer is cached per media.
@@ -244,8 +290,11 @@ pub async fn speakers(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
 ) -> AppResult<Json<Speakers>> {
-    let id = access.project.media_id.clone();
-    speakers_item(&state, &id).await.map(Json)
+    let (_, doc) = load_doc(&state, &access.project.id).await?;
+    let sources = crate::sources::timeline(&state, &access.project, &doc).await?;
+    crate::sources::stitched_speakers(&state, &sources)
+        .await
+        .map(Json)
 }
 
 /// Speaker labels for a transcribed item, running the diarizer only if
@@ -265,7 +314,7 @@ pub async fn speakers_item(state: &AppState, id: &str) -> AppResult<Speakers> {
         words: assign_speakers(&words, &turns),
         turns,
     };
-    tokio::fs::write(&cached, serde_json::to_vec(&speakers)?)
+    write_json_atomic(&cached, &serde_json::to_vec(&speakers)?)
         .await
         .context("caching speakers")?;
     tracing::info!(id, speakers = speakers.count, "diarized");
@@ -283,16 +332,34 @@ pub struct Thumbnails {
 /// Sprite sheet cache file. Bump the version when the sheet layout changes.
 const THUMBS_CACHE: &str = "thumbs-v1.jpg";
 
+#[derive(Default, Deserialize)]
+pub struct ThumbnailsRequest {
+    /// Which of the project's sources; the first when omitted.
+    media: Option<String>,
+}
+
 /// `POST /api/projects/:id/thumbnails` — a sprite sheet of frames for the
-/// scrubber preview, rendered once per video and cached.
+/// scrubber preview, rendered once per video and cached. The body is
+/// optional; `{ "media": id }` picks one of the project's sources.
 ///
 /// Readable by every member, viewers included: the scrubber preview is part
 /// of playback, and the sheet is rendered once per media and cached.
 pub async fn thumbnails(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
+    body: Option<Json<ThumbnailsRequest>>,
 ) -> AppResult<Json<Thumbnails>> {
-    let id = access.project.media_id.clone();
+    let id = match body.and_then(|Json(b)| b.media) {
+        Some(media) => {
+            if !crate::sources::in_registry(&state.db, &access.project.id, &media).await? {
+                return Err(AppError::bad_request(
+                    "that media is not one of this project's videos",
+                ));
+            }
+            media
+        }
+        None => access.project.media_id.clone(),
+    };
     let dir = media_dir(&state, &id)?;
     let meta = read_meta(&dir).await?;
     if meta.kind != MediaKind::Video {
@@ -358,18 +425,22 @@ pub struct Suggestions {
     pub pauses: Vec<Edit>,
 }
 
-/// `POST /api/projects/:id/suggest` — filler-word and long-pause cuts the
-/// client can apply as one batch. The body is optional. Unlike the other
-/// read-only media routes this one prepares edits, so it needs edit rights.
+/// `POST /api/projects/:id/suggest` — filler-word and long-pause cuts across
+/// every ready source, in stitched time, which the client can apply as one
+/// batch. The body is optional. Unlike the other read-only media routes this
+/// one prepares edits, so it needs edit rights.
 pub async fn suggest(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
     body: Option<Json<SuggestRequest>>,
 ) -> AppResult<Json<Suggestions>> {
     access.require_edit()?;
-    let id = access.project.media_id.clone();
     let two_word_fillers = body.is_some_and(|Json(b)| b.two_word_fillers);
-    suggest_for(&state, &id, two_word_fillers).await.map(Json)
+    let (_, doc) = load_doc(&state, &access.project.id).await?;
+    let sources = crate::sources::timeline(&state, &access.project, &doc).await?;
+    crate::sources::suggest_project(&state, &sources, two_word_fillers)
+        .await
+        .map(Json)
 }
 
 /// Filler-word and long-pause cut suggestions for a media item.
@@ -543,7 +614,7 @@ fn image_hash(parts: &[&str], video: VideoInfo) -> String {
 }
 
 /// `write_atomic` for a file the handler rewrites off the async path.
-async fn write_json_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) async fn write_json_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let partial = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
     tokio::fs::write(&partial, bytes)
         .await
@@ -631,27 +702,18 @@ pub async fn export(
         .map(Json)
 }
 
-/// Fold the log, plan the render and start ffmpeg in the background for
-/// `project`, returning a job id to poll. `format` overrides the source
-/// kind's default (`mp4`, `mp3` or `wav`).
-pub async fn start_export(
-    state: &Arc<AppState>,
-    project: &Project,
-    format: Option<&str>,
-) -> AppResult<ExportStarted> {
-    let id = project.media_id.clone();
-    let dir = media_dir(state, &id)?;
-    let mut meta = read_meta(&dir).await?;
+/// A media item's source file and meta. Media probed before frame sizes were
+/// recorded is probed once more and the answer remembered, so later exports
+/// skip the extra ffprobe. A failure is not fatal — the render falls back to
+/// `DEFAULT_VIDEO` — but it is worth saying out loud.
+async fn source_meta(state: &AppState, id: &str) -> AppResult<(PathBuf, Meta)> {
+    let (path, mut meta) = crate::sources::source_file(state, id).await?;
     if meta.kind == MediaKind::Video && meta.video.is_none() {
-        // Media probed before dimensions were recorded: probe once more and
-        // remember, so later exports skip the extra ffprobe. A failure is not
-        // fatal — the render falls back to `DEFAULT_VIDEO` — but it is worth
-        // saying out loud.
-        match media::probe(&dir.join(format!("source.{}", meta.ext))).await {
+        match media::probe(&path).await {
             Ok(probe) => {
                 meta.video = probe.video;
                 let json = serde_json::to_vec_pretty(&meta)?;
-                if let Err(e) = write_json_atomic(&dir.join("meta.json"), &json).await {
+                if let Err(e) = write_json_atomic(&path.with_file_name("meta.json"), &json).await {
                     tracing::warn!(id, "could not record the frame size: {e:#}");
                 }
             }
@@ -661,7 +723,58 @@ pub async fn start_export(
             ),
         }
     }
+    Ok((path, meta))
+}
+
+/// Every main-track file of `project` in stitched order, as the planner wants
+/// them, and the stitched transcript for ducking. The project's own media is
+/// source 0; `doc_sources` (the fold's) follow. A source with no transcript
+/// yet contributes no words: ducking is best-effort.
+pub(crate) async fn export_sources(
+    state: &AppState,
+    project: &Project,
+    doc_sources: &[Source],
+) -> AppResult<(Vec<SourceInput>, Vec<Word>)> {
+    let doc = ProjectDoc {
+        sources: doc_sources.to_vec(),
+        ..ProjectDoc::default()
+    };
+    let placed = crate::sources::timeline(state, project, &doc).await?;
+    let mut inputs = Vec::with_capacity(placed.len());
+    for source in &placed {
+        let (path, meta) = source_meta(state, &source.media).await?;
+        inputs.push(SourceInput {
+            source: source.clone(),
+            path,
+            kind: meta.kind,
+            video: meta.video,
+        });
+    }
+    let words = crate::sources::stitched_words(state, &placed)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(project = project.id, "exporting without ducking: {e:?}");
+            Vec::new()
+        });
+    Ok((inputs, words))
+}
+
+/// Fold the log, plan the render and start ffmpeg in the background for
+/// `project`, returning a job id to poll. `format` overrides the source
+/// kind's default (`mp4`, `mp3` or `wav`).
+pub async fn start_export(
+    state: &Arc<AppState>,
+    project: &Project,
+    format: Option<&str>,
+) -> AppResult<ExportStarted> {
+    let id = project.media_id.clone();
+    // Overdub WAVs and the rendered file live under the project's first media.
+    let dir = media_dir(state, &id)?;
     let (_, doc) = load_doc(state, &project.id).await?;
+    let (sources, words) = export_sources(state, project, &doc.sources).await?;
+    let kind = sources_kind(&sources);
+    let video = canvas(&sources);
+    let duration = stitched_duration(&sources.iter().map(|s| s.source.clone()).collect::<Vec<_>>());
     // A title or caption with nothing but whitespace draws nothing; dropping
     // it here keeps the planner from asking for an image that would be blank.
     // `validate` rejects blank text on the way in, so this only catches
@@ -675,7 +788,7 @@ pub async fn start_export(
         })
         .collect();
     let format = match format {
-        None => OutputFormat::for_kind(meta.kind),
+        None => OutputFormat::for_kind(kind),
         Some("mp4") => OutputFormat::Mp4,
         Some("mp3") => OutputFormat::Mp3,
         Some("wav") => OutputFormat::Wav,
@@ -683,13 +796,11 @@ pub async fn start_export(
     };
     let overdub_audio = overdub_files(&id, &dir, &edits)?;
     let asset_files = crate::assets::asset_files(state, project, &edits).await?;
-    let words = read_words(&dir).await.unwrap_or_default();
     let (output, name) = next_numbered(&dir, "export", format.extension()).await?;
-    let source = dir.join(format!("source.{}", meta.ext));
 
     // An audio-only render draws no picture, so it needs no images at all.
-    let render_video = meta.kind == MediaKind::Video && format == OutputFormat::Mp4;
-    let video = meta.video.unwrap_or(DEFAULT_VIDEO);
+    // Text is rasterised at the canvas, the frame every source is fitted to.
+    let render_video = kind == MediaKind::Video && format == OutputFormat::Mp4;
     let (title_images, caption_images) = if render_video {
         let dir = dir.clone();
         let edits = edits.clone();
@@ -701,15 +812,13 @@ pub async fn start_export(
     };
 
     let args = build_ffmpeg_args(
-        &source,
+        &sources,
         &edits,
         &ExportOptions {
-            duration: meta.duration,
-            kind: meta.kind,
+            kind,
             format,
             output: &output,
             overdub_audio: &overdub_audio,
-            video: meta.video,
             title_images: &title_images,
             caption_images: &caption_images,
             transition: doc.transition,
@@ -719,20 +828,8 @@ pub async fn start_export(
             words: &words,
         },
     )
-    .map_err(|e| match e {
-        // The planner and the renderer disagreed about the edit indices:
-        // nothing the client sent can fix that.
-        ExportError::MissingTitleImage(_) | ExportError::MissingCaptionImage(_) => {
-            AppError::internal(e.to_string())
-        }
-        other => AppError::bad_request(other.to_string()),
-    })?;
-    let planned = output_duration(&timeline_with(
-        meta.duration,
-        &edits,
-        &doc.splits,
-        &doc.order,
-    ));
+    .map_err(export_error)?;
+    let planned = output_duration(&timeline_with(duration, &edits, &doc.splits, &doc.order));
 
     let job_id = Uuid::new_v4().to_string();
     set_job(
@@ -814,4 +911,41 @@ pub fn export_job(state: &AppState, media_id: &str, job_id: &str) -> Option<Expo
         .get(job_id)
         .filter(|j| j.media_id() == media_id)
         .cloned()
+}
+
+/// How a planning failure reaches the client: a 400 for an edit the client
+/// can change, a 500 when the server contradicted itself.
+fn export_error(e: ExportError) -> AppError {
+    match e {
+        // The planner and the renderer disagreed about the edit indices, or
+        // a piece fell outside the sources the server itself read: nothing
+        // the client sent can fix that.
+        ExportError::MissingTitleImage(_)
+        | ExportError::MissingCaptionImage(_)
+        | ExportError::OutsideSources(_) => AppError::internal(e.to_string()),
+        other => AppError::bad_request(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn a_piece_outside_every_source_is_the_servers_fault() {
+        assert_eq!(
+            export_error(ExportError::OutsideSources(6.0)).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            export_error(ExportError::MissingTitleImage(0)).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            export_error(ExportError::MissingAsset("x".into())).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }

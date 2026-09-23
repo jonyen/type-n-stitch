@@ -130,6 +130,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                 transition: doc.transition,
                 splits: doc.splits,
                 order: doc.order,
+                sources: doc.sources,
                 peers,
                 you,
             }
@@ -200,6 +201,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                                 transition: doc.transition,
                                 splits: doc.splits,
                                 order: doc.order,
+                                sources: doc.sources,
                             },
                             Err(e) => ServerMsg::Error { code: "load".into(), detail: format!("{e:?}") },
                         };
@@ -350,6 +352,8 @@ mod tests {
         let hello = next_json(&mut a).await;
         assert_eq!(hello["t"], "hello");
         assert_eq!(hello["headSeq"], 0);
+        // Appended sources only, as the fold holds them: none in a new project.
+        assert!(hello["sources"].as_array().unwrap().is_empty());
         assert_eq!(hello["you"]["user"]["displayName"], "ada@example.com");
         assert_eq!(hello["peers"].as_array().unwrap().len(), 1); // just ada
                                                                  // Our own join echoes back down the socket; the client filters it.
@@ -435,6 +439,17 @@ mod tests {
             .unwrap();
         assert_eq!(next_json(&mut a).await["t"], "pong");
 
+        // A second video on the timeline, so the resync has sources to carry.
+        let owner = crate::test_util::me(&state, &ada).await;
+        let found = crate::projects::find_project(&state.db, &project)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = crate::sources::test_support::seed_source(&state, 4.0, &["d"]).await;
+        crate::sources::add_source(&state, &found, &owner, &second)
+            .await
+            .unwrap();
+
         // Flood the hub past its capacity while the client is not reading.
         for i in 0..600 {
             state.bus.publish(
@@ -448,6 +463,7 @@ mod tests {
                     transition: engine::Transition::None,
                     splits: vec![],
                     order: vec![],
+                    sources: vec![],
                 },
             );
         }
@@ -457,6 +473,11 @@ mod tests {
             let msg = next_json(&mut a).await;
             if msg["t"] == "resync" {
                 saw_resync = true;
+                assert_eq!(
+                    msg["sources"],
+                    json!([{ "media": second.id, "offset": 10.0, "duration": 4.0 }]),
+                    "a resync carries the appended sources"
+                );
                 break;
             }
         }

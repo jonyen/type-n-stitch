@@ -16,6 +16,7 @@ mod media;
 mod ops;
 mod projects;
 mod routes;
+mod sources;
 #[cfg(test)]
 mod test_util;
 mod tokens;
@@ -41,7 +42,17 @@ pub struct AppState {
     pub bus: Arc<dyn bus::Bus>,
     /// The live MCP agents, one per token owner's bot.
     pub agents: mcp::Agents,
+    /// Background transcriptions of added sources, by media id: running, or
+    /// failed until the server restarts. A finished one leaves no entry; its
+    /// words cache is the record.
+    pub transcripts: Mutex<HashMap<String, sources::TranscriptJob>>,
+    /// Whisper runs at once, foreground or background: whisper is CPU-bound,
+    /// and a project of many videos would otherwise start one per file.
+    pub whisper: tokio::sync::Semaphore,
 }
+
+/// How many whisper runs `AppState::whisper` allows at once.
+pub const WHISPER_SLOTS: usize = 1;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -67,6 +78,8 @@ async fn main() -> anyhow::Result<()> {
         folds: Mutex::new(HashMap::new()),
         bus: Arc::new(bus::LocalBus::new()),
         agents: mcp::Agents::default(),
+        transcripts: Mutex::new(HashMap::new()),
+        whisper: tokio::sync::Semaphore::new(WHISPER_SLOTS),
     });
 
     let app = app::router(state.clone());

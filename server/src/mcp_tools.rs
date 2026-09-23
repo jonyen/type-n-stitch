@@ -4,7 +4,8 @@
 //! directly unit-testable.
 
 use engine::editlist::{word_status, WordStatus};
-use engine::types::{Edit, Range, Word};
+use engine::types::{Edit, Range, Source, Word};
+use engine::{locate, stitched_duration};
 use serde::Serialize;
 
 /// One transcript word as an agent sees it: its index is the handle every
@@ -40,16 +41,33 @@ pub fn transcript(
 }
 
 /// The source range words `from..=to` own: from the first word's start to the
-/// next word's start, or to the end of the media for the last word. This is
+/// next word's start, or to the end of the media for the last word, and
+/// never past the end of the last word's own source. Within one file this is
 /// the same rule the client's `rangeForWords` uses, so an agent's cut lands
 /// exactly where a person's Delete would.
-pub fn word_range(words: &[Word], from: usize, to: usize, duration: f64) -> Option<Range> {
+pub fn word_range(words: &[Word], from: usize, to: usize, sources: &[Source]) -> Option<Range> {
     if from > to || to >= words.len() {
         return None;
     }
     let start = words[from].start;
-    let end = words.get(to + 1).map_or(duration, |w| w.start);
-    Some(Range::new(start, end))
+    let next = words
+        .get(to + 1)
+        .map_or(stitched_duration(sources), |w| w.start);
+    Some(Range::new(
+        start,
+        next.min(own_source(sources, words[to].start).end),
+    ))
+}
+
+/// The stretch of the main track held by the source `t` falls in: a word
+/// never owns time in another file, so cutting the last word before a join
+/// can never take a later video with it, transcribed or not. The whole
+/// track when `t` is outside it (or there are no sources).
+pub fn own_source(sources: &[Source], t: f64) -> Range {
+    match locate(sources, t) {
+        Some((k, _)) => Range::new(sources[k].offset, sources[k].offset + sources[k].duration),
+        None => Range::new(0.0, stitched_duration(sources)),
+    }
 }
 
 /// Every whole-word, case- and punctuation-insensitive occurrence of `text`,
@@ -114,13 +132,42 @@ mod tests {
         assert!(find_ranges(&words, "").is_empty());
     }
 
+    fn src(offset: f64, duration: f64) -> engine::Source {
+        engine::Source {
+            media: format!("m{offset}"),
+            offset,
+            duration,
+        }
+    }
+
     #[test]
     fn word_range_owns_the_gap_after_the_last_word() {
         let words = w(&["a", "b", "c"]); // starts 0,1,2; ends 0.5,1.5,2.5
-        assert_eq!(word_range(&words, 1, 1, 10.0), Some(Range::new(1.0, 2.0)));
-        assert_eq!(word_range(&words, 2, 2, 10.0), Some(Range::new(2.0, 10.0)));
-        assert_eq!(word_range(&words, 2, 1, 10.0), None);
-        assert_eq!(word_range(&words, 0, 3, 10.0), None);
+        let one = [src(0.0, 10.0)];
+        assert_eq!(word_range(&words, 1, 1, &one), Some(Range::new(1.0, 2.0)));
+        assert_eq!(word_range(&words, 2, 2, &one), Some(Range::new(2.0, 10.0)));
+        assert_eq!(word_range(&words, 2, 1, &one), None);
+        assert_eq!(word_range(&words, 0, 3, &one), None);
+    }
+
+    #[test]
+    fn a_words_owned_stretch_stops_at_the_end_of_its_own_source() {
+        // Source 1 (10..14 s) has no words yet: the last word of source 0
+        // owns up to 10 s, not the stitched end.
+        let words = w(&["a", "b", "c"]);
+        let two = [src(0.0, 10.0), src(10.0, 4.0)];
+        assert_eq!(word_range(&words, 2, 2, &two), Some(Range::new(2.0, 10.0)));
+        // With a word in source 1, the gap before it is still source 0's.
+        let mut words = words;
+        words.push(Word {
+            id: "1:w0".into(),
+            text: "d".into(),
+            start: 11.0,
+            end: 11.5,
+        });
+        assert_eq!(word_range(&words, 2, 2, &two), Some(Range::new(2.0, 10.0)));
+        assert_eq!(word_range(&words, 3, 3, &two), Some(Range::new(11.0, 14.0)));
+        assert_eq!(word_range(&words, 1, 3, &two), Some(Range::new(1.0, 14.0)));
     }
 
     #[test]

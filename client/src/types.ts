@@ -50,10 +50,30 @@ export interface CaptionEdit extends Range {
   position: CaptionPos;
 }
 
-export interface BrollEdit extends Range {
-  kind: 'broll';
+/** A video on the main track, placed at a fixed offset on the stitched timeline. */
+export interface Source {
   media: string;
   offset: number;
+  duration: number;
+}
+
+/** Where a layer's picture sits: full frame, or a corner picture-in-picture. */
+export type Frame = 'full' | 'pipTopLeft' | 'pipTopRight' | 'pipBottomLeft' | 'pipBottomRight';
+
+/** The video tracks above the main one: V2 and V3. */
+export type LayerTrack = 2 | 3;
+
+/**
+ * `media` from `offset` on track `track` over main-track `[start, end)`,
+ * placed by `frame`. `audio` is null when muted, else the layer's level in dB.
+ */
+export interface LayerEdit extends Range {
+  kind: 'layer';
+  track: LayerTrack;
+  media: string;
+  offset: number;
+  frame: Frame;
+  audio: number | null;
 }
 
 export interface AudioEdit extends Range {
@@ -64,7 +84,7 @@ export interface AudioEdit extends Range {
   duck: boolean;
 }
 
-export type Edit = CutEdit | OverdubEdit | TitleEdit | CaptionEdit | BrollEdit | AudioEdit;
+export type Edit = CutEdit | OverdubEdit | TitleEdit | CaptionEdit | LayerEdit | AudioEdit;
 
 export type MediaKind = 'audio' | 'video';
 
@@ -75,6 +95,23 @@ export interface Media {
   duration: number;
   kind: MediaKind;
   url: string;
+}
+
+export type TranscriptStatus = 'pending' | 'running' | 'ready' | 'error';
+
+/**
+ * One file on the main track as GET /api/projects/:id lists it, in stitched
+ * order; index 0 is the project's own media.
+ */
+export interface SourceView {
+  index: number;
+  mediaId: string;
+  url: string;
+  filename: string;
+  kind: MediaKind;
+  offset: number;
+  duration: number;
+  transcript: TranscriptStatus;
 }
 
 /** A starter clip from samples/library.json (GET /api/library). */
@@ -114,10 +151,12 @@ export interface ProjectSummary {
   title: string;
   role: Role;
   media: Media;
+  /** Every file on the main track. Sent by GET /api/projects/:id; absent in the list. */
+  sources?: SourceView[];
   createdAt: number;
 }
 
-/** A project's uploaded B-roll/music file (GET/POST/DELETE /api/projects/:id/assets). */
+/** A project's uploaded layer or music file (GET/POST/DELETE /api/projects/:id/assets). */
 export interface Asset {
   id: string;
   kind: MediaKind;

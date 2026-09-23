@@ -83,6 +83,20 @@ export function playStep(t: number, index: number, ordered: Range[]): PlayStep {
   return { kind: 'stop' };
 }
 
+/**
+ * What playback drives: a media element, or a `StitchedMedia` clock over
+ * several files. Every time is in stitched seconds.
+ */
+export interface PlaybackMedia {
+  currentTime: number;
+  readonly paused: boolean;
+  readonly ended: boolean;
+  play(): Promise<void>;
+  pause(): void;
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
 export interface Playback {
   playing: boolean;
   /** The playhead in source seconds, to 0.1 s (exact once stopped at the end). */
@@ -109,7 +123,7 @@ export interface Playback {
 }
 
 export function usePlayback(
-  mediaRef: RefObject<HTMLMediaElement | null>,
+  mediaRef: RefObject<PlaybackMedia | null>,
   words: Word[],
   edits: Edit[],
   duration: number,

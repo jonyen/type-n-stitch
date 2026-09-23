@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { orderedPieces } from '../editlist';
 import { timelineSegments } from '../timeline';
-import type { Asset, Edit, Word } from '../types';
+import type { Asset, Edit, SourceView, Word } from '../types';
 import { Timeline, type TimelineProps } from './Timeline';
 
 const words: Word[] = Array.from({ length: 10 }, (_, i) => ({
@@ -26,9 +26,29 @@ const asset = (id: string, kind: 'video' | 'audio'): Asset => ({
   poster: null,
 });
 const edits: Edit[] = [
-  { kind: 'broll', start: 2, end: 4, media: 'a1', offset: 0 },
+  { kind: 'layer', track: 2, start: 2, end: 4, media: 'a1', offset: 0, frame: 'full', audio: null },
   { kind: 'audio', start: 0, end: 10, media: 'a2', offset: 0, gain: 0, duck: true },
 ];
+const take2: SourceView = {
+  index: 1,
+  mediaId: 'm2',
+  url: '/data/m2.mp4',
+  filename: 'take2.mp4',
+  kind: 'video',
+  offset: 30,
+  duration: 20,
+  transcript: 'ready',
+};
+const v3: Edit = {
+  kind: 'layer',
+  track: 3,
+  start: 6,
+  end: 8,
+  media: 'm2',
+  offset: 1,
+  frame: 'pipTopRight',
+  audio: -6,
+};
 const splits = [5];
 const order = [5, 0];
 
@@ -50,9 +70,11 @@ function setup(overrides: Partial<TimelineProps> = {}): TimelineProps {
     onMoveClip: vi.fn(),
     onSelectOverlay: vi.fn(),
     onOpenAudio: vi.fn(),
+    onOpenLayer: vi.fn(),
     tool: 'select',
     duration: 10,
     splits,
+    sources: [],
     onSplit: vi.fn(),
     onCut: vi.fn(),
     ...overrides,
@@ -123,18 +145,20 @@ describe('Timeline (Select tool)', () => {
     expect(props.onMoveClip).not.toHaveBeenCalled();
   });
 
-  it('selects a B-roll bar and opens a music bar on double-click', () => {
+  it('selects a layer bar with its track and opens it on double-click; music opens too', () => {
     const props = setup();
-    fireEvent.click(screen.getByRole('button', { name: 'B-roll a1.mp4' }));
-    expect(props.onSelectOverlay).toHaveBeenCalledWith({ kind: 'broll', start: 2 });
+    fireEvent.click(screen.getByRole('button', { name: 'V2 a1.mp4' }));
+    expect(props.onSelectOverlay).toHaveBeenCalledWith({ kind: 'layer', track: 2, start: 2 });
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'V2 a1.mp4' }));
+    expect(props.onOpenLayer).toHaveBeenCalledWith(2, 2);
     fireEvent.doubleClick(screen.getByRole('button', { name: 'Music a2.mp3' }));
     expect(props.onOpenAudio).toHaveBeenCalledWith(0);
   });
 
-  it('tags each overlay bar for the selection toolbar to anchor on', () => {
+  it('tags each overlay bar, by track, for the selection toolbar to anchor on', () => {
     setup();
-    expect(screen.getByRole('button', { name: 'B-roll a1.mp4' }).getAttribute('data-overlay')).toBe(
-      'broll:2',
+    expect(screen.getByRole('button', { name: 'V2 a1.mp4' }).getAttribute('data-overlay')).toBe(
+      'v2:2',
     );
     expect(screen.getByRole('button', { name: 'Music a2.mp3' }).getAttribute('data-overlay')).toBe(
       'audio:0',
@@ -230,5 +254,132 @@ describe('Timeline (Razor and Range)', () => {
     setup();
     fireEvent.pointerMove(lanes(), { clientX: 260 });
     expect(screen.queryByTestId('razor-line')).toBeNull();
+  });
+});
+
+const video = (index: number, offset: number, duration = 5): SourceView => ({
+  index,
+  mediaId: `m${index}`,
+  url: `/data/m${index}/source.mp4`,
+  filename: `take${index + 1}.mp4`,
+  kind: 'video',
+  offset,
+  duration,
+  transcript: 'ready',
+});
+
+describe('Timeline sources', () => {
+  const badges = () =>
+    screen
+      .getAllByRole('button', { name: /Clip \d/ })
+      .map((c) => c.querySelector('[data-source]')?.textContent);
+
+  it('badges each clip with its video and marks where two videos meet', () => {
+    // Split at 5 (the join) and reversed: output is video 2, then video 1.
+    setup({ sources: [video(0, 0), video(1, 5)] });
+    expect(badges()).toEqual(['2', '1']);
+    const joins = screen.getAllByTestId('source-join');
+    expect(joins).toHaveLength(1);
+    expect(joins[0]?.style.left).toBe('50%');
+    expect(
+      screen
+        .getAllByRole('button', { name: /Clip \d/ })[0]
+        ?.querySelector('[data-source]')
+        ?.getAttribute('title'),
+    ).toBe('Video 2 · take2.mp4');
+  });
+
+  it('draws joins only between neighbours from different videos', () => {
+    const three = [2, 5];
+    setup({
+      sources: [video(0, 0), video(1, 5)],
+      splits: three,
+      ordered: orderedPieces(10, edits, three, []),
+      segments: timelineSegments(10, edits, three, []),
+    });
+    expect(badges()).toEqual(['1', '1', '2']);
+    const joins = screen.getAllByTestId('source-join');
+    expect(joins).toHaveLength(1);
+    expect(joins[0]?.style.left).toBe('50%');
+  });
+
+  it('shows neither for a single video', () => {
+    setup({ sources: [video(0, 0, 10)] });
+    expect(document.querySelector('[data-source]')).toBeNull();
+    expect(screen.queryAllByTestId('source-join')).toHaveLength(0);
+  });
+});
+
+describe('Timeline sources, for a screen reader', () => {
+  it('names the video in each clip label once there are several', () => {
+    setup({ sources: [video(0, 0), video(1, 5)] });
+    expect(
+      screen.getAllByRole('button', { name: /Clip \d/ }).map((c) => c.getAttribute('aria-label')),
+    ).toEqual(['Video 2 · Clip 1: w5 w6 w7 w8…', 'Video 1 · Clip 2: w0 w1 w2 w3…']);
+  });
+});
+
+describe('Timeline (layers)', () => {
+  const laneOrder = () =>
+    Array.from(screen.getByTestId('timeline-lanes').querySelectorAll('[data-lane]'), (l) =>
+      l.getAttribute('data-lane'),
+    );
+
+  it('stacks V3, V2, Clips and Music, with a thin "+ V3" row until V3 holds a clip', () => {
+    setup();
+    expect(laneOrder()).toEqual(['v3', 'v2', 'clips', 'music']);
+    expect(screen.getByText('+ V3')).toBeTruthy();
+    expect(
+      screen.getByTestId('timeline-lanes').querySelector('[data-lane="v3"] button'),
+    ).toBeNull();
+  });
+
+  it('draws the V3 lane once it has a clip, named from the project’s own videos', () => {
+    setup({ edits: [...edits, v3], sources: [take2] });
+    expect(screen.queryByText('+ V3')).toBeNull();
+    expect(screen.getByText('V3')).toBeTruthy();
+    const bar = screen.getByRole('button', { name: 'V3 take2.mp4' });
+    expect(bar.closest('[data-lane]')?.getAttribute('data-lane')).toBe('v3');
+    expect(bar.getAttribute('data-overlay')).toBe('v3:6');
+    expect(bar.textContent).toBe('PiP ↗ · take2.mp4');
+  });
+
+  it('marks only the selected bar, matched on track as well as start', () => {
+    setup({
+      edits: [...edits, { ...v3, start: 2, end: 4 } as Edit],
+      sources: [take2],
+      selectedOverlay: { kind: 'layer', track: 3, start: 2 },
+    });
+    expect(screen.getByRole('button', { name: 'V3 take2.mp4' }).getAttribute('aria-pressed')).toBe(
+      'true',
+    );
+    expect(screen.getByRole('button', { name: 'V2 a1.mp4' }).getAttribute('aria-pressed')).toBe(
+      'false',
+    );
+  });
+
+  it('does not open a layer for a viewer', () => {
+    const viewer = setup({ readOnly: true });
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'V2 a1.mp4' }));
+    expect(viewer.onOpenLayer).not.toHaveBeenCalled();
+  });
+
+  it('keeps the hover preview on the main track’s frame over a layer', () => {
+    const thumbs = {
+      url: '/thumbs.jpg',
+      count: 10,
+      columns: 10,
+      rows: 1,
+      interval: 1,
+      width: 64,
+      height: 36,
+    };
+    setup({ thumbs });
+    // Output 7.5 is source 2.5 (clip 2 is source [0, 5) at output [5, 10)),
+    // under the V2 layer over source [2, 4): the preview is still source frame 2.
+    fireEvent.pointerMove(screen.getByTestId('timeline-lanes'), { clientX: 750 });
+    const frame = document.querySelector<HTMLElement>('[style*="thumbs.jpg"]');
+    expect(frame?.style.backgroundImage).toContain('/thumbs.jpg');
+    expect(frame?.style.backgroundPosition).toMatch(/^-128px/);
   });
 });

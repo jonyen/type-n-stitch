@@ -3,24 +3,30 @@ import { describe, expect, it } from 'vitest';
 import {
   captionsAt,
   cutTransitionAt,
+  EPS,
   formatTime,
+  isJoin,
   joins,
   jumpTarget,
   keptSegments,
+  locate,
   nearDipJoin,
   nextCutTransition,
   normalizeCuts,
   orderedPieces,
+  orderStarts,
   outputDuration,
   overdubAt,
   pieces,
   pieceStarts,
   rangeForWords,
   skipTarget,
+  sourceJoins,
+  stitchedDuration,
   wordIndexAt,
   wordStatus,
 } from './editlist';
-import type { CaptionEdit, Edit, TitleEdit, Word } from './types';
+import type { CaptionEdit, Edit, Source, TitleEdit, Word } from './types';
 
 const words: Word[] = [
   { id: 'w0', text: 'thankful', start: 0, end: 0.91 },
@@ -79,6 +85,23 @@ describe('rangeForWords', () => {
 
   it('runs to the end of the media for the last word', () => {
     expect(rangeForWords(words, 3, 3, 20)).toEqual({ start: 2.0, end: 20 });
+  });
+
+  // Two files: video 1 is [0, 3), video 2 is [3, 23). The server clamps an MCP cut the same way.
+  const joined: Source[] = [
+    { media: 'm0', offset: 0, duration: 3 },
+    { media: 'm1', offset: 3, duration: 20 },
+  ];
+  const across: Word[] = [...words, { id: '1:w0', text: 'next', start: 3.4, end: 3.8 }];
+
+  it("stops the last word of a file at that file's end, not at the next file's first word", () => {
+    expect(rangeForWords(across, 3, 3, 23, joined)).toEqual({ start: 2.0, end: 3 });
+    // Selected across the join: the last word's own file bounds it.
+    expect(rangeForWords(across, 2, 4, 23, joined)).toEqual({ start: 1.25, end: 23 });
+  });
+
+  it('never runs into a later file that has no words yet', () => {
+    expect(rangeForWords(words, 3, 3, 23, joined)).toEqual({ start: 2.0, end: 3 });
   });
 });
 
@@ -152,6 +175,15 @@ describe('titles and joins', () => {
     expect(p.map((x) => x.kind)).toEqual(['source', 'title', 'overdub', 'source']);
     expect(p[0]?.source).toEqual({ start: 0, end: 5 });
     expect(p[3]?.source).toEqual({ start: 6, end: 10 });
+  });
+  it('pieces drop holds past the stitched end, like the engine', () => {
+    const p = pieces(10, [
+      title(10, 1),
+      title(12, 1),
+      { kind: 'overdub', start: 11, end: 12, text: 'x', audioUrl: '/a', audioDuration: 2 },
+    ]);
+    expect(p.map((x) => x.kind)).toEqual(['source', 'title']);
+    expect(p[1]?.index).toBe(0);
   });
   it('joins: override, then project default, always dip around titles, none around overdubs', () => {
     const edits: Edit[] = [
@@ -231,6 +263,21 @@ describe('orderedPieces and jumps', () => {
       { start: 2, end: 4 },
     ]);
   });
+  // Three ten-second videos moved to C, A, B: order [20, 0, 10].
+  const startsOf = (list: { start: number }[]) => list.map((p) => p.start);
+  it('a cut or split inside a reordered piece keeps the remainder with it', () => {
+    const order = [20, 0, 10];
+    expect(startsOf(orderedPieces(30, [cut(3, 5)], [10, 20], order))).toEqual([20, 0, 5, 10]);
+    expect(startsOf(orderedPieces(30, [], [10, 20, 5], order))).toEqual([20, 0, 5, 10]);
+  });
+  it('orderStarts groups each start under its parent, like the engine', () => {
+    expect(orderStarts([10, 0, 5], [])).toEqual([0, 5, 10]);
+    expect(orderStarts([2, 10, 20], [20, 0, 10])).toEqual([20, 2, 10]);
+    expect(orderStarts([1, 5, 8], [8, 5])).toEqual([8, 1, 5]);
+  });
+  it('a head cut of a reordered piece keeps its place', () => {
+    expect(startsOf(orderedPieces(30, [cut(0, 2)], [10, 20], [20, 0, 10]))).toEqual([20, 2, 10]);
+  });
   it('pieces lays out sub-pieces per ordered piece', () => {
     const list = pieces(10, [overdub(6, 7, 2)], [5], [5, 0]);
     expect(list.map((p) => [p.kind, p.source.start])).toEqual([
@@ -256,5 +303,54 @@ describe('orderedPieces and jumps', () => {
   it('a reorder join takes the project transition', () => {
     const list = pieces(10, [], [5], [5, 0]);
     expect(joins(list, [], 'dip')).toEqual([{ after: 0, transition: 'dip' }]);
+  });
+});
+
+describe('stitched sources (mirror engine/src/editlist.rs)', () => {
+  // The engine's `three()`: 10 s, 5 s and 2.5 s files end to end.
+  const three: Source[] = [
+    { media: 'm1', offset: 0, duration: 10 },
+    { media: 'm2', offset: 10, duration: 5 },
+    { media: 'm3', offset: 15, duration: 2.5 },
+  ];
+
+  it('ends where the last source ends', () => {
+    expect(stitchedDuration(three)).toBe(17.5);
+    expect(stitchedDuration([])).toBe(0);
+  });
+
+  it('locates at every boundary', () => {
+    expect(locate(three, 0)).toEqual({ index: 0, local: 0 }); // the very start
+    expect(locate(three, 4.25)).toEqual({ index: 0, local: 4.25 }); // inside the first
+    expect(locate(three, 9.5)).toEqual({ index: 0, local: 9.5 }); // just before a join
+    expect(locate(three, 10)).toEqual({ index: 1, local: 0 }); // a join belongs to the later source
+    expect(locate(three, 12)).toEqual({ index: 1, local: 2 }); // inside the second
+    expect(locate(three, 15)).toEqual({ index: 2, local: 0 }); // the second join
+    expect(locate(three, 17.5)).toEqual({ index: 2, local: 2.5 }); // the exact end: last source at its duration
+    expect(locate(three, 17.6)).toBeNull(); // past the end
+    expect(locate(three, -0.1)).toBeNull(); // before the start
+    expect(locate([], 0)).toBeNull(); // no sources
+  });
+
+  it('snaps within EPS of a join or the end', () => {
+    expect(locate(three, 10 - EPS / 2)).toEqual({ index: 1, local: 0 });
+    expect(locate(three, 17.5 + EPS / 2)).toEqual({ index: 2, local: 2.5 });
+    expect(locate(three, -EPS / 2)).toEqual({ index: 0, local: 0 });
+  });
+
+  it('is the identity on one source', () => {
+    const one: Source[] = [{ media: 'm1', offset: 0, duration: 10 }];
+    expect(locate(one, 3.5)).toEqual({ index: 0, local: 3.5 });
+    expect(locate(one, 10)).toEqual({ index: 0, local: 10 });
+    expect(locate(one, 10.5)).toBeNull();
+  });
+
+  it('lists the joins, and knows an instant on one', () => {
+    expect(sourceJoins(three)).toEqual([10, 15]);
+    expect(sourceJoins(three.slice(0, 1))).toEqual([]);
+    expect(isJoin(15, three)).toBe(true);
+    expect(isJoin(15 + EPS / 2, three)).toBe(true);
+    expect(isJoin(12, three)).toBe(false);
+    expect(isJoin(0, three)).toBe(false);
   });
 });

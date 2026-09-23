@@ -58,7 +58,7 @@ CREATE TABLE project_sources (
 );
 ```
 
-Media stays content-hashed and shared, as today. The migration writes one row
+Media keeps its random id and folder under `data/`, as today (no dedup). The migration writes one row
 per existing project: `(media_id, 0, 0.0, duration)`.
 
 ### Stitched time
@@ -116,7 +116,7 @@ people; names are editable as today.
   time.
 - **In a project.** Insert ▾ → **Add video…** appends files at the end.
 - **Route.** `POST /api/projects/{id}/sources` takes a multipart upload,
-  stores the media under its content hash, probes its duration, appends
+  stores the media under a new media id, probes its duration, appends
   `AddSource` at the current stitched end, and returns the source. Editors and
   owners only.
 - **Transcription.** The existing pipeline (whisper wav, transcribe, diarize,

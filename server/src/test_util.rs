@@ -24,6 +24,11 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
     config.database_url = format!("sqlite://{}/test.db", dir.path().display());
     config.admin_email = None;
     config.admin_password = None;
+    // Background transcription must never find a real whisper in tests: a
+    // job fails fast instead, which is what the status tests rely on.
+    config.whisper_bin = "type-n-stitch-no-whisper-in-tests".into();
+    // Nor a real diarizer: speaker labels come from seeded caches only.
+    config.diarize_bin = dir.path().join("no-diarizer-in-tests");
     tokio::fs::create_dir_all(&config.data_dir).await.unwrap();
     let db = db::open(&config.database_url).await.unwrap();
     let state = Arc::new(AppState {
@@ -34,6 +39,8 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
         folds: Mutex::new(HashMap::new()),
         bus: Arc::new(bus::LocalBus::new()),
         agents: Default::default(),
+        transcripts: Mutex::new(HashMap::new()),
+        whisper: tokio::sync::Semaphore::new(crate::WHISPER_SLOTS),
     });
     (state, dir)
 }
@@ -121,7 +128,17 @@ pub async fn me(state: &Arc<AppState>, cookie: &str) -> User {
 /// "a b c" at 0, 1 and 2 seconds — so nothing ever shells out to whisper.
 pub async fn owned_project(state: &Arc<AppState>, cookie: &str) -> Project {
     let media_id = seed_media(state, 10.0).await;
-    let words: Vec<engine::Word> = ["a", "b", "c"]
+    seed_words(state, &media_id, &["a", "b", "c"]).await;
+    let owner = me(state, cookie).await;
+    create_project(&state.db, &owner, &media_id, "Clip")
+        .await
+        .unwrap()
+}
+
+/// Pre-seed `media_id`'s transcript cache with `texts`, one word a second
+/// from 0 (each half a second long), so nothing shells out to whisper.
+pub async fn seed_words(state: &Arc<AppState>, media_id: &str, texts: &[&str]) {
+    let words: Vec<engine::Word> = texts
         .iter()
         .enumerate()
         .map(|(i, text)| engine::Word {
@@ -135,16 +152,12 @@ pub async fn owned_project(state: &Arc<AppState>, cookie: &str) -> Project {
         state
             .config
             .data_dir
-            .join(&media_id)
+            .join(media_id)
             .join(crate::routes::WORDS_CACHE),
         serde_json::to_vec(&words).unwrap(),
     )
     .await
     .unwrap();
-    let owner = me(state, cookie).await;
-    create_project(&state.db, &owner, &media_id, "Clip")
-        .await
-        .unwrap()
 }
 
 /// Serve the app on an ephemeral port; returns `http://127.0.0.1:PORT`.

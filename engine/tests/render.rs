@@ -8,8 +8,8 @@ use std::process::Command;
 
 use engine::text;
 use engine::{
-    build_ffmpeg_args, oriented, CaptionPos, Edit, ExportOptions, MediaKind, OutputFormat,
-    TitleStyle, Transition, VideoInfo,
+    build_ffmpeg_args, oriented, CaptionPos, Edit, ExportOptions, Frame, MediaKind, OutputFormat,
+    Source, SourceInput, TitleStyle, Transition, VideoInfo,
 };
 
 fn sample() -> Option<PathBuf> {
@@ -127,15 +127,22 @@ fn renders_cuts_and_an_overdub_to_the_expected_length() {
 
     let output = dir.join("out.mp4");
     let args = build_ffmpeg_args(
-        &input,
+        &[SourceInput {
+            source: Source {
+                media: "m0".into(),
+                offset: 0.0,
+                duration: source_duration,
+            },
+            path: input.clone(),
+            kind: MediaKind::Video,
+            video: None,
+        }],
         &edits,
         &ExportOptions {
-            duration: source_duration,
             kind: MediaKind::Video,
             format: OutputFormat::Mp4,
             output: &output,
             overdub_audio: &overdub_audio,
-            video: None,
             title_images: &HashMap::new(),
             caption_images: &HashMap::new(),
             transition: Transition::None,
@@ -171,15 +178,22 @@ fn renders_audio_only_export_from_a_video_source() {
     let output = dir.join("out.mp3");
     let none = HashMap::new();
     let args = build_ffmpeg_args(
-        &input,
+        &[SourceInput {
+            source: Source {
+                media: "m0".into(),
+                offset: 0.0,
+                duration: source_duration,
+            },
+            path: input.clone(),
+            kind: MediaKind::Video,
+            video: None,
+        }],
         &edits,
         &ExportOptions {
-            duration: source_duration,
             kind: MediaKind::Video,
             format: OutputFormat::Mp3,
             output: &output,
             overdub_audio: &none,
-            video: None,
             title_images: &HashMap::new(),
             caption_images: &HashMap::new(),
             transition: Transition::None,
@@ -293,15 +307,22 @@ fn renders_a_title_card_a_caption_and_a_dip_from_rasterised_pngs() {
     let output = dir.path().join("out.mp4");
     let none = HashMap::new();
     let args = build_ffmpeg_args(
-        &clip,
+        &[SourceInput {
+            source: Source {
+                media: "m0".into(),
+                offset: 0.0,
+                duration: 3.0,
+            },
+            path: clip.clone(),
+            kind: MediaKind::Video,
+            video: Some(video),
+        }],
         &edits,
         &ExportOptions {
-            duration: 3.0,
             kind: MediaKind::Video,
             format: OutputFormat::Mp4,
             output: &output,
             overdub_audio: &none,
-            video: Some(video),
             title_images: &title_images,
             caption_images: &caption_images,
             transition: Transition::Dip,
@@ -395,15 +416,22 @@ fn render_title_at(clip: &Path, dir: &Path, video: VideoInfo, tag: &str) -> (boo
     let output = dir.join(format!("out-{tag}.mp4"));
     let none = HashMap::new();
     let args = build_ffmpeg_args(
-        clip,
+        &[SourceInput {
+            source: Source {
+                media: "m0".into(),
+                offset: 0.0,
+                duration: 3.0,
+            },
+            path: clip.to_path_buf(),
+            kind: MediaKind::Video,
+            video: Some(video),
+        }],
         &edits,
         &ExportOptions {
-            duration: 3.0,
             kind: MediaKind::Video,
             format: OutputFormat::Mp4,
             output: &output,
             overdub_audio: &none,
-            video: Some(video),
             title_images: &title_images,
             caption_images: &HashMap::new(),
             transition: Transition::None,
@@ -460,4 +488,311 @@ fn a_rotated_source_needs_its_title_card_at_the_oriented_size() {
     // The negative control: at the probed (unswapped) size, concat refuses.
     let (ok, _) = render_title_at(&rotated, dir.path(), probed, "coded");
     assert!(!ok, "a card at the unswapped size should have failed");
+}
+
+/// A clip from two lavfi sources, `secs` long.
+fn lavfi_clip(dir: &Path, name: &str, video: &str, audio: &str, secs: f64) -> PathBuf {
+    let clip = dir.join(name);
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", video])
+        .args(["-f", "lavfi", "-i", audio, "-t", &secs.to_string()])
+        .args(["-pix_fmt", "yuv420p"])
+        .arg(&clip)
+        .status()
+        .expect("ffmpeg runs");
+    assert!(status.success(), "could not make {name}");
+    clip
+}
+
+/// Every audio stream as `(sample rate, channels)`.
+fn probe_audio(path: &Path) -> Vec<(u32, u32)> {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=sample_rate,channels",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .expect("ffprobe runs");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut f = l.trim().split(',').filter(|f| !f.is_empty());
+            let rate = f.next().expect("rate").parse().expect("rate");
+            let channels = f.next().expect("channels").parse().expect("channels");
+            (rate, channels)
+        })
+        .collect()
+}
+
+/// The first video stream's average frame rate, as ffprobe writes it.
+fn probe_rate(path: &Path) -> String {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .expect("ffprobe runs");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .trim_end_matches(',')
+        .to_owned()
+}
+
+/// The RGB of the pixel at (`x`, `y`) in the frame at `t` seconds.
+fn pixel(path: &Path, t: f64, x: u32, y: u32) -> [u8; 3] {
+    let (w, _) = probe_size(path);
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-ss", &t.to_string(), "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .expect("ffmpeg runs");
+    assert!(out.status.success(), "frame grab failed");
+    let i = ((y * w + x) * 3) as usize;
+    [out.stdout[i], out.stdout[i + 1], out.stdout[i + 2]]
+}
+
+/// The loudest sample, in dB, between `from` and `from + len` seconds.
+fn max_volume(path: &Path, from: f64, len: f64) -> f64 {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "info", "-hide_banner", "-ss", &from.to_string()])
+        .args(["-t", &len.to_string(), "-i"])
+        .arg(path)
+        .args(["-vn", "-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .expect("ffmpeg runs");
+    let log = String::from_utf8_lossy(&out.stderr);
+    let line = log
+        .lines()
+        .find(|l| l.contains("max_volume:"))
+        .unwrap_or_else(|| panic!("no volumedetect output: {log}"));
+    line.split("max_volume:")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .trim_end_matches(" dB")
+        .parse()
+        .expect("dB")
+}
+
+fn source(media: &str, path: &Path, offset: f64, duration: f64, video: VideoInfo) -> SourceInput {
+    SourceInput {
+        source: Source {
+            media: media.into(),
+            offset,
+            duration,
+        },
+        path: path.to_path_buf(),
+        kind: MediaKind::Video,
+        video: Some(video),
+    }
+}
+
+fn plan(
+    sources: &[SourceInput],
+    edits: &[Edit],
+    splits: &[f64],
+    assets: &HashMap<String, PathBuf>,
+    output: &Path,
+) -> Vec<String> {
+    build_ffmpeg_args(
+        sources,
+        edits,
+        &ExportOptions {
+            kind: MediaKind::Video,
+            format: OutputFormat::Mp4,
+            output,
+            overdub_audio: &HashMap::new(),
+            title_images: &HashMap::new(),
+            caption_images: &HashMap::new(),
+            transition: Transition::None,
+            splits,
+            order: &[],
+            assets,
+            words: &[],
+        },
+    )
+    .unwrap()
+}
+
+/// Two files of different size and rate, with a cut across the join, render
+/// onto the first file's canvas with one 48 kHz stereo track.
+#[test]
+fn renders_two_files_of_different_size_and_rate_onto_one_canvas() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let a = lavfi_clip(
+        dir.path(),
+        "a.mp4",
+        "testsrc=size=320x240:rate=30",
+        "sine=frequency=440",
+        2.0,
+    );
+    let b = lavfi_clip(
+        dir.path(),
+        "b.mp4",
+        "testsrc=size=160x90:rate=25",
+        "sine=frequency=660",
+        2.0,
+    );
+    let sources = [
+        source(
+            "m0",
+            &a,
+            0.0,
+            2.0,
+            VideoInfo {
+                width: 320,
+                height: 240,
+                fps: 30.0,
+            },
+        ),
+        source(
+            "m1",
+            &b,
+            2.0,
+            2.0,
+            VideoInfo {
+                width: 160,
+                height: 90,
+                fps: 25.0,
+            },
+        ),
+    ];
+    let edits = [Edit::Cut {
+        start: 1.5,
+        end: 2.5,
+        transition: None,
+    }];
+    let output = dir.path().join("out.mp4");
+    run(&plan(&sources, &edits, &[2.0], &HashMap::new(), &output));
+
+    // 4 s of files less the 1 s cut.
+    let rendered = probe_duration(&output);
+    assert!(
+        (rendered - 3.0).abs() < 0.1,
+        "rendered {rendered} s, expected 3 s"
+    );
+    assert_eq!(probe_size(&output), (320, 240));
+    assert_eq!(probe_rate(&output), "30/1");
+    assert_eq!(probe_audio(&output), vec![(48000, 2)]);
+}
+
+/// A V2 full-frame layer, a V3 picture-in-picture over it and the PiP's
+/// sound mixed in: the PiP sits in its corner, above V2, and is heard.
+#[test]
+fn renders_a_v2_layer_under_a_v3_pip_with_its_sound() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let main = lavfi_clip(
+        dir.path(),
+        "main.mp4",
+        "color=c=blue:s=320x240:r=30",
+        "anullsrc=r=44100:cl=mono",
+        3.0,
+    );
+    let broll = lavfi_clip(
+        dir.path(),
+        "red.mp4",
+        "color=c=red:s=320x240:r=25",
+        "anullsrc=r=44100:cl=mono",
+        3.0,
+    );
+    let pip = lavfi_clip(
+        dir.path(),
+        "green.mp4",
+        "color=c=lime:s=160x120:r=30",
+        "sine=frequency=880",
+        3.0,
+    );
+    let canvas = VideoInfo {
+        width: 320,
+        height: 240,
+        fps: 30.0,
+    };
+    // V3 listed first: stacking follows the track.
+    let edits = [
+        Edit::Layer {
+            track: 3,
+            start: 1.0,
+            end: 2.0,
+            media: "pip".into(),
+            offset: 0.0,
+            frame: Frame::PipTopRight,
+            audio: Some(0.0),
+        },
+        Edit::Layer {
+            track: 2,
+            start: 0.5,
+            end: 2.5,
+            media: "broll".into(),
+            offset: 0.0,
+            frame: Frame::Full,
+            audio: None,
+        },
+    ];
+    let assets = HashMap::from([("pip".to_owned(), pip), ("broll".to_owned(), broll)]);
+    let output = dir.path().join("out.mp4");
+    run(&plan(
+        &[source("m0", &main, 0.0, 3.0, canvas)],
+        &edits,
+        &[],
+        &assets,
+        &output,
+    ));
+
+    let rendered = probe_duration(&output);
+    assert!(
+        (rendered - 3.0).abs() < 0.1,
+        "rendered {rendered} s, expected 3 s"
+    );
+    assert_eq!(probe_size(&output), (320, 240));
+    assert_eq!(probe_audio(&output), vec![(48000, 2)]);
+
+    let is =
+        |p: [u8; 3], c: usize| p[c] > 180 && p.iter().enumerate().all(|(i, v)| i == c || *v < 80);
+    let (red, green, blue) = (0, 1, 2);
+    // Before any layer: the main picture.
+    let p = pixel(&output, 0.2, 40, 200);
+    assert!(is(p, blue), "{p:?}");
+    // At 1.5 s: V2 fills the frame, and the PiP (96x72, 13 px from the right,
+    // 10 px from the top: x 211..307, y 10..82) is drawn above it.
+    let p = pixel(&output, 1.5, 40, 200);
+    assert!(is(p, red), "{p:?}");
+    let p = pixel(&output, 1.5, 259, 46);
+    assert!(is(p, green), "{p:?}");
+    let p = pixel(&output, 1.5, 203, 46);
+    assert!(is(p, red), "left of the PiP: {p:?}");
+    let p = pixel(&output, 1.5, 259, 92);
+    assert!(is(p, red), "below the PiP: {p:?}");
+    // After the PiP ends, V2 alone.
+    let p = pixel(&output, 2.2, 259, 46);
+    assert!(is(p, red), "{p:?}");
+
+    // The main track is silent: what is heard is the PiP's sound, only
+    // while it is on screen.
+    let during = max_volume(&output, 1.2, 0.6);
+    assert!(during > -20.0, "PiP sound at {during} dB");
+    let before = max_volume(&output, 0.0, 0.8);
+    assert!(before < -60.0, "silence before the PiP at {before} dB");
 }

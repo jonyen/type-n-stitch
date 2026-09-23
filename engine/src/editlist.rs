@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Edit, Range, Transition, Word};
+use crate::types::{Edit, Range, Source, Transition, Word};
 
 /// Two ranges closer than this are treated as touching.
 pub const EPS: f64 = 1e-6;
@@ -66,8 +66,44 @@ pub enum SegmentKind {
     Title { index: usize },
 }
 
-/// Kept ranges divided at every split, in output order: live entries of
-/// `order` first, then every other piece in source order.
+/// Lay piece starts out in output order. With no `order`, source order.
+/// Otherwise each start joins a parent: the greatest `order` entry at or
+/// before it (entries whose piece has since gone still count), else the
+/// smallest entry. Groups follow `order`; each group is in source order. So
+/// a cut, split or head trim made after a Move keeps what remains of a piece
+/// where the piece was. Mirrors the client's `orderStarts`.
+pub fn order_starts(starts: &[f64], order: &[f64]) -> Vec<f64> {
+    let mut sorted = starts.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    if order.is_empty() {
+        return sorted;
+    }
+    let parent = |s: f64| -> usize {
+        let mut best: Option<usize> = None;
+        for (i, &o) in order.iter().enumerate() {
+            if o <= s + EPS && best.is_none_or(|b| o > order[b]) {
+                best = Some(i);
+            }
+        }
+        best.unwrap_or_else(|| {
+            (0..order.len())
+                .min_by(|&a, &b| order[a].total_cmp(&order[b]))
+                .unwrap_or(0)
+        })
+    };
+    let parents: Vec<usize> = sorted.iter().map(|&s| parent(s)).collect();
+    let mut out = Vec::with_capacity(sorted.len());
+    for i in 0..order.len() {
+        for (j, &s) in sorted.iter().enumerate() {
+            if parents[j] == i {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// Kept ranges divided at every split, in output order (`order_starts`).
 pub fn ordered_pieces(duration: f64, edits: &[Edit], splits: &[f64], order: &[f64]) -> Vec<Range> {
     let mut points = splits.to_vec();
     points.sort_by(f64::total_cmp);
@@ -76,21 +112,11 @@ pub fn ordered_pieces(duration: f64, edits: &[Edit], splits: &[f64], order: &[f6
         .flat_map(|r| split_at(r, &points))
         .filter(|r| !r.is_empty())
         .collect();
-    let same = |a: f64, b: f64| (a - b).abs() < EPS;
-    let mut out: Vec<Range> = Vec::with_capacity(source.len());
-    for &s in order {
-        if let Some(r) = source.iter().find(|r| same(r.start, s)) {
-            if !out.iter().any(|o| same(o.start, s)) {
-                out.push(*r);
-            }
-        }
-    }
-    for r in &source {
-        if !out.iter().any(|o| same(o.start, r.start)) {
-            out.push(*r);
-        }
-    }
-    out
+    let starts: Vec<f64> = source.iter().map(|r| r.start).collect();
+    order_starts(&starts, order)
+        .into_iter()
+        .filter_map(|s| source.iter().find(|r| r.start == s).copied())
+        .collect()
 }
 
 /// Which ordered piece owns an instant: the one containing it, else the
@@ -124,6 +150,65 @@ pub fn normalize_cuts(cuts: &[Range]) -> Vec<Range> {
         }
     }
     merged
+}
+
+/// The project's own media (source 0) followed by the sources `AddSource`
+/// appended (`ProjectDoc::sources`), in stitched order.
+pub fn all_sources(first: Source, doc_sources: &[Source]) -> Vec<Source> {
+    let mut all = Vec::with_capacity(doc_sources.len() + 1);
+    all.push(first);
+    all.extend_from_slice(doc_sources);
+    all
+}
+
+/// End of the stitched timeline: the last source's offset plus its duration.
+/// Zero with no sources.
+pub fn stitched_duration(sources: &[Source]) -> f64 {
+    sources.last().map_or(0.0, |s| s.offset + s.duration)
+}
+
+/// Which source holds stitched instant `t`, and the time inside that file.
+/// An instant on a join (within `EPS`) belongs to the later source; the
+/// stitched end maps to the last source at its duration. `None` before 0,
+/// past the end, or with no sources.
+pub fn locate(sources: &[Source], t: f64) -> Option<(usize, f64)> {
+    let last = sources.len().checked_sub(1)?;
+    let end = stitched_duration(sources);
+    if t < -EPS || t > end + EPS {
+        return None;
+    }
+    if t >= end - EPS {
+        return Some((last, sources[last].duration));
+    }
+    let i = sources
+        .iter()
+        .rposition(|s| t >= s.offset - EPS)
+        .unwrap_or(0);
+    let s = &sources[i];
+    Some((i, (t - s.offset).clamp(0.0, s.duration)))
+}
+
+/// The project's word list: each source's words shifted by its offset, in
+/// source order. Part `k` must be source `k` (pass untranscribed sources with
+/// no words). Source 0's ids are unchanged, so existing logs and clients keep
+/// working; source `k > 0` ids become `"{k}:{id}"`, unique across files.
+pub fn stitch_words(parts: &[(&Source, &[Word])]) -> Vec<Word> {
+    parts
+        .iter()
+        .enumerate()
+        .flat_map(|(k, (source, words))| {
+            words.iter().map(move |w| Word {
+                id: if k == 0 {
+                    w.id.clone()
+                } else {
+                    format!("{k}:{}", w.id)
+                },
+                text: w.text.clone(),
+                start: w.start + source.offset,
+                end: w.end + source.offset,
+            })
+        })
+        .collect()
 }
 
 fn cut_ranges(edits: &[Edit]) -> Vec<Range> {
@@ -202,12 +287,14 @@ pub fn timeline_with(duration: f64, edits: &[Edit], splits: &[f64], order: &[f64
         .filter(|(_, e)| matches!(e, Edit::Overdub { .. }))
         .map(|(i, e)| (i, e.range()))
         .filter(|(_, r)| !r.is_empty())
+        // A hold past the stitched end (say, a video undone under it) plays nothing.
+        .filter(|(_, r)| r.start < duration - EPS)
         .collect();
     let titles: Vec<(usize, f64)> = edits
         .iter()
         .enumerate()
         .filter_map(|(i, e)| match e {
-            Edit::Title { at, .. } => Some((i, *at)),
+            Edit::Title { at, .. } if *at <= duration + EPS => Some((i, *at)),
             _ => None,
         })
         .collect();
@@ -446,12 +533,22 @@ pub fn caption_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>>
     )
 }
 
-/// Per segment, every B-roll overlay that intersects it.
-pub fn broll_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
-    overlay_windows(
+/// Per segment, every layer that intersects it, lower tracks first and,
+/// within a track, in window order, so overlaying in this order stacks V3
+/// over V2. Like captions, a layer is not drawn on a title card.
+pub fn layer_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
+    let track = |w: &Window| match &edits[w.index] {
+        Edit::Layer { track, .. } => *track,
+        _ => 0,
+    };
+    let mut windows = overlay_windows(
         segments,
-        &ranges_of(edits, |e| matches!(e, Edit::Broll { .. })),
-    )
+        &ranges_of(edits, |e| matches!(e, Edit::Layer { .. })),
+    );
+    for ws in &mut windows {
+        ws.sort_by(|a, b| track(a).cmp(&track(b)).then(a.start.total_cmp(&b.start)));
+    }
+    windows
 }
 
 /// Per segment, every music/audio overlay that intersects it. Unlike the
@@ -508,7 +605,7 @@ pub fn joins(segments: &[Segment], edits: &[Edit], project: Transition) -> Vec<J
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CaptionPos, TitleStyle, Transition};
+    use crate::types::{CaptionPos, Frame, Source, TitleStyle, Transition};
 
     fn cut(start: f64, end: f64) -> Edit {
         Edit::Cut {
@@ -766,6 +863,20 @@ mod tests {
     }
 
     #[test]
+    fn holds_past_the_stitched_end_are_dropped() {
+        // An undone source can leave a title or an overdub beyond the end.
+        let tl = timeline(
+            10.0,
+            &[title(10.0, 1.0), title(12.0, 1.0), overdub(11.0, 12.0, 2.0)],
+        );
+        assert_eq!(
+            kinds(&tl),
+            vec![&SegmentKind::Source, &SegmentKind::Title { index: 0 }]
+        );
+        assert_eq!(output_duration(&tl), 11.0);
+    }
+
+    #[test]
     fn title_at_start_and_end() {
         let tl = timeline(10.0, &[title(0.0, 1.0), title(10.0, 1.0)]);
         assert_eq!(
@@ -862,6 +973,43 @@ mod tests {
         );
     }
 
+    /// Three ten-second videos moved to C, A, B: `order` = [20, 0, 10].
+    fn starts_of(pieces: &[Range]) -> Vec<f64> {
+        pieces.iter().map(|p| p.start).collect()
+    }
+
+    #[test]
+    fn a_cut_or_split_inside_a_reordered_piece_keeps_the_remainder_with_it() {
+        let joins = [10.0, 20.0];
+        let order = [20.0, 0.0, 10.0];
+        let cut_inside = ordered_pieces(30.0, &[cut(3.0, 5.0)], &joins, &order);
+        assert_eq!(starts_of(&cut_inside), vec![20.0, 0.0, 5.0, 10.0]);
+        let split_inside = ordered_pieces(30.0, &[], &[10.0, 20.0, 5.0], &order);
+        assert_eq!(starts_of(&split_inside), vec![20.0, 0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn order_starts_groups_each_start_under_its_parent() {
+        // No order: source order.
+        assert_eq!(order_starts(&[10.0, 0.0, 5.0], &[]), vec![0.0, 5.0, 10.0]);
+        // A dead entry (0.0) still parents the head-trimmed 2.0.
+        assert_eq!(
+            order_starts(&[2.0, 10.0, 20.0], &[20.0, 0.0, 10.0]),
+            vec![20.0, 2.0, 10.0]
+        );
+        // A start before every entry joins the smallest one.
+        assert_eq!(
+            order_starts(&[1.0, 5.0, 8.0], &[8.0, 5.0]),
+            vec![8.0, 1.0, 5.0]
+        );
+    }
+
+    #[test]
+    fn a_head_cut_of_a_reordered_piece_keeps_its_place() {
+        let pieces = ordered_pieces(30.0, &[cut(0.0, 2.0)], &[10.0, 20.0], &[20.0, 0.0, 10.0]);
+        assert_eq!(starts_of(&pieces), vec![20.0, 2.0, 10.0]);
+    }
+
     #[test]
     fn timeline_with_lays_pieces_out_in_order_and_keeps_titles_with_their_piece() {
         // Title at the boundary 5.0 belongs to the piece starting there.
@@ -945,11 +1093,14 @@ mod tests {
             }]
         );
         let edits = [
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 1.0,
                 end: 2.0,
                 media: "b".into(),
                 offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             },
             Edit::Audio {
                 start: 0.0,
@@ -961,7 +1112,7 @@ mod tests {
             },
         ];
         let tl = timeline(10.0, &edits);
-        assert_eq!(broll_windows(&tl, &edits)[0][0].index, 0);
+        assert_eq!(layer_windows(&tl, &edits)[0][0].index, 0);
         assert_eq!(audio_windows(&tl, &edits)[0][0].index, 1);
     }
 
@@ -971,11 +1122,14 @@ mod tests {
         let edits = [
             title(5.0, 1.0),
             caption(0.0, 10.0),
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 0.0,
                 end: 10.0,
                 media: "b".into(),
                 offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             },
             Edit::Audio {
                 start: 0.0,
@@ -990,7 +1144,7 @@ mod tests {
         assert!(matches!(tl[1].kind, SegmentKind::Title { .. }));
         // The card is not a surface for a caption or a B-roll clip.
         assert!(caption_windows(&tl, &edits)[1].is_empty());
-        assert!(broll_windows(&tl, &edits)[1].is_empty());
+        assert!(layer_windows(&tl, &edits)[1].is_empty());
         // The music bed covers the whole hold, from the title's instant.
         assert_eq!(
             audio_windows(&tl, &edits)[1],
@@ -1064,5 +1218,139 @@ mod tests {
             joins(&tl, &edits, Transition::None)[1].transition,
             Transition::None
         );
+    }
+
+    fn src(media: &str, offset: f64, duration: f64) -> Source {
+        Source {
+            media: media.into(),
+            offset,
+            duration,
+        }
+    }
+
+    /// [0,10) [10,15) [15,17.5)
+    fn three() -> Vec<Source> {
+        all_sources(
+            src("m1", 0.0, 10.0),
+            &[src("m2", 10.0, 5.0), src("m3", 15.0, 2.5)],
+        )
+    }
+
+    #[test]
+    fn all_sources_puts_the_project_media_first() {
+        let all = three();
+        assert_eq!(
+            all.iter().map(|s| s.media.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2", "m3"]
+        );
+        assert_eq!(
+            all_sources(src("m1", 0.0, 4.0), &[]),
+            vec![src("m1", 0.0, 4.0)]
+        );
+    }
+
+    #[test]
+    fn stitched_duration_is_the_last_sources_end() {
+        assert_eq!(stitched_duration(&three()), 17.5);
+        assert_eq!(stitched_duration(&[src("m1", 0.0, 4.0)]), 4.0);
+        assert_eq!(stitched_duration(&[]), 0.0);
+    }
+
+    #[test]
+    fn locate_at_every_boundary() {
+        let s = three();
+        assert_eq!(locate(&s, 0.0), Some((0, 0.0)), "the very start");
+        assert_eq!(locate(&s, 4.25), Some((0, 4.25)), "inside the first");
+        assert_eq!(locate(&s, 9.5), Some((0, 9.5)), "just before a join");
+        assert_eq!(
+            locate(&s, 10.0),
+            Some((1, 0.0)),
+            "a join belongs to the later source"
+        );
+        assert_eq!(locate(&s, 12.0), Some((1, 2.0)), "inside the second");
+        assert_eq!(locate(&s, 15.0), Some((2, 0.0)), "the second join");
+        assert_eq!(
+            locate(&s, 17.5),
+            Some((2, 2.5)),
+            "the exact end is the last source at its duration"
+        );
+        assert_eq!(locate(&s, 17.6), None, "past the end");
+        assert_eq!(locate(&s, -0.1), None, "before the start");
+        assert_eq!(locate(&[], 0.0), None, "no sources");
+    }
+
+    #[test]
+    fn locate_snaps_within_eps_of_a_join_or_the_end() {
+        let s = three();
+        assert_eq!(locate(&s, 10.0 - EPS / 2.0), Some((1, 0.0)));
+        assert_eq!(locate(&s, 17.5 + EPS / 2.0), Some((2, 2.5)));
+        assert_eq!(locate(&s, -EPS / 2.0), Some((0, 0.0)));
+    }
+
+    #[test]
+    fn locate_on_one_source_is_the_identity() {
+        let s = [src("m1", 0.0, 10.0)];
+        assert_eq!(locate(&s, 0.0), Some((0, 0.0)));
+        assert_eq!(locate(&s, 3.5), Some((0, 3.5)));
+        assert_eq!(locate(&s, 10.0), Some((0, 10.0)));
+        assert_eq!(locate(&s, 10.5), None);
+    }
+
+    #[test]
+    fn stitch_words_shifts_by_offset_and_prefixes_later_ids() {
+        let w = |id: &str, start: f64, end: f64| Word {
+            id: id.into(),
+            text: id.into(),
+            start,
+            end,
+        };
+        let s = three();
+        let first = [w("w0", 0.5, 1.0), w("w1", 1.0, 1.5)];
+        let third = [w("w0", 0.0, 0.25)];
+        let words = stitch_words(&[(&s[0], &first), (&s[1], &[]), (&s[2], &third)]);
+        assert_eq!(
+            words,
+            vec![
+                w("w0", 0.5, 1.0),
+                w("w1", 1.0, 1.5),
+                Word {
+                    id: "2:w0".into(),
+                    text: "w0".into(),
+                    start: 15.0,
+                    end: 15.25,
+                },
+            ]
+        );
+        assert!(stitch_words(&[]).is_empty());
+    }
+
+    #[test]
+    fn layer_windows_put_v2_under_v3_whatever_the_edit_order() {
+        let edits = [
+            Edit::Layer {
+                track: 3,
+                start: 2.0,
+                end: 5.0,
+                media: "p".into(),
+                offset: 0.0,
+                frame: Frame::PipTopRight,
+                audio: None,
+            },
+            Edit::Layer {
+                track: 2,
+                start: 1.0,
+                end: 6.0,
+                media: "b".into(),
+                offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
+            },
+        ];
+        let tl = timeline(10.0, &edits);
+        let order: Vec<usize> = layer_windows(&tl, &edits)[0]
+            .iter()
+            .map(|w| w.index)
+            .collect();
+        assert_eq!(order, vec![1, 0]);
     }
 }

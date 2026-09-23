@@ -1,9 +1,11 @@
 //! Planning the ffmpeg render for an edit list.
 //!
-//! Every output piece becomes one `trim`/`atrim` chain on the source (or, for
-//! an overdub, a frozen first frame plus the synthesized WAV), and the pieces
-//! are joined with the `concat` filter. Audio is resampled to a common
-//! format first because `concat` refuses mismatched streams.
+//! The main track is one or more source files laid end to end in stitched
+//! time; each is its own input, in order. Every output piece becomes one
+//! `trim`/`atrim` chain on the file that holds it (or, for an overdub, a
+//! frozen first frame plus the synthesized WAV), fitted onto the canvas, and
+//! the pieces are joined with the `concat` filter. Audio is resampled to a
+//! common format first because `concat` refuses mismatched streams.
 //!
 //! Text is not drawn by ffmpeg: the installed builds have no `drawtext`, so
 //! `crate::text` rasterises title cards and caption boxes into PNGs and this
@@ -19,10 +21,11 @@ use thiserror::Error;
 use serde::{Deserialize, Serialize};
 
 use crate::editlist::{
-    audio_windows, broll_windows, caption_windows, joins, timeline_with, Segment, SegmentKind,
-    Window, FADE,
+    audio_windows, caption_windows, joins, layer_windows, timeline_with, Segment, SegmentKind,
+    Window, EPS, FADE,
 };
-use crate::types::{Edit, MediaKind, Range, Transition, Word};
+use crate::types::{Edit, Frame, MediaKind, Range, Source, Transition, Word};
+use crate::{locate, stitched_duration};
 
 /// Container/codec for the rendered file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,16 +87,45 @@ pub fn oriented(video: VideoInfo, rotation: i32) -> VideoInfo {
     }
 }
 
+/// One main-track file as the planner sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceInput {
+    /// Where it sits on the stitched timeline.
+    pub source: Source,
+    /// The local file ffmpeg opens.
+    pub path: PathBuf,
+    pub kind: MediaKind,
+    /// Frame size and rate, when the file has a picture and it was probed.
+    pub video: Option<VideoInfo>,
+}
+
+/// The frame every source is fitted onto: the first file with a picture
+/// (an unprobed one counts as `DEFAULT_VIDEO`), else `DEFAULT_VIDEO`.
+pub fn canvas(sources: &[SourceInput]) -> VideoInfo {
+    sources
+        .iter()
+        .find(|s| s.kind == MediaKind::Video)
+        .and_then(|s| s.video)
+        .unwrap_or(DEFAULT_VIDEO)
+}
+
+/// `Video` when any source has a picture: the project renders to mp4.
+pub fn sources_kind(sources: &[SourceInput]) -> MediaKind {
+    if sources.iter().any(|s| s.kind == MediaKind::Video) {
+        MediaKind::Video
+    } else {
+        MediaKind::Audio
+    }
+}
+
 #[derive(Debug)]
 pub struct ExportOptions<'a> {
-    pub duration: f64,
+    /// `Video` when any source has a picture; see `sources_kind`.
     pub kind: MediaKind,
     pub format: OutputFormat,
     pub output: &'a Path,
     /// Local audio file for each overdub edit's `audio_url`.
     pub overdub_audio: &'a HashMap<String, PathBuf>,
-    /// Frame size and rate of the source picture; titles must match it.
-    pub video: Option<VideoInfo>,
     /// PNG for each `Edit::Title`, by edit index, rendered at the frame size.
     pub title_images: &'a HashMap<usize, PathBuf>,
     /// PNG and its `overlay` placement for each `Edit::Caption`, by edit index.
@@ -102,7 +134,7 @@ pub struct ExportOptions<'a> {
     pub transition: Transition,
     pub splits: &'a [f64],
     pub order: &'a [f64],
-    /// Local file for each asset id a B-roll or audio edit names.
+    /// Local file for each media id a layer or audio edit names.
     pub assets: &'a HashMap<String, PathBuf>,
     /// Transcript words, for ducking. Empty means no ducking.
     pub words: &'a [Word],
@@ -122,19 +154,33 @@ pub enum ExportError {
     MissingCaptionImage(usize),
     #[error("no file for asset {0}")]
     MissingAsset(String),
+    #[error("the piece at {0} s lies outside every source")]
+    OutsideSources(f64),
 }
 
 /// Audio format every segment is coerced to before `concat`.
 const AUDIO_NORMALIZE: &str = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
 
+/// Picture-in-picture width as a fraction of the canvas width.
+pub const PIP_WIDTH: f64 = 0.3;
+/// Picture-in-picture inset from its corner, as a fraction of each canvas side.
+pub const PIP_MARGIN: f64 = 0.04;
+
 /// Build the full ffmpeg argv (without the program name) that renders `edits`
-/// applied to `input` into `opts.output`.
+/// over the main-track `sources` into `opts.output`. Input `k` is `sources[k]`.
 pub fn build_ffmpeg_args(
-    input: &Path,
+    sources: &[SourceInput],
     edits: &[Edit],
     opts: &ExportOptions,
 ) -> Result<Vec<String>, ExportError> {
-    let segments = timeline_with(opts.duration, edits, opts.splits, opts.order);
+    if sources.is_empty() {
+        return Err(ExportError::NothingToExport);
+    }
+    let placed: Vec<Source> = sources.iter().map(|s| s.source.clone()).collect();
+    let segments = split_at_joins(
+        timeline_with(stitched_duration(&placed), edits, opts.splits, opts.order),
+        &placed,
+    );
     if segments.is_empty() {
         return Err(ExportError::NothingToExport);
     }
@@ -144,17 +190,20 @@ pub fn build_ffmpeg_args(
     }
     let render_video = with_video && opts.format == OutputFormat::Mp4;
 
-    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error", "-i"]
+    let mut args: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
         .map(String::from)
         .to_vec();
-    args.push(input.to_string_lossy().into_owned());
+    for s in sources {
+        args.push("-i".into());
+        args.push(s.path.to_string_lossy().into_owned());
+    }
 
-    let video_info = opts.video.unwrap_or(DEFAULT_VIDEO);
+    let video_info = canvas(sources);
     let windows = caption_windows(&segments, edits);
 
-    // Overdub WAVs and title cards become extra inputs, numbered in the order
-    // they are pushed; the source is always input 0.
-    let mut next_input = 1;
+    // Overdub WAVs, title cards, captions and inserts become extra inputs,
+    // numbered in the order they are pushed after the sources.
+    let mut next_input = sources.len();
     let mut overdub_input: HashMap<usize, usize> = HashMap::new();
     let mut title_input: HashMap<usize, usize> = HashMap::new();
     for seg in &segments {
@@ -207,25 +256,30 @@ pub fn build_ffmpeg_args(
             args.push(path.to_string_lossy().into_owned());
         }
     }
-    let brolls = broll_windows(&segments, edits);
+    let layers = layer_windows(&segments, edits);
     let audios = audio_windows(&segments, edits);
     let asset_path = |id: &str| {
         opts.assets
             .get(id)
             .ok_or_else(|| ExportError::MissingAsset(id.to_owned()))
     };
-    let mut broll_input: Vec<Vec<usize>> = vec![Vec::new(); segments.len()];
-    if render_video {
-        for (i, ws) in brolls.iter().enumerate() {
-            for w in ws {
-                let Edit::Broll { media, .. } = &edits[w.index] else {
-                    continue;
-                };
+    // A layer opens its file when its picture is drawn or its sound is mixed;
+    // a muted layer in an audio-only render needs nothing.
+    let mut layer_input: Vec<Vec<Option<usize>>> = vec![Vec::new(); segments.len()];
+    for (i, ws) in layers.iter().enumerate() {
+        for w in ws {
+            let Edit::Layer { media, audio, .. } = &edits[w.index] else {
+                continue;
+            };
+            let opened = if render_video || audio.is_some() {
                 args.push("-i".into());
                 args.push(asset_path(media)?.to_string_lossy().into_owned());
-                broll_input[i].push(next_input);
                 next_input += 1;
-            }
+                Some(next_input - 1)
+            } else {
+                None
+            };
+            layer_input[i].push(opened);
         }
     }
     let mut audio_input: Vec<Vec<usize>> = vec![Vec::new(); segments.len()];
@@ -262,10 +316,34 @@ pub fn build_ffmpeg_args(
     let mut concat_inputs = String::new();
     for (i, seg) in segments.iter().enumerate() {
         let hold = seg.output.len();
+        let (k, local) = place(&placed, seg.source)?;
+        let file = &sources[k];
+        let picture = file.kind == MediaKind::Video;
         let (v, a) = match seg.kind {
-            SegmentKind::Source => (render_video.then(|| video_trim(seg)), audio_trim(seg)),
+            SegmentKind::Source => (
+                render_video.then(|| {
+                    if picture {
+                        video_trim(k, local, &fit(file, video_info))
+                    } else {
+                        black(video_info, hold)
+                    }
+                }),
+                audio_trim(k, local),
+            ),
             SegmentKind::Overdub { index } => (
-                render_video.then(|| freeze_frame(seg, opts.duration, hold)),
+                render_video.then(|| {
+                    if picture {
+                        freeze_frame(
+                            k,
+                            local.start,
+                            file.source.duration,
+                            hold,
+                            &fit(file, video_info),
+                        )
+                    } else {
+                        black(video_info, hold)
+                    }
+                }),
                 overdub_audio(overdub_input[&index], hold),
             ),
             SegmentKind::Title { index } => (
@@ -277,17 +355,34 @@ pub fn build_ffmpeg_args(
             // `overlay` takes two inputs, so each caption closes the chain so
             // far under a temporary label and starts a new one from it.
             let mut chain = base;
-            for (n, w) in brolls[i].iter().enumerate() {
-                let Edit::Broll { start, offset, .. } = &edits[w.index] else {
+            for (n, w) in layers[i].iter().enumerate() {
+                let (
+                    Edit::Layer {
+                        start,
+                        offset,
+                        frame,
+                        ..
+                    },
+                    Some(input),
+                ) = (&edits[w.index], layer_input[i][n])
+                else {
                     continue;
                 };
                 let from = offset + (w.source_start - start);
-                let _ = write!(graph,
-                    "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS+{}/TB,scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}b{n}];",
-                    broll_input[i][n], fmt(from), fmt(from + (w.end - w.start)), fmt(w.start),
-                    W = video_info.width, H = video_info.height);
+                let (scale, x, y) = layer_placement(*frame, video_info);
+                let _ = write!(
+                    graph,
+                    "[{input}:v]trim=start={}:end={},setpts=PTS-STARTPTS+{}/TB,{scale},setsar=1[v{i}b{n}];",
+                    fmt(from),
+                    fmt(from + (w.end - w.start)),
+                    fmt(w.start)
+                );
                 let _ = write!(graph, "{chain}[v{i}bo{n}];");
-                chain = format!("[v{i}bo{n}][v{i}b{n}]overlay=x=0:y=0:eof_action=pass:enable='between(t,{},{})'", fmt(w.start), fmt(w.end));
+                chain = format!(
+                    "[v{i}bo{n}][v{i}b{n}]overlay=x={x}:y={y}:eof_action=pass:enable='between(t,{},{})'",
+                    fmt(w.start),
+                    fmt(w.end)
+                );
             }
             for (n, w) in windows[i].iter().enumerate() {
                 let label = format!("v{i}c{n}");
@@ -310,7 +405,18 @@ pub fn build_ffmpeg_args(
             let _ = write!(graph, "{chain}[v{i}];");
             let _ = write!(concat_inputs, "[v{i}]");
         }
-        let mut mixed = if audios[i].is_empty() {
+        // Music beds and layers with sound mix under the piece's own audio.
+        let sounding: Vec<(usize, &Window, f64, usize)> = layers[i]
+            .iter()
+            .enumerate()
+            .filter_map(|(n, w)| match &edits[w.index] {
+                Edit::Layer {
+                    audio: Some(db), ..
+                } => Some((n, w, *db, layer_input[i][n]?)),
+                _ => None,
+            })
+            .collect();
+        let mut mixed = if audios[i].is_empty() && sounding.is_empty() {
             a
         } else {
             let _ = write!(graph, "{a}[a{i}m];");
@@ -326,25 +432,32 @@ pub fn build_ffmpeg_args(
                 else {
                     continue;
                 };
-                let from = offset + (w.source_start - start);
-                let mut m = format!(
-                    "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE},adelay={}:all=1,volume={}dB",
-                    audio_input[i][n], fmt(from), fmt(from + (w.end - w.start)),
-                    (w.start * 1000.0).round() as i64, fmt(*gain));
                 let runs = if *duck {
                     duck_runs(seg, w, opts.words)
                 } else {
                     Vec::new()
                 };
-                if !runs.is_empty() {
-                    let _ = write!(m, ",volume=volume='{}':eval=frame", duck_expr(&runs));
-                }
-                let _ = write!(graph, "{m}[a{i}x{n}];");
+                let from = offset + (w.source_start - start);
+                let _ = write!(
+                    graph,
+                    "{}[a{i}x{n}];",
+                    bed(audio_input[i][n], from, w, *gain, &runs)
+                );
                 let _ = write!(labels, "[a{i}x{n}]");
+            }
+            // A layer has no duck switch: its sound always dips under speech.
+            for (n, w, db, input) in &sounding {
+                let Edit::Layer { start, offset, .. } = &edits[w.index] else {
+                    continue;
+                };
+                let from = offset + (w.source_start - start);
+                let runs = duck_runs(seg, w, opts.words);
+                let _ = write!(graph, "{}[a{i}l{n}];", bed(*input, from, w, *db, &runs));
+                let _ = write!(labels, "[a{i}l{n}]");
             }
             format!(
                 "{labels}amix=inputs={}:normalize=0:duration=first",
-                audios[i].len() + 1
+                audios[i].len() + sounding.len() + 1
             )
         };
         if dip_in(i) {
@@ -380,33 +493,157 @@ pub fn build_ffmpeg_args(
     Ok(args)
 }
 
-fn video_trim(seg: &Segment) -> String {
+fn video_trim(input: usize, r: Range, fit: &str) -> String {
     format!(
-        "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS,setsar=1",
-        fmt(seg.source.start),
-        fmt(seg.source.end)
+        "[{input}:v]trim=start={}:end={},setpts=PTS-STARTPTS{fit},setsar=1",
+        fmt(r.start),
+        fmt(r.end)
     )
 }
 
-fn audio_trim(seg: &Segment) -> String {
+fn audio_trim(input: usize, r: Range) -> String {
     format!(
-        "[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE}",
-        fmt(seg.source.start),
-        fmt(seg.source.end)
+        "[{input}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE}",
+        fmt(r.start),
+        fmt(r.end)
     )
 }
 
-/// Take the first frame of the range and clone it for `hold` seconds.
-fn freeze_frame(seg: &Segment, duration: f64, hold: f64) -> String {
+/// Take the frame at local time `at` of a file `duration` long and clone it
+/// for `hold` seconds.
+fn freeze_frame(input: usize, at: f64, duration: f64, hold: f64, fit: &str) -> String {
     // A one-second window guarantees at least one frame at any sane frame rate.
-    let window_end = (seg.source.start + 1.0).min(duration);
+    let window_end = (at + 1.0).min(duration);
     format!(
-        "[0:v]trim=start={}:end={},setpts=PTS-STARTPTS,select=eq(n\\,0),\
-         tpad=stop_mode=clone:stop_duration={hold},trim=end={hold},setpts=PTS-STARTPTS,setsar=1",
-        fmt(seg.source.start),
+        "[{input}:v]trim=start={}:end={},setpts=PTS-STARTPTS,select=eq(n\\,0),\
+         tpad=stop_mode=clone:stop_duration={hold},trim=end={hold},setpts=PTS-STARTPTS{fit},setsar=1",
+        fmt(at),
         fmt(window_end),
         hold = fmt(hold),
     )
+}
+
+/// Black at the canvas size for `hold` seconds: the picture of an audio-only source.
+fn black(canvas: VideoInfo, hold: f64) -> String {
+    format!(
+        "color=c=black:s={}x{}:r={}:d={},format=yuv420p,setsar=1",
+        canvas.width,
+        canvas.height,
+        rate(canvas.fps),
+        fmt(hold)
+    )
+}
+
+/// Filters that bring `file`'s picture onto the canvas: nothing when it is
+/// known to match already, else scale to fit, letterbox and resample the
+/// frame rate. An unprobed picture is always fitted: its size is a guess.
+fn fit(file: &SourceInput, canvas: VideoInfo) -> String {
+    if let Some(v) = file.video {
+        if v.width == canvas.width && v.height == canvas.height && (v.fps - canvas.fps).abs() < 1e-3
+        {
+            return String::new();
+        }
+    }
+    format!(
+        ",scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps={}",
+        rate(canvas.fps),
+        w = canvas.width,
+        h = canvas.height,
+    )
+}
+
+/// A frame rate for ffmpeg: NTSC rates as their exact fraction, others as
+/// a plain number.
+fn rate(fps: f64) -> String {
+    let ntsc = fps * 1001.0 / 1000.0;
+    if (ntsc - ntsc.round()).abs() < 1e-3 && (fps - fps.round()).abs() > 1e-3 {
+        format!("{}000/1001", ntsc.round() as i64)
+    } else {
+        fmt(fps)
+    }
+}
+
+/// The input holding a piece, and the piece's range in that file's own time.
+/// A piece that starts outside every file is a planner bug, not input 0.
+fn place(placed: &[Source], r: Range) -> Result<(usize, Range), ExportError> {
+    locate(placed, r.start)
+        .map(|(k, local)| (k, Range::new(local, local + r.len())))
+        .ok_or(ExportError::OutsideSources(r.start))
+}
+
+/// Split every source piece at each join strictly inside it, so each piece
+/// reads one file. Holds and titles are placed by their start and left whole.
+fn split_at_joins(segments: Vec<Segment>, placed: &[Source]) -> Vec<Segment> {
+    let joins: Vec<f64> = placed.iter().skip(1).map(|s| s.offset).collect();
+    let mut out = Vec::with_capacity(segments.len());
+    for seg in segments {
+        if seg.kind != SegmentKind::Source {
+            out.push(seg);
+            continue;
+        }
+        let shift = seg.output.start - seg.source.start;
+        let mut cursor = seg.source.start;
+        for &j in &joins {
+            if j > cursor + EPS && j < seg.source.end - EPS {
+                out.push(Segment {
+                    source: Range::new(cursor, j),
+                    output: Range::new(cursor + shift, j + shift),
+                    kind: SegmentKind::Source,
+                });
+                cursor = j;
+            }
+        }
+        out.push(Segment {
+            source: Range::new(cursor, seg.source.end),
+            output: Range::new(cursor + shift, seg.output.end),
+            kind: SegmentKind::Source,
+        });
+    }
+    out
+}
+
+/// An inserted sound: `w`'s length of `input` from `from`, placed at
+/// `w.start` in the piece, at `gain` dB, dipped under `runs` of speech.
+fn bed(input: usize, from: f64, w: &Window, gain: f64, runs: &[Range]) -> String {
+    let mut m = format!(
+        "[{input}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS,{AUDIO_NORMALIZE},adelay={}:all=1,volume={}dB",
+        fmt(from),
+        fmt(from + (w.end - w.start)),
+        (w.start * 1000.0).round() as i64,
+        fmt(gain)
+    );
+    if !runs.is_empty() {
+        let _ = write!(m, ",volume=volume='{}':eval=frame", duck_expr(runs));
+    }
+    m
+}
+
+/// A layer's scale filter and its `overlay` x and y on the canvas. Full frame
+/// is fitted and letterboxed; picture-in-picture is `PIP_WIDTH` of the canvas
+/// wide and `PIP_MARGIN` of each side in from its corner.
+fn layer_placement(frame: Frame, canvas: VideoInfo) -> (String, String, String) {
+    let (w, h) = (canvas.width, canvas.height);
+    let pip = || format!("scale={}:-2", even(f64::from(w) * PIP_WIDTH));
+    let mx = (f64::from(w) * PIP_MARGIN).round() as u32;
+    let my = (f64::from(h) * PIP_MARGIN).round() as u32;
+    let right = format!("main_w-overlay_w-{mx}");
+    let bottom = format!("main_h-overlay_h-{my}");
+    match frame {
+        Frame::Full => (
+            format!("scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"),
+            "0".into(),
+            "0".into(),
+        ),
+        Frame::PipTopLeft => (pip(), mx.to_string(), my.to_string()),
+        Frame::PipTopRight => (pip(), right, my.to_string()),
+        Frame::PipBottomLeft => (pip(), mx.to_string(), bottom),
+        Frame::PipBottomRight => (pip(), right, bottom),
+    }
+}
+
+/// The nearest even whole number; yuv420p needs even sizes.
+fn even(v: f64) -> u32 {
+    ((v / 2.0).round() as u32) * 2
 }
 
 /// The synthesized WAV, padded or trimmed to exactly `hold` seconds.
@@ -535,7 +772,7 @@ fn duck_runs(seg: &Segment, w: &Window, words: &[Word]) -> Vec<Range> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CaptionPos, TitleStyle};
+    use crate::types::{CaptionPos, Frame, TitleStyle};
 
     /// An empty map that lives as long as the test needs it.
     fn leak<T: 'static>(value: T) -> &'static T {
@@ -583,16 +820,10 @@ mod tests {
         overdub_audio: &'a HashMap<String, PathBuf>,
     ) -> ExportOptions<'a> {
         ExportOptions {
-            duration: 10.0,
             kind,
             format,
             output,
             overdub_audio,
-            video: Some(VideoInfo {
-                width: 1280,
-                height: 720,
-                fps: 30.0,
-            }),
             title_images: titles(&[]),
             caption_images: captions(&[]),
             transition: Transition::None,
@@ -632,8 +863,54 @@ mod tests {
         filter_complex(&args).to_owned()
     }
 
+    const HD: VideoInfo = VideoInfo {
+        width: 1280,
+        height: 720,
+        fps: 30.0,
+    };
+
+    /// One main-track file at `offset` for `duration` seconds.
+    fn file(
+        media: &str,
+        path: &str,
+        offset: f64,
+        duration: f64,
+        kind: MediaKind,
+        video: Option<VideoInfo>,
+    ) -> SourceInput {
+        SourceInput {
+            source: Source {
+                media: media.into(),
+                offset,
+                duration,
+            },
+            path: PathBuf::from(path),
+            kind,
+            video,
+        }
+    }
+
+    /// The ten-second single file every older test renders.
+    fn single(kind: MediaKind) -> Vec<SourceInput> {
+        match kind {
+            MediaKind::Video => vec![file("m0", "in.mp4", 0.0, 10.0, kind, Some(HD))],
+            MediaKind::Audio => vec![file("m0", "in.mp3", 0.0, 10.0, kind, None)],
+        }
+    }
+
     /// The whole argv, so tests can look at the inputs as well as the graph.
     fn args_with(
+        edits: &[Edit],
+        kind: MediaKind,
+        format: OutputFormat,
+        tweak: impl FnOnce(&mut ExportOptions),
+    ) -> Result<Vec<String>, ExportError> {
+        args_from(&single(kind), edits, kind, format, tweak)
+    }
+
+    /// Same, over an explicit list of main-track files.
+    fn args_from(
+        sources: &[SourceInput],
         edits: &[Edit],
         kind: MediaKind,
         format: OutputFormat,
@@ -643,12 +920,7 @@ mod tests {
         let out = PathBuf::from(format!("out.{}", format.extension()));
         let mut options = opts(kind, format, &out, &none);
         tweak(&mut options);
-        let input = if kind == MediaKind::Video {
-            "in.mp4"
-        } else {
-            "in.mp3"
-        };
-        build_ffmpeg_args(Path::new(input), edits, &options)
+        build_ffmpeg_args(sources, edits, &options)
     }
 
     /// Does `args` contain `needle` as a contiguous run?
@@ -715,7 +987,7 @@ mod tests {
             transition: None,
         }];
         let args = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &edits,
             &opts(MediaKind::Video, OutputFormat::Mp4, out, &none),
         )
@@ -750,7 +1022,7 @@ mod tests {
             audio_duration: 2.5,
         }];
         let args = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &edits,
             &opts(MediaKind::Video, OutputFormat::Mp4, out, &audio),
         )
@@ -777,7 +1049,7 @@ mod tests {
             transition: None,
         }];
         let args = build_ffmpeg_args(
-            Path::new("in.mp3"),
+            &single(MediaKind::Audio),
             &edits,
             &opts(MediaKind::Audio, OutputFormat::Mp3, out, &none),
         )
@@ -794,7 +1066,7 @@ mod tests {
         let none = HashMap::new();
         let out = Path::new("out.wav");
         let args = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &[],
             &opts(MediaKind::Video, OutputFormat::Wav, out, &none),
         )
@@ -813,7 +1085,7 @@ mod tests {
             transition: None,
         }];
         let err = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &edits,
             &opts(MediaKind::Video, OutputFormat::Mp4, out, &none),
         )
@@ -833,7 +1105,7 @@ mod tests {
             audio_duration: 1.0,
         }];
         let err = build_ffmpeg_args(
-            Path::new("in.mp4"),
+            &single(MediaKind::Video),
             &edits,
             &opts(MediaKind::Video, OutputFormat::Mp4, out, &none),
         )
@@ -849,7 +1121,7 @@ mod tests {
         let none = HashMap::new();
         let out = Path::new("out.mp4");
         let err = build_ffmpeg_args(
-            Path::new("in.mp3"),
+            &single(MediaKind::Audio),
             &[],
             &opts(MediaKind::Audio, OutputFormat::Mp4, out, &none),
         )
@@ -909,8 +1181,9 @@ mod tests {
             subtitle: None,
             style: TitleStyle::Dark,
         }];
-        let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
-            o.video = None;
+        let mut sources = single(MediaKind::Video);
+        sources[0].video = None;
+        let args = args_from(&sources, &edits, MediaKind::Video, OutputFormat::Mp4, |o| {
             o.title_images = titles(&[(0, "/imgs/t.png")]);
         })
         .unwrap();
@@ -1052,7 +1325,7 @@ mod tests {
         let mut options = opts(MediaKind::Video, OutputFormat::Mp4, &out, &audio);
         options.title_images = titles(&[(0, "/imgs/title-0.png")]);
         options.caption_images = captions(&[(2, "/imgs/cap-2.png", 64, 540)]);
-        let args = build_ffmpeg_args(Path::new("in.mp4"), &edits, &options).unwrap();
+        let args = build_ffmpeg_args(&single(MediaKind::Video), &edits, &options).unwrap();
 
         // The files given to `-i`, in argv order: source, title, overdub, caption.
         let inputs: Vec<&str> = args
@@ -1143,11 +1416,14 @@ mod tests {
 
     #[test]
     fn broll_is_trimmed_delayed_scaled_and_overlaid_under_captions() {
-        let edits = [Edit::Broll {
+        let edits = [Edit::Layer {
+            track: 2,
             start: 2.0,
             end: 4.0,
             media: "b1".into(),
             offset: 1.5,
+            frame: Frame::Full,
+            audio: None,
         }];
         let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
             o.assets = assets(&[("b1", "/assets/b1.mp4")]);
@@ -1165,11 +1441,14 @@ mod tests {
     #[test]
     fn broll_across_a_reordered_boundary_offsets_into_the_asset() {
         // Window on the second output piece starts 1 s into the B-roll range.
-        let edits = [Edit::Broll {
+        let edits = [Edit::Layer {
+            track: 2,
             start: 4.0,
             end: 6.0,
             media: "b1".into(),
             offset: 0.0,
+            frame: Frame::Full,
+            audio: None,
         }];
         let g = graph_with(
             &[edits[0].clone()],
@@ -1302,11 +1581,14 @@ mod tests {
                 text: "c".into(),
                 position: CaptionPos::BottomLeft,
             },
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 0.0,
                 end: 10.0,
                 media: "b1".into(),
                 offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             },
         ];
         let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
@@ -1347,7 +1629,7 @@ mod tests {
         let out = PathBuf::from("out.mp4");
         let mut o = opts(MediaKind::Video, OutputFormat::Mp4, &out, &overdub_audio);
         o.assets = assets(&[("m1", "/assets/m1.mp3")]);
-        let args = build_ffmpeg_args(Path::new("in.mp4"), &edits, &o).unwrap();
+        let args = build_ffmpeg_args(&single(MediaKind::Video), &edits, &o).unwrap();
         let g = filter_complex(&args);
         // Segment 1 is the 2 s hold: the envelope covers [0,2].
         assert!(g.contains("(t--0.12)/0.12,(2.12-t)/0.12"), "{g}");
@@ -1356,11 +1638,14 @@ mod tests {
     #[test]
     fn audio_only_export_mixes_music_and_ignores_broll() {
         let edits = [
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 1.0,
                 end: 2.0,
                 media: "b1".into(),
                 offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             },
             Edit::Audio {
                 start: 0.0,
@@ -1394,5 +1679,481 @@ mod tests {
             args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap_err(),
             ExportError::MissingAsset("m1".into())
         );
+    }
+
+    const FHD: VideoInfo = VideoInfo {
+        width: 1920,
+        height: 1080,
+        fps: 30.0,
+    };
+    const PAL: VideoInfo = VideoInfo {
+        width: 1280,
+        height: 720,
+        fps: 25.0,
+    };
+    const AN: &str = AUDIO_NORMALIZE;
+    /// What a 720p25 file gets to sit on a 1080p30 canvas.
+    const FIT: &str = ",scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30";
+
+    /// A 1080p30 file for 4 s, then a 720p25 file for 6 s.
+    fn two_files() -> Vec<SourceInput> {
+        vec![
+            file("m0", "a.mp4", 0.0, 4.0, MediaKind::Video, Some(FHD)),
+            file("m1", "b.mov", 4.0, 6.0, MediaKind::Video, Some(PAL)),
+        ]
+    }
+
+    #[test]
+    fn one_source_graph_is_exactly_what_it_was() {
+        let g = graph(&[cut(2.0, 4.0)], MediaKind::Video, OutputFormat::Mp4);
+        assert_eq!(
+            g,
+            format!(
+                "[0:v]trim=start=0:end=2,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=2,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 [0:v]trim=start=4:end=10,setpts=PTS-STARTPTS,setsar=1[v1];\
+                 [0:a]atrim=start=4:end=10,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn two_sources_are_trimmed_from_their_own_files_and_fitted_to_the_first() {
+        // The fold's permanent split at the join is in `splits`, as AddSource leaves it.
+        let args = args_from(
+            &two_files(),
+            &[cut(1.0, 2.0)],
+            MediaKind::Video,
+            OutputFormat::Mp4,
+            |o| o.splits = &[4.0],
+        )
+        .unwrap();
+        assert_eq!(
+            &args[..8],
+            &[
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                "a.mp4",
+                "-i",
+                "b.mov"
+            ]
+        );
+        assert_eq!(
+            filter_complex(&args),
+            format!(
+                "[0:v]trim=start=0:end=1,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=1,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 [0:v]trim=start=2:end=4,setpts=PTS-STARTPTS,setsar=1[v1];\
+                 [0:a]atrim=start=2:end=4,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [1:v]trim=start=0:end=6,setpts=PTS-STARTPTS{FIT},setsar=1[v2];\
+                 [1:a]atrim=start=0:end=6,asetpts=PTS-STARTPTS,{AN}[a2];\
+                 [v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[outv][outa]"
+            )
+        );
+        assert!(args.windows(2).any(|w| w == ["-c:v", "libx264"]));
+    }
+
+    #[test]
+    fn a_piece_that_crosses_a_join_is_split_there() {
+        // No splits at all: the planner still reads each file for its own part.
+        let g = filter_complex(
+            &args_from(
+                &two_files(),
+                &[],
+                MediaKind::Video,
+                OutputFormat::Mp4,
+                |_| {},
+            )
+            .unwrap(),
+        )
+        .to_owned();
+        assert_eq!(
+            g,
+            format!(
+                "[0:v]trim=start=0:end=4,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=4,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 [1:v]trim=start=0:end=6,setpts=PTS-STARTPTS{FIT},setsar=1[v1];\
+                 [1:a]atrim=start=0:end=6,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn an_overdub_on_the_second_file_freezes_that_files_frame_on_the_canvas() {
+        let edits = [Edit::Overdub {
+            start: 5.0,
+            end: 6.0,
+            text: "hi".into(),
+            audio_url: "/data/m/od.wav".into(),
+            audio_duration: 2.0,
+        }];
+        let od = leak(HashMap::from([(
+            "/data/m/od.wav".to_owned(),
+            PathBuf::from("/srv/od.wav"),
+        )]));
+        let args = args_from(
+            &two_files(),
+            &edits,
+            MediaKind::Video,
+            OutputFormat::Mp4,
+            |o| {
+                o.overdub_audio = od;
+            },
+        )
+        .unwrap();
+        // Pieces: [0,4) file 0, [4,5) file 1, the 2 s hold, [6,10) file 1.
+        assert!(has_run(&args, &["-i", "/srv/od.wav"]), "{args:?}");
+        let g = filter_complex(&args);
+        assert!(
+            g.contains(&format!(
+                "[1:v]trim=start=1:end=2,setpts=PTS-STARTPTS,select=eq(n\\,0),\
+                 tpad=stop_mode=clone:stop_duration=2,trim=end=2,setpts=PTS-STARTPTS{FIT},setsar=1[v2];"
+            )),
+            "{g}"
+        );
+        assert!(g.contains("[2:a]aresample=48000"), "{g}");
+        assert!(
+            g.contains(&format!(
+                "[1:v]trim=start=2:end=6,setpts=PTS-STARTPTS{FIT},setsar=1[v3];"
+            )),
+            "{g}"
+        );
+        assert!(g.ends_with("concat=n=4:v=1:a=1[outv][outa]"), "{g}");
+    }
+
+    #[test]
+    fn an_audio_only_source_shows_black_on_the_canvas() {
+        let sources = [
+            file("m0", "a.mp4", 0.0, 4.0, MediaKind::Video, Some(FHD)),
+            file("m1", "b.m4a", 4.0, 6.0, MediaKind::Audio, None),
+        ];
+        let g = filter_complex(
+            &args_from(&sources, &[], MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap(),
+        )
+        .to_owned();
+        assert_eq!(
+            g,
+            format!(
+                "[0:v]trim=start=0:end=4,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=4,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 color=c=black:s=1920x1080:r=30:d=6,format=yuv420p,setsar=1[v1];\
+                 [1:a]atrim=start=0:end=6,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn the_canvas_is_the_first_file_with_a_picture() {
+        assert_eq!(canvas(&two_files()), FHD);
+        assert_eq!(sources_kind(&two_files()), MediaKind::Video);
+        let audio_first = [
+            file("m0", "a.m4a", 0.0, 4.0, MediaKind::Audio, None),
+            file("m1", "b.mov", 4.0, 6.0, MediaKind::Video, Some(PAL)),
+        ];
+        assert_eq!(canvas(&audio_first), PAL);
+        assert_eq!(sources_kind(&audio_first), MediaKind::Video);
+        let audio_only = [file("m0", "a.m4a", 0.0, 4.0, MediaKind::Audio, None)];
+        assert_eq!(canvas(&audio_only), DEFAULT_VIDEO);
+        assert_eq!(sources_kind(&audio_only), MediaKind::Audio);
+        let unprobed = [file("m0", "a.mp4", 0.0, 4.0, MediaKind::Video, None)];
+        assert_eq!(canvas(&unprobed), DEFAULT_VIDEO);
+    }
+
+    #[test]
+    fn rate_writes_ntsc_rates_as_fractions() {
+        assert_eq!(rate(30.0), "30");
+        assert_eq!(rate(25.0), "25");
+        assert_eq!(rate(30000.0 / 1001.0), "30000/1001");
+        assert_eq!(rate(24000.0 / 1001.0), "24000/1001");
+        assert_eq!(rate(60000.0 / 1001.0), "60000/1001");
+    }
+
+    #[test]
+    fn no_sources_is_nothing_to_export() {
+        assert_eq!(
+            args_from(&[], &[], MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap_err(),
+            ExportError::NothingToExport
+        );
+    }
+
+    fn layer(
+        track: u8,
+        start: f64,
+        end: f64,
+        media: &str,
+        offset: f64,
+        frame: Frame,
+        audio: Option<f64>,
+    ) -> Edit {
+        Edit::Layer {
+            track,
+            start,
+            end,
+            media: media.into(),
+            offset,
+            frame,
+            audio,
+        }
+    }
+
+    /// The files given to `-i`, in argv order.
+    fn inputs(args: &[String]) -> Vec<&str> {
+        args.iter()
+            .enumerate()
+            .filter(|(i, a)| *a == "-i" && *i + 1 < args.len())
+            .map(|(i, _)| args[i + 1].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn v2_full_frame_then_v3_pip_with_sound_are_stacked_and_mixed() {
+        // V3 is listed first on purpose: stacking follows the track, not the log.
+        let edits = [
+            layer(3, 2.0, 5.0, "p1", 1.0, Frame::PipTopRight, Some(-6.0)),
+            layer(2, 1.0, 6.0, "b1", 0.0, Frame::Full, None),
+        ];
+        let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.assets = assets(&[("b1", "/assets/b1.mp4"), ("p1", "/assets/p1.mp4")]);
+            o.words = leak([word(2.5, 3.0)]);
+        })
+        .unwrap();
+        assert_eq!(
+            inputs(&args),
+            ["in.mp4", "/assets/b1.mp4", "/assets/p1.mp4"]
+        );
+        assert_eq!(
+            filter_complex(&args),
+            format!(
+                "[1:v]trim=start=0:end=5,setpts=PTS-STARTPTS+1/TB,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1[v0b0];\
+                 [0:v]trim=start=0:end=10,setpts=PTS-STARTPTS,setsar=1[v0bo0];\
+                 [2:v]trim=start=1:end=4,setpts=PTS-STARTPTS+2/TB,scale=384:-2,setsar=1[v0b1];\
+                 [v0bo0][v0b0]overlay=x=0:y=0:eof_action=pass:enable='between(t,1,6)'[v0bo1];\
+                 [v0bo1][v0b1]overlay=x=main_w-overlay_w-51:y=29:eof_action=pass:enable='between(t,2,5)'[v0];\
+                 [0:a]atrim=start=0:end=10,asetpts=PTS-STARTPTS,{AN}[a0m];\
+                 [2:a]atrim=start=1:end=4,asetpts=PTS-STARTPTS,{AN},adelay=2000:all=1,volume=-6dB,volume=volume='1-0.749*(max(0,min(1,min((t-2.38)/0.12,(3.12-t)/0.12))))':eval=frame[a0l1];\
+                 [a0m][a0l1]amix=inputs=2:normalize=0:duration=first[a0];\
+                 [v0][a0]concat=n=1:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn a_sounding_layer_mixes_beside_music() {
+        let edits = [
+            Edit::Audio {
+                start: 0.0,
+                end: 10.0,
+                media: "m1".into(),
+                offset: 0.0,
+                gain: -12.0,
+                duck: false,
+            },
+            layer(2, 4.0, 6.0, "b1", 0.0, Frame::Full, Some(3.0)),
+        ];
+        let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.assets = assets(&[("m1", "/assets/m1.mp3"), ("b1", "/assets/b1.mp4")]);
+        });
+        // Inputs: source 0, layer 1, music 2.
+        assert!(g.contains(&format!("[1:a]atrim=start=0:end=2,asetpts=PTS-STARTPTS,{AN},adelay=4000:all=1,volume=3dB[a0l0];")), "{g}");
+        assert!(
+            g.contains("[a0m][a0x0][a0l0]amix=inputs=3:normalize=0:duration=first[a0];"),
+            "{g}"
+        );
+    }
+
+    #[test]
+    fn audio_only_export_mixes_a_sounding_layer_and_skips_muted_ones() {
+        let edits = [
+            layer(2, 1.0, 3.0, "b1", 0.0, Frame::Full, None),
+            layer(3, 4.0, 6.0, "p1", 0.0, Frame::PipBottomLeft, Some(0.0)),
+        ];
+        let args = args_with(&edits, MediaKind::Audio, OutputFormat::Mp3, |o| {
+            o.assets = assets(&[("b1", "/assets/b1.mp4"), ("p1", "/assets/p1.mp4")]);
+        })
+        .unwrap();
+        assert_eq!(inputs(&args), ["in.mp3", "/assets/p1.mp4"]);
+        let g = filter_complex(&args);
+        assert!(!g.contains("overlay"), "{g}");
+        assert!(g.contains(&format!("[1:a]atrim=start=0:end=2,asetpts=PTS-STARTPTS,{AN},adelay=4000:all=1,volume=0dB[a0l1];")), "{g}");
+        assert!(
+            g.contains("[a0m][a0l1]amix=inputs=2:normalize=0:duration=first[a0];"),
+            "{g}"
+        );
+    }
+
+    #[test]
+    fn pip_sits_four_percent_in_from_its_corner_at_thirty_percent_width() {
+        let c = VideoInfo {
+            width: 1920,
+            height: 1080,
+            fps: 30.0,
+        };
+        let s = |a: &str, b: &str, c: &str| (a.to_owned(), b.to_owned(), c.to_owned());
+        assert_eq!(
+            layer_placement(Frame::Full, c),
+            s("scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2", "0", "0")
+        );
+        assert_eq!(
+            layer_placement(Frame::PipTopLeft, c),
+            s("scale=576:-2", "77", "43")
+        );
+        assert_eq!(
+            layer_placement(Frame::PipTopRight, c),
+            s("scale=576:-2", "main_w-overlay_w-77", "43")
+        );
+        assert_eq!(
+            layer_placement(Frame::PipBottomLeft, c),
+            s("scale=576:-2", "77", "main_h-overlay_h-43")
+        );
+        assert_eq!(
+            layer_placement(Frame::PipBottomRight, c),
+            s("scale=576:-2", "main_w-overlay_w-77", "main_h-overlay_h-43")
+        );
+    }
+
+    #[test]
+    fn a_layer_on_a_later_piece_is_numbered_after_the_sources() {
+        // Two files: layer inputs start at 2, and the window is relative to its piece.
+        let sources = [
+            file("m0", "a.mp4", 0.0, 4.0, MediaKind::Video, Some(HD)),
+            file("m1", "b.mp4", 4.0, 6.0, MediaKind::Video, Some(HD)),
+        ];
+        let edits = [layer(3, 5.0, 7.0, "m0", 1.0, Frame::PipBottomRight, None)];
+        let args = args_from(&sources, &edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.splits = &[4.0];
+            o.assets = assets(&[("m0", "/data/m0/source.mp4")]);
+        })
+        .unwrap();
+        assert_eq!(inputs(&args), ["a.mp4", "b.mp4", "/data/m0/source.mp4"]);
+        let g = filter_complex(&args);
+        assert!(
+            g.contains(
+                "[2:v]trim=start=1:end=3,setpts=PTS-STARTPTS+1/TB,scale=384:-2,setsar=1[v1b0];"
+            ),
+            "{g}"
+        );
+        assert!(g.contains("[v1bo0][v1b0]overlay=x=main_w-overlay_w-51:y=main_h-overlay_h-29:eof_action=pass:enable='between(t,1,3)'[v1];"), "{g}");
+    }
+
+    // Task 5 follow-ups: unprobed pictures, pieces outside every file, joins.
+
+    #[test]
+    fn an_unprobed_video_is_always_fitted_even_on_the_default_canvas() {
+        let mut sources = single(MediaKind::Video);
+        sources[0].video = None;
+        assert_eq!(canvas(&sources), DEFAULT_VIDEO);
+        let g = filter_complex(
+            &args_from(&sources, &[], MediaKind::Video, OutputFormat::Mp4, |_| {}).unwrap(),
+        )
+        .to_owned();
+        assert!(
+            g.starts_with("[0:v]trim=start=0:end=10,setpts=PTS-STARTPTS,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1[v0];"),
+            "{g}"
+        );
+    }
+
+    #[test]
+    fn a_piece_outside_every_file_is_an_error_not_input_zero() {
+        let placed = [Source {
+            media: "m0".into(),
+            offset: 0.0,
+            duration: 4.0,
+        }];
+        assert_eq!(
+            place(&placed, Range::new(6.0, 8.0)),
+            Err(ExportError::OutsideSources(6.0))
+        );
+        assert_eq!(
+            place(&placed, Range::new(1.0, 2.0)),
+            Ok((0, Range::new(1.0, 2.0)))
+        );
+    }
+
+    /// Three HD files: [0,3), [3,6), [6,10).
+    fn three_files() -> Vec<SourceInput> {
+        vec![
+            file("m0", "a.mp4", 0.0, 3.0, MediaKind::Video, Some(HD)),
+            file("m1", "b.mp4", 3.0, 3.0, MediaKind::Video, Some(HD)),
+            file("m2", "c.mp4", 6.0, 4.0, MediaKind::Video, Some(HD)),
+        ]
+    }
+
+    #[test]
+    fn a_piece_spanning_two_joins_reads_each_file_for_its_part() {
+        let g = filter_complex(
+            &args_from(
+                &three_files(),
+                &[],
+                MediaKind::Video,
+                OutputFormat::Mp4,
+                |_| {},
+            )
+            .unwrap(),
+        )
+        .to_owned();
+        assert_eq!(
+            g,
+            format!(
+                "[0:v]trim=start=0:end=3,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=3,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 [1:v]trim=start=0:end=3,setpts=PTS-STARTPTS,setsar=1[v1];\
+                 [1:a]atrim=start=0:end=3,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [2:v]trim=start=0:end=4,setpts=PTS-STARTPTS,setsar=1[v2];\
+                 [2:a]atrim=start=0:end=4,asetpts=PTS-STARTPTS,{AN}[a2];\
+                 [v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn a_cut_across_a_join_keeps_each_side_in_its_own_file() {
+        // Cut [2,5) removes the end of file 0 and the start of file 1.
+        let g = filter_complex(
+            &args_from(
+                &three_files(),
+                &[cut(2.0, 5.0)],
+                MediaKind::Video,
+                OutputFormat::Mp4,
+                |o| o.splits = &[3.0, 6.0],
+            )
+            .unwrap(),
+        )
+        .to_owned();
+        // File 0 keeps [0,2); file 1 resumes at its own second 2.
+        assert_eq!(
+            g,
+            format!(
+                "[0:v]trim=start=0:end=2,setpts=PTS-STARTPTS,setsar=1[v0];\
+                 [0:a]atrim=start=0:end=2,asetpts=PTS-STARTPTS,{AN}[a0];\
+                 [1:v]trim=start=2:end=3,setpts=PTS-STARTPTS,setsar=1[v1];\
+                 [1:a]atrim=start=2:end=3,asetpts=PTS-STARTPTS,{AN}[a1];\
+                 [2:v]trim=start=0:end=4,setpts=PTS-STARTPTS,setsar=1[v2];\
+                 [2:a]atrim=start=0:end=4,asetpts=PTS-STARTPTS,{AN}[a2];\
+                 [v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[outv][outa]"
+            )
+        );
+    }
+
+    #[test]
+    fn an_instant_within_eps_of_a_join_belongs_to_the_later_file() {
+        let placed: Vec<Source> = three_files().into_iter().map(|s| s.source).collect();
+        let near = 3.0 - EPS / 2.0;
+        // A piece starting just before the join reads file 1 from its start.
+        let (k, local) = place(&placed, Range::new(near, 5.0)).unwrap();
+        assert_eq!(k, 1);
+        assert!(local.start.abs() < EPS, "{local:?}");
+        // A piece ending within EPS of the join is not split into a sliver.
+        let seg = Segment {
+            source: Range::new(1.0, 3.0 + EPS / 2.0),
+            output: Range::new(1.0, 3.0 + EPS / 2.0),
+            kind: SegmentKind::Source,
+        };
+        assert_eq!(split_at_joins(vec![seg.clone()], &placed), vec![seg]);
     }
 }

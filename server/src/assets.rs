@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::db::now;
 use crate::error::{AppError, AppResult};
 use crate::projects::{Project, ProjectAccess};
+use crate::sources::LayerMedia;
 use crate::{media, AppState};
 
 const ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "m4a", "mp4", "mov", "aac", "ogg", "webm"];
@@ -116,18 +117,23 @@ where
     Ok(row.map(|(k, d)| (kind_of(&k), d)))
 }
 
+/// How many layers and music edits use `asset_id`.
 pub fn references(edits: &[Edit], asset_id: &str) -> (usize, usize) {
-    edits.iter().fold((0, 0), |(b, a), e| match e {
-        Edit::Broll { media, .. } if media == asset_id => (b + 1, a),
-        Edit::Audio { media, .. } if media == asset_id => (b, a + 1),
-        _ => (b, a),
+    edits.iter().fold((0, 0), |(l, a), e| match e {
+        Edit::Layer { media, .. } if media == asset_id => (l + 1, a),
+        Edit::Audio { media, .. } if media == asset_id => (l, a + 1),
+        _ => (l, a),
     })
 }
 
-fn assets_dir(state: &AppState, project: &Project) -> PathBuf {
+pub(crate) fn assets_dir(state: &AppState, project: &Project) -> PathBuf {
     state.config.data_dir.join(&project.media_id).join("assets")
 }
 
+/// The file behind every layer and music edit, by media id. Music plays
+/// project assets only. A layer resolves through
+/// `sources::resolve_layer_media`, the same rule op validation uses: a
+/// project asset, or any media in the project's registry.
 pub async fn asset_files(
     state: &AppState,
     project: &Project,
@@ -138,19 +144,45 @@ pub async fn asset_files(
         .into_iter()
         .map(|a| (a.id.clone(), a))
         .collect();
+    let not_ours = |media: &str| {
+        AppError::bad_request(format!("asset {media} does not belong to this project"))
+    };
+    let mut conn = state.db.acquire().await?;
     let mut files = HashMap::new();
     for edit in edits {
-        let (Edit::Broll { media, .. } | Edit::Audio { media, .. }) = edit else {
-            continue;
+        let (media, layer) = match edit {
+            Edit::Layer { media, .. } => (media, true),
+            Edit::Audio { media, .. } => (media, false),
+            _ => continue,
         };
-        let asset = by_id.get(media).ok_or_else(|| {
-            AppError::bad_request(format!("asset {media} does not belong to this project"))
-        })?;
-        let path = assets_dir(state, project).join(format!("{}.{}", asset.id, asset.ext));
+        if files.contains_key(media) {
+            continue;
+        }
+        let found = if layer {
+            crate::sources::resolve_layer_media(&mut conn, &project.id, media).await?
+        } else {
+            by_id.get(media).map(|a| LayerMedia::Asset {
+                kind: a.kind,
+                duration: a.duration,
+            })
+        };
+        let (path, name) = match found {
+            Some(LayerMedia::Asset { .. }) => {
+                let asset = by_id.get(media).ok_or_else(|| not_ours(media))?;
+                (
+                    assets_dir(state, project).join(format!("{}.{}", asset.id, asset.ext)),
+                    asset.name.clone(),
+                )
+            }
+            Some(LayerMedia::Source) => {
+                let (path, meta) = crate::sources::source_file(state, media).await?;
+                (path, meta.filename)
+            }
+            None => return Err(not_ours(media)),
+        };
         if !path.is_file() {
             return Err(AppError::bad_request(format!(
-                "the file for {} is missing",
-                asset.name
+                "the file for {name} is missing"
             )));
         }
         files.insert(media.clone(), path);
@@ -174,7 +206,7 @@ pub async fn upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?
+        .map_err(|e| AppError::multipart(&e, ""))?
     {
         if field.name() == Some("file") {
             return Ok(Json(store(&state, &access.project, field).await?));
@@ -284,7 +316,7 @@ async fn write_body(path: &Path, field: &mut axum::extract::multipart::Field<'_>
     while let Some(chunk) = field
         .chunk()
         .await
-        .map_err(|e| AppError::bad_request(format!("upload interrupted: {e}")))?
+        .map_err(|e| AppError::multipart(&e, "upload interrupted"))?
     {
         file.write_all(&chunk).await.context("writing asset")?;
     }
@@ -305,12 +337,12 @@ pub async fn delete(
         .find(|a| a.id == asset_id)
         .ok_or_else(|| AppError::not_found(format!("no asset {asset_id}")))?;
     let (_, doc) = crate::ops::load_doc(&state, &project.id).await?;
-    let (brolls, audios) = references(&doc.edits, &asset.id);
-    if brolls + audios > 0 {
+    let (layers, audios) = references(&doc.edits, &asset.id);
+    if layers + audios > 0 {
         return Err(AppError::conflict(format!(
-            "{} is used by {brolls} B-roll and {audios} music edit{}; remove them first",
+            "{} is used by {layers} layer and {audios} music edit{}; remove them first",
             asset.name,
-            if brolls + audios == 1 { "" } else { "s" }
+            if layers + audios == 1 { "" } else { "s" }
         )));
     }
     sqlx::query("DELETE FROM project_assets WHERE project_id = ? AND id = ?")
@@ -384,6 +416,34 @@ mod tests {
     use super::test_support::seed_asset;
     use super::*;
     use crate::test_util::{add_member, app, call, json_req, owned_project, register, state};
+
+    #[tokio::test]
+    async fn an_oversized_asset_upload_is_413() {
+        let (mut state, _d) = state().await;
+        std::sync::Arc::get_mut(&mut state)
+            .unwrap()
+            .config
+            .max_upload_bytes = 1024;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let mut body =
+            b"--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.mp4\"\r\n\r\n"
+                .to_vec();
+        body.extend_from_slice(&[0u8; 8 * 1024]);
+        body.extend_from_slice(b"\r\n--x--\r\n");
+        let req = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/projects/{}/assets", project.id))
+            .header(axum::http::header::COOKIE, &ada)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=x",
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let (status, body, _) = call(app(&state), req).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    }
 
     #[tokio::test]
     async fn members_list_assets_and_only_editors_delete() {
@@ -572,11 +632,14 @@ mod tests {
     #[test]
     fn references_count_by_kind() {
         let edits = [
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 0.0,
                 end: 1.0,
                 media: "a".into(),
                 offset: 0.0,
+                frame: engine::Frame::Full,
+                audio: None,
             },
             Edit::Audio {
                 start: 0.0,
@@ -597,5 +660,62 @@ mod tests {
         ];
         assert_eq!(references(&edits, "a"), (1, 1));
         assert_eq!(references(&edits, "b"), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn a_layer_may_show_another_source_of_the_project() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let second = crate::projects::test_support::seed_media(&state, 5.0).await;
+        let dir = state.config.data_dir.join(&second);
+        tokio::fs::write(dir.join("source.mp4"), b"").await.unwrap();
+        sqlx::query(
+            "INSERT INTO project_sources (project_id, position, media_id, start_at, duration) VALUES (?, 1, ?, 10.0, 5.0)",
+        )
+        .bind(&project.id)
+        .bind(&second)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let layer = |media: &str| Edit::Layer {
+            track: 3,
+            start: 1.0,
+            end: 2.0,
+            media: media.into(),
+            offset: 0.0,
+            frame: engine::Frame::PipTopRight,
+            audio: Some(-6.0),
+        };
+
+        let files = asset_files(&state, &project, &[layer(&second)])
+            .await
+            .unwrap();
+        assert_eq!(files[&second], dir.join("source.mp4"));
+
+        // An asset still resolves to its own file.
+        let clip = seed_asset(&state, &project, MediaKind::Video, 4.0).await;
+        let files = asset_files(&state, &project, &[layer(&clip.id)])
+            .await
+            .unwrap();
+        assert!(files[&clip.id].ends_with(format!("{}.mp4", clip.id)));
+
+        // Media that is not in this project is refused.
+        let stranger = crate::projects::test_support::seed_media(&state, 5.0).await;
+        let err = asset_files(&state, &project, &[layer(&stranger)])
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("does not belong"), "{err:?}");
+
+        // Music may not play a source: it stays asset-only.
+        let music = Edit::Audio {
+            start: 0.0,
+            end: 1.0,
+            media: second.clone(),
+            offset: 0.0,
+            gain: 0.0,
+            duck: true,
+        };
+        assert!(asset_files(&state, &project, &[music]).await.is_err());
     }
 }

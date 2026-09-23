@@ -9,6 +9,7 @@ import {
 } from 'react';
 
 import {
+  addSource,
   exportMedia,
   exportProgress,
   fetchProject,
@@ -20,16 +21,17 @@ import {
   submitOps,
   suggestEdits,
   synthesizeOverdub,
-  transcribeMedia,
+  transcribeProject,
   uploadAsset,
   uploadMedia,
   type Suggestions,
 } from './api';
 import { AgentDialog } from './components/AgentDialog';
 import { AudioDialog } from './components/AudioDialog';
-import { BrollDialog } from './components/BrollDialog';
+import { LayerDialog } from './components/LayerDialog';
 import { CaptionDialog } from './components/CaptionDialog';
 import { Dropzone } from './components/Dropzone';
+import { ImportList } from './components/ImportList';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
@@ -41,15 +43,32 @@ import { ToolToolbar } from './components/ToolToolbar';
 import { TopBar, type ExportState } from './components/TopBar';
 import { Transcript } from './components/Transcript';
 import { cx } from './cx';
-import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
-import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
+import { EPS, isJoin, orderedPieces, rangeForWords, titles } from './editlist';
+import {
+  editorReducer,
+  initialEditor,
+  selectedRange,
+  spanRange,
+  wordSpan,
+  type EditorAction,
+  type WordSpan,
+} from './editor';
+import { byName, importFailures, runImport, type ImportItem } from './importQueue';
 import { handledUpstream, shouldIgnoreGlobalKey } from './keyboardGuard';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
-import { audios, brolls } from './overlays';
+import { audios, layers, type LayerTrack } from './overlays';
 import { type PresenceState } from './realtime';
 import { deleteAction } from './selection';
 import { useSession } from './session';
+import {
+  isTranscribing,
+  playableSources,
+  readyKey,
+  sourceViewsOf,
+  unlistedSources,
+} from './sources';
+import { useStitchedMedia } from './stitchedMedia';
 import styles from './App.module.css';
 import ui from './styles/ui.module.css';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
@@ -59,8 +78,10 @@ import type {
   Asset,
   AudioEdit,
   CaptionPos,
+  LayerEdit,
   LibraryItem,
   ProjectSummary,
+  SourceView,
   TitleEdit,
   Transition,
 } from './types';
@@ -80,29 +101,36 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editor, dispatch] = useReducer(editorReducer, initialEditor);
-  // The word range the overdub dialog was opened on; like `captionRange`, a
-  // peer clearing the selection must not unmount the dialog under the user
-  // (and leave the shortcuts off, since they wait for it to close).
-  const [overdubRange, setOverdubRange] = useState<[number, number] | null>(null);
+  // The words the overdub dialog was opened on; like `captionSpan`, a peer
+  // clearing the selection must not unmount the dialog under the user (and
+  // leave the shortcuts off, since they wait for it to close). The dialogs
+  // hold word ids, not indices: another source's words can land in between.
+  const [overdubSpan, setOverdubSpan] = useState<WordSpan | null>(null);
   // The title dialog, adding at `at` or editing `initial`.
   const [titleDialog, setTitleDialog] = useState<{ at: number; initial?: TitleEdit } | null>(null);
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
-  // The word range the caption dialog was opened on. Holding it here keeps
-  // the dialog mounted (and the caption anchored) when a peer's `sync` clears
+  // The words the caption dialog was opened on. Holding them here keeps the
+  // dialog mounted (and the caption anchored) when a peer's `sync` clears
   // the selection while someone is still typing.
-  const [captionRange, setCaptionRange] = useState<[number, number] | null>(null);
-  // The word range the B-roll dialog was opened on.
-  const [brollRange, setBrollRange] = useState<[number, number] | null>(null);
-  // The music dialog: adding over `range` (null means the whole edit), or
+  const [captionSpan, setCaptionSpan] = useState<WordSpan | null>(null);
+  // The layer dialog: adding over the words it was opened on, or changing
+  // an existing layer's track, frame or sound.
+  const [layerDialog, setLayerDialog] = useState<{ span: WordSpan } | { edit: LayerEdit } | null>(
+    null,
+  );
+  // The music dialog: adding over `span` (null means the whole edit), or
   // editing an existing `edit`.
   const [audioDialog, setAudioDialog] = useState<
-    { range: [number, number] | null } | { edit: AudioEdit } | null
+    { span: WordSpan | null } | { edit: AudioEdit } | null
   >(null);
+  // Where the overdub and caption words are now.
+  const overdubRange = overdubSpan && spanRange(editor.words, overdubSpan);
+  const captionRange = captionSpan && spanRange(editor.words, captionSpan);
   // A selected title card, by its instant. Exclusive with the word selection.
   const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
   // A selected clip, by its piece's start. Exclusive with the word/title selection.
   const [selectedClip, setSelectedClip] = useState<number | null>(null);
-  // A selected B-roll or music bar. Exclusive with every other selection.
+  // A selected layer or music bar. Exclusive with every other selection.
   const [selectedOverlay, setSelectedOverlay] = useState<OverlayRef | null>(null);
   // The timeline's mouse tool, also used by the transcript. Persists until changed.
   const [tool, setTool] = useState<Tool>('select');
@@ -117,6 +145,18 @@ export function App() {
   const [suggestions, setSuggestions] = useState<Suggestions>({ fillers: [], pauses: [] });
 
   const [speakers, setSpeakers] = useState<(number | null)[] | null>(null);
+  // The project's files as the server lists them: names, urls, transcript status.
+  const [sourceViews, setSourceViews] = useState<SourceView[]>([]);
+  // The ready files the current words cover (a `readyKey`). When the timeline's
+  // ready files differ, either way (one finished, or an undo took one away),
+  // the stitched words are fetched again.
+  const [wordsCover, setWordsCover] = useState('');
+  // Bumped to retry a failed words fetch.
+  const [wordsRetry, setWordsRetry] = useState(0);
+  // The home screen's import, file by file, while it runs.
+  const [imports, setImports] = useState<ImportItem[]>([]);
+  // Insert → Add video…, file by file. Failed files stay until dismissed.
+  const [uploads, setUploads] = useState<ImportItem[]>([]);
 
   // The output layout for the current edit list, so playback can jump
   // between output pieces and the transcript can draw clip boundaries.
@@ -130,13 +170,21 @@ export function App() {
     [editor.duration, editor.edits, editor.splits, editor.order],
   );
 
-  const mediaRef = useRef<HTMLVideoElement>(null);
+  // The fold's sources with their files: what the player plays, what the
+  // timeline badges and the transcript greys out while it transcribes.
+  const playable = useMemo(
+    () => playableSources(editor.sources, sourceViews),
+    [editor.sources, sourceViews],
+  );
+  // One <video> behind a stitched clock, so playback stays in stitched time.
+  const stitched = useStitchedMedia(playable);
+  const mediaRef = useMemo(() => ({ current: stitched }), [stitched]);
   const playback = usePlayback(
     mediaRef,
     editor.words,
     editor.edits,
     editor.duration,
-    project?.media.url,
+    playable[0]?.url,
     ordered,
     segments,
   );
@@ -212,6 +260,12 @@ export function App() {
   );
 
   const selected = selectedRange(editor.selection);
+  /** What a dialog holds for the selected words: their ids, which outlast indices. */
+  const selectedSpan = () => (selected ? wordSpan(editor.words, selected) : null);
+  const openLayerDialog = () => {
+    const span = selectedSpan();
+    if (span) setLayerDialog({ span });
+  };
   const fillers = pending(suggestions.fillers, editor.edits);
   const pauses = pending(suggestions.pauses, editor.edits);
 
@@ -255,14 +309,14 @@ export function App() {
     };
   }, [projectId, words, duration, twoWordFillers]);
 
-  // The project's uploaded B-roll/music assets.
+  // The project's uploaded layer and music assets.
   const refreshAssets = useCallback(() => {
     if (!projectId) return;
     listAssets(projectId)
       .then(setAssets)
       .catch(() => setAssets([]));
   }, [projectId]);
-  // Media ids we have already gone looking for and not found, so a B-roll or
+  // Media ids we have already gone looking for and not found, so a layer or
   // music edit naming an id the server does not have cannot loop the fetch.
   const soughtAssets = useRef(new Set<string>());
   useEffect(() => {
@@ -276,14 +330,14 @@ export function App() {
   // the list once; ids still unknown after that are remembered, so the set of
   // unknown ids has to actually change before we ask again.
   useEffect(() => {
-    const have = new Set(assets.map((a) => a.id));
-    const unknown = [...brolls(editor.edits), ...audios(editor.edits)]
+    const have = new Set([...assets.map((a) => a.id), ...playable.map((s) => s.mediaId)]);
+    const unknown = [...layers(editor.edits), ...audios(editor.edits)]
       .map((e) => e.media)
       .filter((id) => !have.has(id) && !soughtAssets.current.has(id));
     if (unknown.length === 0) return;
     for (const id of unknown) soughtAssets.current.add(id);
     refreshAssets();
-  }, [editor.edits, assets, refreshAssets]);
+  }, [editor.edits, assets, playable, refreshAssets]);
   const onUploadAsset = useCallback(
     async (file: File) => {
       if (!projectId) throw new Error('no project');
@@ -293,6 +347,106 @@ export function App() {
     },
     [projectId],
   );
+
+  // Insert → Add video…: append at the end, one file at a time. The timeline
+  // grows as each upload lands; the fold (broadcast, or the refetch below) confirms it.
+  const onAddVideos = useCallback(
+    async (files: File[]) => {
+      if (!projectId || !canEdit || files.length === 0) return;
+      const append = async (id: string, file: File, onProgress: (f: number) => void) => {
+        const view = await addSource(id, file, onProgress);
+        dispatch({
+          type: 'addSource',
+          media: view.mediaId,
+          offset: view.offset,
+          duration: view.duration,
+        });
+        setSourceViews((list) =>
+          [...list.filter((v) => v.index !== view.index), view].sort((a, b) => a.index - b.index),
+        );
+        return view;
+      };
+      const result = await runImport(byName(files), { append }, setUploads, projectId);
+      setUploads(result.items.filter((item) => item.status === 'error'));
+      try {
+        const fetched = await fetchProject(projectId);
+        setSourceViews(sourceViewsOf(fetched.project));
+        // Only when nothing of ours is in flight: an older fold must not hide an optimistic edit.
+        if (queue.current?.pending === 0) settle(fetched.doc);
+      } catch (err) {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [projectId, canEdit, settle],
+  );
+
+  // While any file is still transcribing, poll the project's list (like the
+  // export poll). Only the list is updated, so a poll never clears a selection.
+  const waiting = sourceViews.some(isTranscribing);
+  useEffect(() => {
+    if (!projectId || !waiting) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      fetchProject(projectId)
+        .then(({ project: fresh }) => {
+          if (cancelled) return;
+          const views = sourceViewsOf(fresh);
+          setSourceViews(views);
+          // `pending` means nothing has started it (the server restarted since
+          // it was added). /transcribe starts it and answers without waiting.
+          if (views.some((v) => v.transcript === 'pending'))
+            void transcribeProject(projectId).catch(() => undefined);
+        })
+        .catch(() => {
+          // Try again on the next tick.
+        });
+    }, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [projectId, waiting]);
+
+  // A peer's AddSource names a file we have not listed: fetch the list once.
+  const unlisted = unlistedSources(editor.sources, sourceViews).join(',');
+  useEffect(() => {
+    if (!projectId || !unlisted) return;
+    let cancelled = false;
+    fetchProject(projectId)
+      .then(({ project: fresh }) => {
+        if (!cancelled) setSourceViews(sourceViewsOf(fresh));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, unlisted]);
+
+  // The timeline's ready files are not the ones the words cover: fetch the
+  // stitched words again. The server stitches its fold's ready files, so an
+  // undone file's words go and a finished file's words arrive.
+  const readyNow = readyKey(sourceViews, editor.sources);
+  useEffect(() => {
+    if (!projectId || readyNow === wordsCover) return;
+    let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    transcribeProject(projectId)
+      .then(({ words: list, sources: fresh }) => {
+        if (cancelled) return;
+        // The words cover exactly the sources this reply calls ready.
+        if (fresh) setSourceViews(fresh);
+        setWordsCover(fresh ? readyKey(fresh) : readyNow);
+        dispatch({ type: 'setWords', words: list });
+      })
+      .catch(() => {
+        // A background refresh: the editor still works. Try again shortly.
+        if (!cancelled) retry = setTimeout(() => setWordsRetry((n) => n + 1), 2000);
+      });
+    return () => {
+      cancelled = true;
+      clearTimeout(retry);
+    };
+  }, [projectId, readyNow, wordsCover, wordsRetry]);
 
   useEffect(() => {
     if (!projectId) {
@@ -344,7 +498,7 @@ export function App() {
 
   // Back to the start screen. The document lives on the server, so nothing is lost.
   const goHome = useCallback(() => {
-    mediaRef.current?.pause();
+    stitched.pause();
     setProject(null);
     setLoadError(null);
     confirmed.current = null;
@@ -355,12 +509,15 @@ export function App() {
     setSelectedClip(null);
     setSelectedOverlay(null);
     setTitleDialog(null);
-    setOverdubRange(null);
-    setCaptionRange(null);
-    setBrollRange(null);
+    setOverdubSpan(null);
+    setCaptionSpan(null);
+    setLayerDialog(null);
     setAudioDialog(null);
+    setSourceViews([]);
+    setWordsCover('');
+    setUploads([]);
     setTool('select');
-  }, []);
+  }, [stitched]);
 
   // Opening a project pushes a history entry, so the browser's Back button
   // (and the header's back link) return to the start screen.
@@ -393,13 +550,18 @@ export function App() {
       setBusy(label);
       const summary = await fetchSummary();
       setBusy('Transcribing');
-      const [words, { doc }] = await Promise.all([
-        transcribeMedia(summary.id),
+      const [transcript, fetched] = await Promise.all([
+        transcribeProject(summary.id),
         fetchProject(summary.id),
       ]);
-      dispatch({ type: 'load', words, duration: summary.media.duration });
-      dispatch({ type: 'sync', doc });
-      confirmed.current = doc;
+      const { words } = transcript;
+      dispatch({ type: 'load', words, duration: summary.media.duration, media: summary.media.id });
+      dispatch({ type: 'sync', doc: fetched.doc });
+      confirmed.current = fetched.doc;
+      const views = sourceViewsOf(fetched.project);
+      setSourceViews(views);
+      // The words cover exactly the sources the transcribe reply calls ready.
+      setWordsCover(readyKey(transcript.sources ?? views));
       setProject(summary);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -413,8 +575,28 @@ export function App() {
     [load],
   );
 
-  const onFile = useCallback(
-    (file: File) => load(`Uploading ${file.name}`, () => uploadMedia(file)),
+  // Several files make one project: the first creates it, the rest are
+  // appended in the order chosen. Failures are reported once it opens.
+  const onImport = useCallback(
+    async (files: File[]) => {
+      setLoadError(null);
+      setBusy(
+        files.length === 1
+          ? `Uploading ${files[0]?.name ?? ''}`
+          : `Importing ${files.length} files`,
+      );
+      const result = await runImport(files, { create: uploadMedia, append: addSource }, setImports);
+      const failed = importFailures(result.items);
+      setImports([]);
+      const created = result.project;
+      if (!created) {
+        setBusy(null);
+        setLoadError(failed ?? 'Nothing was imported.');
+        return;
+      }
+      await load(`Opening ${created.title}`, () => Promise.resolve(created));
+      if (failed) setLoadError(failed);
+    },
     [load],
   );
 
@@ -439,7 +621,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [projectId]);
+  }, [projectId, words]);
 
   const onRenameSpeaker = useCallback(
     (speaker: number, name: string) => edit({ type: 'renameSpeaker', speaker, name }),
@@ -520,7 +702,7 @@ export function App() {
       if (!projectId || !overdubRange) return;
       const { audioUrl, duration } = await synthesizeOverdub(projectId, text);
       edit({ type: 'overdub', text, audioUrl, audioDuration: duration, range: overdubRange });
-      setOverdubRange(null);
+      setOverdubSpan(null);
     },
     [projectId, overdubRange, edit],
   );
@@ -528,16 +710,27 @@ export function App() {
   /** Where a new card goes: the end of the selected words, else the playhead. */
   const onAddTitle = useCallback(() => {
     const at = selected
-      ? rangeForWords(editor.words, selected[0], selected[1], editor.duration).end
+      ? rangeForWords(editor.words, selected[0], selected[1], editor.duration, editor.sources).end
       : playback.currentTime;
     setTitleDialog({ at });
-  }, [selected, editor.words, editor.duration, playback.currentTime]);
+  }, [selected, editor.words, editor.duration, editor.sources, playback.currentTime]);
 
   // A music bar, from the transcript tag or the timeline, opens its dialog.
   const openAudio = useCallback(
     (start: number) => {
       const found = audios(editor.edits).find((a) => Math.abs(a.start - start) < EPS);
       if (found) setAudioDialog({ edit: found });
+    },
+    [editor.edits],
+  );
+
+  // A layer bar's double-click opens its dialog to change track, frame or sound.
+  const openLayer = useCallback(
+    (track: LayerTrack, start: number) => {
+      const found = layers(editor.edits).find(
+        (l) => l.track === track && Math.abs(l.start - start) < EPS,
+      );
+      if (found) setLayerDialog({ edit: found });
     },
     [editor.edits],
   );
@@ -582,7 +775,10 @@ export function App() {
   // boundary just seeks, since there's no split for Delete to undo.
   const onClipClick = useCallback(
     (start: number) => {
-      setSelectedClip(editor.splits.some((s) => Math.abs(s - start) < EPS) ? start : null);
+      // A join between two files is a boundary, never a split Delete can remove.
+      const split =
+        editor.splits.some((s) => Math.abs(s - start) < EPS) && !isJoin(start, editor.sources);
+      setSelectedClip(split ? start : null);
       setSelectedTitle(null);
       setSelectedOverlay(null);
       dispatch({ type: 'clearSelection' });
@@ -591,7 +787,7 @@ export function App() {
         .querySelector<HTMLElement>(`[data-clip-start="${start}"]`)
         ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     },
-    [playback, editor.splits],
+    [playback, editor.splits, editor.sources],
   );
 
   /** Where a new split goes: the start of the selected words, else the playhead. */
@@ -606,7 +802,7 @@ export function App() {
     (text: string, position: CaptionPos) => {
       if (!captionRange) return;
       edit({ type: 'addCaption', text, position, range: captionRange });
-      setCaptionRange(null);
+      setCaptionSpan(null);
     },
     [captionRange, edit],
   );
@@ -624,16 +820,23 @@ export function App() {
     if (!ordered.some((p) => Math.abs(p.start - selectedClip) < EPS)) setSelectedClip(null);
   }, [ordered, selectedClip]);
 
-  // A peer's edit (or an undo) can remove the B-roll or music we had selected.
+  // A peer's edit (or an undo) can remove the layer or music we had selected.
   useEffect(() => {
     if (!selectedOverlay) return;
-    const list = selectedOverlay.kind === 'broll' ? brolls(editor.edits) : audios(editor.edits);
-    if (!list.some((e) => Math.abs(e.start - selectedOverlay.start) < EPS))
-      setSelectedOverlay(null);
+    const still =
+      selectedOverlay.kind === 'layer'
+        ? layers(editor.edits).some(
+            (l) =>
+              l.track === selectedOverlay.track && Math.abs(l.start - selectedOverlay.start) < EPS,
+          )
+        : audios(editor.edits).some((a) => Math.abs(a.start - selectedOverlay.start) < EPS);
+    if (!still) setSelectedOverlay(null);
   }, [editor.edits, selectedOverlay]);
 
   const hasClipSelection =
-    selectedClip !== null && editor.splits.some((s) => Math.abs(s - selectedClip) < EPS);
+    selectedClip !== null &&
+    editor.splits.some((s) => Math.abs(s - selectedClip) < EPS) &&
+    !isJoin(selectedClip, editor.sources);
 
   // A word selection made any other way (the arrow keys, a peer's sync) ends
   // the title, clip and overlay selections, as clicking a word does.
@@ -645,7 +848,7 @@ export function App() {
     setSelectedOverlay(null);
   }, [hasWordSelection]);
 
-  /** Delete whatever is selected: words, a title card, a split, or a B-roll or music bar. */
+  /** Delete whatever is selected: words, a title card, a split, or a layer or music bar. */
   const deleteSelected = useCallback(() => {
     edit(
       deleteAction({
@@ -685,11 +888,11 @@ export function App() {
     keyHandler.current = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (
-        overdubRange ||
+        overdubSpan ||
         titleDialog ||
-        captionRange ||
+        captionSpan ||
         agentDialogOpen ||
-        brollRange ||
+        layerDialog ||
         audioDialog
       )
         return;
@@ -716,11 +919,11 @@ export function App() {
       }
     };
   }, [
-    overdubRange,
+    overdubSpan,
     titleDialog,
-    captionRange,
+    captionSpan,
     agentDialogOpen,
-    brollRange,
+    layerDialog,
     audioDialog,
     deleteSelected,
     clearAll,
@@ -739,6 +942,22 @@ export function App() {
       : '';
   // The dialog keeps showing the words it was opened on, selection or not.
   const captionText = wordsIn(captionRange);
+  // What the layer dialog describes: the words its layer covers, and their length.
+  const layerWords = (() => {
+    if (!layerDialog) return { text: '', length: 0 };
+    if ('edit' in layerDialog) {
+      const { start, end } = layerDialog.edit;
+      const text = editor.words
+        .filter((w) => w.start >= start - EPS && w.start < end - EPS)
+        .map((w) => w.text)
+        .join(' ');
+      return { text, length: end - start };
+    }
+    const range = spanRange(editor.words, layerDialog.span);
+    if (!range) return { text: '', length: 0 };
+    const r = rangeForWords(editor.words, range[0], range[1], editor.duration, editor.sources);
+    return { text: wordsIn(range), length: r.end - r.start };
+  })();
 
   if (user === undefined)
     return (
@@ -764,14 +983,16 @@ export function App() {
         hasSelection: selected !== null,
         onAddTitle,
         onAddCaption: () => {
-          if (selected) setCaptionRange(selected);
+          setCaptionSpan(selectedSpan());
         },
-        onAddBroll: () => {
-          if (selected) setBrollRange(selected);
+        onAddLayer: () => {
+          openLayerDialog();
         },
-        onAddMusic: () => setAudioDialog({ range: selected }),
+        onAddMusic: () => setAudioDialog({ span: selectedSpan() }),
+        onAddVideos: (files: File[]) => void onAddVideos(files),
+        addingVideos: uploads.some((u) => u.status === 'queued' || u.status === 'uploading'),
         onOverdub: () => {
-          if (selected) setOverdubRange(selected);
+          setOverdubSpan(selectedSpan());
         },
         onSplit,
         transition: editor.transition,
@@ -800,7 +1021,13 @@ export function App() {
 
       {!project ? (
         <div className={styles.home}>
-          <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError}>
+          <Dropzone
+            onImport={(files) => void onImport(files)}
+            onLibraryClip={onLibraryClip}
+            busy={busy}
+            error={loadError}
+            imports={imports}
+          >
             <Projects items={projects} onOpen={onOpenProject} disabled={busy !== null} />
           </Dropzone>
         </div>
@@ -820,9 +1047,23 @@ export function App() {
             </p>
           )}
           <section className={styles.viewer} aria-label="Viewer">
+            {uploads.length > 0 && (
+              <div className={styles.uploads}>
+                <ImportList items={uploads} />
+                {uploads.every((u) => u.status === 'error') && (
+                  <button
+                    type="button"
+                    className={cx(ui.button, ui.ghost)}
+                    onClick={() => setUploads([])}
+                  >
+                    Dismiss
+                  </button>
+                )}
+              </div>
+            )}
             <Player
-              media={project.media}
-              mediaRef={mediaRef}
+              sources={playable}
+              stitched={stitched}
               edits={editor.edits}
               assets={assets}
               words={editor.words}
@@ -878,8 +1119,9 @@ export function App() {
               selectedClip={selectedClip}
               onClipClick={onClipClick}
               assets={assets}
-              onBrollClick={(start) => edit({ type: 'removeBroll', start })}
+              onLayerClick={(track, start) => onSelectOverlay({ kind: 'layer', track, start })}
               onAudioClick={openAudio}
+              sources={playable}
               tool={tool}
               onWordDragEnd={onWordDragEnd}
             />
@@ -898,13 +1140,13 @@ export function App() {
               }
               onDelete={deleteSelected}
               onOverdub={() => {
-                if (selected) setOverdubRange(selected);
+                setOverdubSpan(selectedSpan());
               }}
               onCaption={() => {
-                if (selected) setCaptionRange(selected);
+                setCaptionSpan(selectedSpan());
               }}
-              onBroll={() => {
-                if (selected) setBrollRange(selected);
+              onLayer={() => {
+                openLayerDialog();
               }}
               onDismiss={clearAll}
             />
@@ -916,11 +1158,11 @@ export function App() {
               readOnly={!canEdit}
               shortcuts={
                 !(
-                  overdubRange ||
+                  overdubSpan ||
                   titleDialog ||
-                  captionRange ||
+                  captionSpan ||
                   agentDialogOpen ||
-                  brollRange ||
+                  layerDialog ||
                   audioDialog
                 )
               }
@@ -942,6 +1184,7 @@ export function App() {
               onMoveClip={(piece, before) => edit({ type: 'moveClip', piece, before })}
               onSelectOverlay={onSelectOverlay}
               onOpenAudio={openAudio}
+              onOpenLayer={openLayer}
               tool={tool}
               duration={editor.duration}
               splits={editor.splits}
@@ -952,16 +1195,17 @@ export function App() {
                   cuts: ranges.map((r) => ({ kind: 'cut' as const, ...r })),
                 })
               }
+              sources={playable}
             />
           </section>
         </main>
       )}
 
-      {overdubRange && (
+      {overdubSpan && (
         <OverdubDialog
           original={wordsIn(overdubRange)}
           onSubmit={onOverdubSubmit}
-          onCancel={() => setOverdubRange(null)}
+          onCancel={() => setOverdubSpan(null)}
         />
       )}
 
@@ -976,41 +1220,85 @@ export function App() {
 
       {agentDialogOpen && <AgentDialog onCancel={() => setAgentDialogOpen(false)} />}
 
-      {captionRange && (
+      {captionSpan && (
         <CaptionDialog
           original={captionText}
           onSubmit={onCaptionSubmit}
-          onCancel={() => setCaptionRange(null)}
+          onCancel={() => setCaptionSpan(null)}
         />
       )}
 
-      {brollRange && (
-        <BrollDialog
+      {layerDialog && (
+        <LayerDialog
           assets={assets}
-          original={wordsIn(brollRange)}
-          rangeLength={(() => {
-            const r = rangeForWords(editor.words, brollRange[0], brollRange[1], editor.duration);
-            return r.end - r.start;
-          })()}
+          sources={playable}
+          initial={'edit' in layerDialog ? layerDialog.edit : undefined}
+          original={layerWords.text}
+          rangeLength={layerWords.length}
           onUpload={onUploadAsset}
-          onSubmit={(asset, offset) => {
-            edit({ type: 'addBroll', media: asset.id, offset, range: brollRange });
-            setBrollRange(null);
+          onSubmit={(choice) => {
+            if ('edit' in layerDialog) {
+              const { track, start } = layerDialog.edit;
+              edit({
+                type: 'setLayer',
+                track,
+                start,
+                toTrack: choice.track,
+                frame: choice.frame,
+                audio: choice.audio,
+              });
+              // Keep the bar selected when it moves to the other track.
+              if (
+                selectedOverlay?.kind === 'layer' &&
+                selectedOverlay.track === track &&
+                Math.abs(selectedOverlay.start - start) < EPS
+              )
+                setSelectedOverlay({ kind: 'layer', track: choice.track, start });
+            } else {
+              const range = spanRange(editor.words, layerDialog.span);
+              if (range)
+                edit({
+                  type: 'addLayer',
+                  track: choice.track,
+                  media: choice.media,
+                  offset: choice.offset,
+                  frame: choice.frame,
+                  audio: choice.audio,
+                  range,
+                });
+            }
+            setLayerDialog(null);
           }}
-          onCancel={() => setBrollRange(null)}
+          onRemove={
+            'edit' in layerDialog
+              ? () => {
+                  edit({
+                    type: 'removeLayer',
+                    track: layerDialog.edit.track,
+                    start: layerDialog.edit.start,
+                  });
+                  setLayerDialog(null);
+                }
+              : undefined
+          }
+          onCancel={() => setLayerDialog(null)}
         />
       )}
       {audioDialog && (
         <AudioDialog
           assets={assets}
           initial={'edit' in audioDialog ? audioDialog.edit : undefined}
-          wholeEdit={'range' in audioDialog && audioDialog.range === null}
+          wholeEdit={'span' in audioDialog && audioDialog.span === null}
           onUpload={onUploadAsset}
           onSubmit={(asset, gain, duck) => {
             if ('edit' in audioDialog)
               edit({ type: 'editAudio', start: audioDialog.edit.start, gain, duck });
-            else if (asset)
-              edit({ type: 'addAudio', media: asset.id, gain, duck, range: audioDialog.range });
+            else if (asset) {
+              // The whole edit, or the words the dialog was opened on (gone: nothing).
+              const range = audioDialog.span && spanRange(editor.words, audioDialog.span);
+              if (!audioDialog.span || range)
+                edit({ type: 'addAudio', media: asset.id, gain, duck, range });
+            }
             setAudioDialog(null);
           }}
           onRemove={

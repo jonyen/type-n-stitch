@@ -25,8 +25,8 @@ use axum::extract::{Request, State};
 use axum::http::header;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use engine::types::{CaptionPos, Range, TitleStyle, Transition, Word};
-use engine::{Edit, Op, EPS};
+use engine::types::{CaptionPos, Frame, Range, TitleStyle, Transition, Word};
+use engine::{Edit, Op, Source, EPS};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -49,6 +49,7 @@ use crate::mcp_tools::{find_ranges, transcript, word_range};
 use crate::ops::{ClientOp, DocState};
 use crate::projects::{ensure_bot_member, find_project, member_role, Project, Role};
 use crate::routes::ExportJob;
+use crate::sources::{SourceView, TranscriptStatus};
 use crate::{ops, projects, routes, tokens, AppState};
 
 /// How long an editing tool leaves the agent's cursor on the range it is
@@ -131,9 +132,15 @@ pub struct Open {
     bot: Option<User>,
     conn_id: String,
     subscription: Option<Subscription>,
-    /// The media's source duration, for the range the last word owns.
+    /// The stitched duration of the main track.
     duration: f64,
-    /// The transcript, fetched once at open: words never change, only edits.
+    /// The main track as of the last transcript read, for `refresh`, and so
+    /// a word's owned stretch stops at the end of its own file.
+    sources: Vec<Source>,
+    /// How many of those sources had a ready transcript then.
+    ready: usize,
+    /// The transcript as of the last read: re-read by `refresh` whenever the
+    /// sources change; edits never change the words.
     words: Vec<Word>,
     /// Speaker index per word, when diarization succeeded.
     speakers: Option<Vec<Option<u32>>>,
@@ -333,6 +340,49 @@ pub struct AddBrollArgs {
     pub asset: String,
     /// Seconds into the asset to start from; 0 when omitted.
     pub offset: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddSourceArgs {
+    /// An asset id from `list_assets`, or a `mediaId` from `open_project`'s
+    /// `sources` to use the same video again.
+    pub media: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddLayerArgs {
+    /// First word the layer covers, from the transcript's `i`.
+    pub from: usize,
+    /// Last word it covers, inclusive.
+    pub to: usize,
+    /// A video asset id from `list_assets`, or a `mediaId` from
+    /// `open_project`'s `sources` to show a stretch of another source.
+    pub media: String,
+    /// 2 or 3; a higher track covers a lower one. 2 when omitted.
+    pub track: Option<u8>,
+    /// `full`, `pipTopLeft`, `pipTopRight`, `pipBottomLeft` or
+    /// `pipBottomRight`; `full` when omitted.
+    pub frame: Option<String>,
+    /// Mix the layer's own sound in at this level in dB (-30..12); muted
+    /// when omitted.
+    pub audio: Option<f64>,
+    /// Seconds into the media to start from; 0 when omitted.
+    pub offset: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetLayerArgs {
+    /// The layer's track now, 2 or 3.
+    pub track: u8,
+    /// The layer's start in seconds, from `layers` in `open_project` or
+    /// `add_layer`'s result.
+    pub start: f64,
+    /// Move it to this track; it stays where it is when omitted.
+    pub to_track: Option<u8>,
+    /// New framing (see `add_layer`); unchanged when omitted.
+    pub frame: Option<String>,
+    /// Sound level in dB; muted when omitted.
+    pub audio: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -556,9 +606,9 @@ impl McpSession {
     }
 
     #[tool(
-        description = "The clips in output order, each with its index, source \
-                       start/end, duration and first words. Clips come from \
-                       splits and cuts."
+        description = "The clips in output order, each with its index, the source \
+                       it comes from, start/end, duration and first words. Clips \
+                       come from splits, cuts and the joins between sources."
     )]
     async fn list_clips(
         &self,
@@ -594,8 +644,8 @@ impl McpSession {
     }
 
     #[tool(
-        description = "B-roll videos and music files uploaded to this project, \
-                       with ids for `add_broll` and `add_audio`."
+        description = "Videos and music files uploaded to this project, with ids \
+                       for `add_layer`, `add_source` and `add_audio`."
     )]
     async fn list_assets(
         &self,
@@ -604,9 +654,9 @@ impl McpSession {
         rendered(self.tool_list_assets(&identity_of(&ctx)?).await)
     }
 
-    #[tool(description = "Show video asset `asset` over the picture while words \
-                       `from`..`to` play, starting `offset` seconds into it. \
-                       The main audio keeps playing.")]
+    #[tool(description = "Show video asset `asset` full frame on track 2 while \
+                       words `from`..`to` play, starting `offset` seconds into it, \
+                       muted. Same as `add_layer` with its defaults.")]
     async fn add_broll(
         &self,
         Parameters(args): Parameters<AddBrollArgs>,
@@ -642,6 +692,42 @@ impl McpSession {
             )
             .await,
         )
+    }
+
+    #[tool(description = "Append a video to the end of the main track: an asset \
+                       from `list_assets`, or a source's `mediaId` to use it again. \
+                       Its words join the transcript once it is transcribed; call \
+                       `get_transcript` for new indices.")]
+    async fn add_source(
+        &self,
+        Parameters(args): Parameters<AddSourceArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_add_source(&identity_of(&ctx)?, &args.media).await)
+    }
+
+    #[tool(description = "Show a video on track 2 or 3 over words `from`..`to`: \
+                       full frame or a picture-in-picture corner, muted unless \
+                       `audio` gives a level in dB. Higher tracks cover lower ones.")]
+    async fn add_layer(
+        &self,
+        Parameters(args): Parameters<AddLayerArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_add_layer(&identity_of(&ctx)?, args).await)
+    }
+
+    #[tool(
+        description = "Change the layer that starts at `start` on `track`: move \
+                       it to `to_track`, reframe it, or set its sound (omit \
+                       `audio` to mute)."
+    )]
+    async fn set_layer(
+        &self,
+        Parameters(args): Parameters<SetLayerArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        rendered(self.tool_set_layer(&identity_of(&ctx)?, args).await)
     }
 }
 
@@ -696,10 +782,6 @@ impl McpSession {
         let role =
             ensure_bot_member(&self.state.db, &project.id, &identity.bot.id, owner_role).await?;
 
-        let meta = routes::read_meta(&self.state.config.data_dir.join(&project.media_id)).await?;
-        let (words, speakers) = routes::transcript_for(&self.state, &project.media_id).await?;
-        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
-
         let agent = self.agent(identity);
         let mut open = agent.lock().await;
         // Leave whatever was open before, so the agent is never two peers.
@@ -712,16 +794,18 @@ impl McpSession {
         open.project = Some(project.clone());
         open.role = Some(role);
         open.bot = Some(identity.bot.clone());
-        open.duration = meta.duration;
-        open.words = words;
-        open.speakers = speakers.map(|s| s.words);
+        // Forget the last project's sources so `refresh` reads this one's.
+        open.sources.clear();
+        self.refresh(&mut open, &project).await?;
+        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
+        let sources = crate::sources::views(&self.state, &open.sources).await?;
 
         Ok(json!({
             "id": project.id,
             "title": project.title,
-            "duration": meta.duration,
+            "duration": open.duration,
             "outputDuration": engine::output_duration(&engine::timeline_with(
-                meta.duration,
+                open.duration,
                 &doc.edits,
                 &doc.splits,
                 &doc.order,
@@ -731,6 +815,8 @@ impl McpSession {
             "speakerNames": doc.speaker_names,
             "transition": doc.transition,
             "role": role,
+            "sources": sources,
+            "layers": layers_json(&doc),
             "transcript": transcript(&open.words, open.speakers.as_deref(), &doc.edits),
             "clips": Self::clips_json(&open, &doc),
         }))
@@ -738,8 +824,9 @@ impl McpSession {
 
     pub(crate) async fn tool_get_transcript(&self, identity: &McpIdentity) -> AppResult<Value> {
         let agent = self.agent(identity);
-        let open = agent.lock().await;
-        let project = require_open(&open, identity)?;
+        let mut open = agent.lock().await;
+        let project = require_open(&open, identity)?.clone();
+        self.refresh(&mut open, &project).await?;
         let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
         Ok(serde_json::to_value(transcript(
             &open.words,
@@ -982,7 +1069,13 @@ impl McpSession {
     /// The clips an open project renders in, from splits, cuts and the
     /// stored playback order.
     fn clips_json(open: &Open, doc: &engine::ProjectDoc) -> Vec<Value> {
-        engine::ordered_pieces(open.duration, &doc.edits, &doc.splits, &doc.order)
+        let sources = open
+            .sources
+            .first()
+            .map(|first| engine::all_sources(first.clone(), &doc.sources))
+            .unwrap_or_default();
+        let duration = engine::stitched_duration(&sources);
+        engine::ordered_pieces(duration, &doc.edits, &doc.splits, &doc.order)
             .iter()
             .enumerate()
             .map(|(i, p)| {
@@ -993,7 +1086,15 @@ impl McpSession {
                     .map(|w| w.text.as_str())
                     .take(6)
                     .collect();
-                json!({ "i": i, "start": p.start, "end": p.end, "duration": p.len(), "words": words.join(" ") })
+                let source = engine::locate(&sources, p.start).map(|(k, _)| k);
+                json!({
+                    "i": i,
+                    "source": source,
+                    "start": p.start,
+                    "end": p.end,
+                    "duration": p.len(),
+                    "words": words.join(" "),
+                })
             })
             .collect()
     }
@@ -1034,11 +1135,17 @@ impl McpSession {
         before: Option<usize>,
     ) -> AppResult<Value> {
         let agent = self.agent(identity);
-        let (project_id, duration) = {
+        let (project_id, first) = {
             let open = agent.lock().await;
-            (require_open(&open, identity)?.id.clone(), open.duration)
+            let project = require_open(&open, identity)?;
+            // `refresh` always leaves the first source once a project is open.
+            (project.id.clone(), open.sources.first().cloned())
         };
         let (_, doc) = ops::load_doc(&self.state, &project_id).await?;
+        let sources = first
+            .map(|f| engine::all_sources(f, &doc.sources))
+            .unwrap_or_default();
+        let duration = engine::stitched_duration(&sources);
         let pieces = engine::ordered_pieces(duration, &doc.edits, &doc.splits, &doc.order);
         let start_of = |i: usize| {
             pieces.get(i).map(|p| p.start).ok_or_else(|| {
@@ -1073,19 +1180,19 @@ impl McpSession {
         asset: &str,
         offset: Option<f64>,
     ) -> AppResult<Value> {
-        let agent = self.agent(identity);
-        self.edit(&agent, identity, |open| {
-            let range = range_of(open, from, to)?;
-            Ok((
-                Some((from, to)),
-                Op::AddBroll {
-                    start: range.start,
-                    end: range.end,
-                    media: asset.to_owned(),
-                    offset: offset.unwrap_or(0.0),
-                },
-            ))
-        })
+        // The old name for a muted, full-frame layer on V2.
+        self.tool_add_layer(
+            identity,
+            AddLayerArgs {
+                from,
+                to,
+                media: asset.to_owned(),
+                track: Some(2),
+                frame: None,
+                audio: None,
+                offset,
+            },
+        )
         .await
     }
 
@@ -1114,6 +1221,148 @@ impl McpSession {
             ))
         })
         .await
+    }
+
+    /// Re-read the open project's transcript if its sources changed since the
+    /// agent last looked: a video added or undone, or one that finished
+    /// transcribing. Otherwise only the fold and a few file checks.
+    async fn refresh(&self, open: &mut Open, project: &Project) -> AppResult<()> {
+        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
+        let sources = crate::sources::timeline(&self.state, project, &doc).await?;
+        let ready = sources
+            .iter()
+            .filter(|s| {
+                crate::sources::transcript_status(&self.state, &s.media) == TranscriptStatus::Ready
+            })
+            .count();
+        if sources == open.sources && ready == open.ready {
+            return Ok(());
+        }
+        let (sources, words, speakers) =
+            crate::sources::project_transcript(&self.state, project).await?;
+        open.duration = engine::stitched_duration(&sources);
+        open.words = words;
+        open.speakers = speakers.map(|s| s.words);
+        open.sources = sources;
+        open.ready = ready;
+        Ok(())
+    }
+
+    pub(crate) async fn tool_add_source(
+        &self,
+        identity: &McpIdentity,
+        media: &str,
+    ) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        let mut open = agent.lock().await;
+        let project = require_open(&open, identity)?.clone();
+        require_edit(&open)?;
+        // A full project is refused before an asset is copied into a media dir.
+        let (_, doc) = crate::ops::load_doc(&self.state, &project.id).await?;
+        crate::sources::check_room(1 + doc.sources.len())?;
+        let meta = crate::sources::source_media(&self.state, &project, media).await?;
+        let known = crate::sources::in_registry(&self.state.db, &project.id, &meta.id).await?;
+        let source: SourceView =
+            match crate::sources::add_source(&self.state, &project, &identity.bot, &meta).await {
+                Ok(source) => source,
+                Err(e) => {
+                    if !known {
+                        crate::sources::forget_media(&self.state, &project, &meta.id).await;
+                    }
+                    return Err(e);
+                }
+            };
+        self.refresh(&mut open, &project).await?;
+        Ok(json!({
+            "source": source,
+            "sources": open.sources.len(),
+            "duration": open.duration,
+            "words": open.words.len(),
+        }))
+    }
+
+    pub(crate) async fn tool_add_layer(
+        &self,
+        identity: &McpIdentity,
+        args: AddLayerArgs,
+    ) -> AppResult<Value> {
+        let frame = frame_kind(args.frame.as_deref())?;
+        let agent = self.agent(identity);
+        let mut out = self
+            .edit(&agent, identity, |open| {
+                let range = range_of(open, args.from, args.to)?;
+                Ok((
+                    Some((args.from, args.to)),
+                    Op::AddLayer {
+                        track: args.track.unwrap_or(2),
+                        start: range.start,
+                        end: range.end,
+                        media: args.media.clone(),
+                        offset: args.offset.unwrap_or(0.0),
+                        frame,
+                        audio: args.audio,
+                    },
+                ))
+            })
+            .await?;
+        out["layers"] = self.layers(identity).await?;
+        Ok(out)
+    }
+
+    pub(crate) async fn tool_set_layer(
+        &self,
+        identity: &McpIdentity,
+        args: SetLayerArgs,
+    ) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        let project_id = {
+            let open = agent.lock().await;
+            require_open(&open, identity)?.id.clone()
+        };
+        let (_, doc) = ops::load_doc(&self.state, &project_id).await?;
+        let current = doc
+            .edits
+            .iter()
+            .find_map(|e| match e {
+                Edit::Layer {
+                    track,
+                    start,
+                    frame,
+                    ..
+                } if *track == args.track && (start - args.start).abs() < EPS => Some(*frame),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "no layer starts at {} on V{}",
+                    args.start, args.track
+                ))
+            })?;
+        let frame = match args.frame.as_deref() {
+            Some(name) => frame_kind(Some(name))?,
+            None => current,
+        };
+        let op = Op::SetLayer {
+            track: args.track,
+            start: args.start,
+            to_track: args.to_track.unwrap_or(args.track),
+            frame,
+            audio: args.audio,
+        };
+        let mut out = self.edit(&agent, identity, |_| Ok((None, op))).await?;
+        out["layers"] = self.layers(identity).await?;
+        Ok(out)
+    }
+
+    /// Every layer in the open project, as the fold has them.
+    async fn layers(&self, identity: &McpIdentity) -> AppResult<Value> {
+        let agent = self.agent(identity);
+        let project_id = {
+            let open = agent.lock().await;
+            require_open(&open, identity)?.id.clone()
+        };
+        let (_, doc) = ops::load_doc(&self.state, &project_id).await?;
+        Ok(layers_json(&doc))
     }
 
     /// The shared body of every editing tool: work out what to do from the
@@ -1207,12 +1456,13 @@ impl McpSession {
             require_edit(&open)?;
             project
         };
-        let suggestions = routes::suggest_for(&self.state, &project.media_id, false).await?;
+        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
+        let sources = crate::sources::timeline(&self.state, &project, &doc).await?;
+        let suggestions = crate::sources::suggest_project(&self.state, &sources, false).await?;
         let suggested = match which {
             Suggestion::Fillers => suggestions.fillers,
             Suggestion::Pauses => suggestions.pauses,
         };
-        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
         let cuts: Vec<Range> = suggested
             .iter()
             .map(Edit::range)
@@ -1281,15 +1531,19 @@ impl ServerHandler for McpSession {
              You appear to them as \"Claude\", a peer with its own colour, and your \
              edits are yours to undo. The editing tools are `cut`, \
              `remove_fillers`, `tighten_pauses`, `overdub`, `add_title`, \
-             `add_caption`, `set_transition`, `split`, `move_clip`, `add_broll`, \
-             `add_audio`, `undo` and `redo`. Each pauses \
+             `add_caption`, `set_transition`, `split`, `move_clip`, `add_source`, \
+             `add_layer`, `set_layer`, `add_broll`, `add_audio`, `undo` and \
+             `redo`. Each pauses \
              about half a second before it applies, and the ones that work on a \
              range of words move your cursor onto those words first — `undo`, \
              `redo`, `set_transition` and `add_title` with `after: -1` have no \
              range to point at, so they leave it where it is. All of them return \
-             the new counts and the words they touched. `list_clips`, `split` \
-             and `move_clip` reorder the edit; `list_assets`, `add_broll` and \
-             `add_audio` lay a shot or music over a range of words (uploading \
+             the new counts and the words they touched. \
+             `list_clips`, `split` and `move_clip` reorder the edit; each clip \
+             names the source it comes from. `add_source` appends another video \
+             to the end of the main track. `list_assets`, `add_layer`, `set_layer` \
+             and `add_audio` lay a picture or music over a range of words \
+             (`add_broll` is `add_layer` on track 2, full frame, muted; uploading \
              assets happens in the browser). `export` renders and waits. Indices are always the \
              transcript's `i`, so call `get_transcript` again after an edit \
              rather than reusing stale ones. One token is one agent: every \
@@ -1327,7 +1581,7 @@ fn require_edit(open: &Open) -> AppResult<()> {
 
 /// The source range words `from..=to` own, or the server's own 400.
 fn range_of(open: &Open, from: usize, to: usize) -> AppResult<Range> {
-    word_range(&open.words, from, to, open.duration).ok_or_else(|| {
+    word_range(&open.words, from, to, &open.sources).ok_or_else(|| {
         AppError::bad_request(format!(
             "no words {from}..{to} in a transcript of {}",
             open.words.len()
@@ -1355,8 +1609,14 @@ fn already_cut(suggested: Range, edits: &[Edit]) -> bool {
 fn touched_by(open: &Open, cuts: &[Range]) -> Option<(usize, usize)> {
     let mut span: Option<(usize, usize)> = None;
     for i in 0..open.words.len() {
-        let from = if i == 0 { 0.0 } else { open.words[i - 1].end };
-        let to = open.words.get(i + 1).map_or(open.duration, |w| w.start);
+        // Clamped to the word's own file, like `word_range`.
+        let own = crate::mcp_tools::own_source(&open.sources, open.words[i].start);
+        let from = if i == 0 { 0.0 } else { open.words[i - 1].end }.max(own.start);
+        let to = open
+            .words
+            .get(i + 1)
+            .map_or(open.duration, |w| w.start)
+            .min(own.end);
         if cuts.iter().any(|c| from < c.end && to > c.start) {
             span = Some(match span {
                 Some((lo, _)) => (lo, i),
@@ -1387,6 +1647,30 @@ fn caption_position(name: Option<&str>) -> AppResult<CaptionPos> {
             "unknown caption position {other}: use bottomLeft, bottomCenter or topLeft"
         ))),
     }
+}
+
+fn frame_kind(name: Option<&str>) -> AppResult<Frame> {
+    match name.unwrap_or("full") {
+        "full" => Ok(Frame::Full),
+        "pipTopLeft" => Ok(Frame::PipTopLeft),
+        "pipTopRight" => Ok(Frame::PipTopRight),
+        "pipBottomLeft" => Ok(Frame::PipBottomLeft),
+        "pipBottomRight" => Ok(Frame::PipBottomRight),
+        other => Err(AppError::bad_request(format!(
+            "unknown frame {other}: use full, pipTopLeft, pipTopRight, pipBottomLeft or pipBottomRight"
+        ))),
+    }
+}
+
+/// The fold's layers, each as its `Edit::Layer` JSON.
+fn layers_json(doc: &engine::ProjectDoc) -> Value {
+    Value::Array(
+        doc.edits
+            .iter()
+            .filter(|e| matches!(e, Edit::Layer { .. }))
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect(),
+    )
 }
 
 fn transition_kind(name: &str) -> AppResult<Transition> {
@@ -1526,6 +1810,8 @@ mod tests {
                 "add_audio",
                 "add_broll",
                 "add_caption",
+                "add_layer",
+                "add_source",
                 "add_title",
                 "cut",
                 "export",
@@ -1540,12 +1826,80 @@ mod tests {
                 "overdub",
                 "redo",
                 "remove_fillers",
+                "set_layer",
                 "set_transition",
                 "split",
                 "tighten_pauses",
                 "undo"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn cutting_the_last_word_before_an_untranscribed_source_stops_at_the_join() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = crate::projects::test_support::seed_media(&state, 4.0).await;
+        let second = routes::read_meta(&state.config.data_dir.join(&second))
+            .await
+            .unwrap();
+        state
+            .transcripts
+            .lock()
+            .unwrap()
+            .insert(second.id.clone(), crate::sources::TranscriptJob::Running);
+        crate::sources::add_source(&state, &project, &owner, &second)
+            .await
+            .unwrap();
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        let out = session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        assert_eq!(out["transcript"].as_array().unwrap().len(), 3);
+        session.tool_cut(&identity, 2, 2).await.unwrap();
+        let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
+        let cuts: Vec<Range> = doc
+            .edits
+            .iter()
+            .filter(|e| e.is_cut())
+            .map(Edit::range)
+            .collect();
+        assert_eq!(cuts, [Range::new(2.0, 10.0)], "video 2 must survive");
+    }
+
+    #[tokio::test]
+    async fn open_project_reads_the_transcript_of_every_source() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = crate::sources::test_support::seed_source(&state, 4.0, &["d", "e"]).await;
+        crate::sources::add_source(&state, &project, &owner, &second)
+            .await
+            .unwrap();
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        let out = session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        assert_eq!(out["duration"], 14.0);
+        let transcript = out["transcript"].as_array().unwrap();
+        assert_eq!(transcript.len(), 5);
+        assert_eq!(transcript[3]["text"], "d");
+        assert_eq!(transcript[3]["start"], 10.0);
+        // The last word of the second file owns the gap to the stitched end.
+        let cut = session.tool_cut(&identity, 4, 4).await.unwrap();
+        assert_eq!(cut["touched"][0]["status"], "cut");
+        let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
+        assert!(doc.edits.iter().any(|e| matches!(
+            e,
+            Edit::Cut { start, end, .. } if *start == 11.0 && *end == 14.0
+        )));
     }
 
     #[tokio::test]
@@ -2443,7 +2797,263 @@ mod tests {
             .await
             .unwrap();
         let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
-        assert!(matches!(&doc.edits[0], Edit::Broll { offset, .. } if *offset == 1.0));
+        assert!(matches!(
+            &doc.edits[0],
+            Edit::Layer { track: 2, frame: engine::Frame::Full, audio: None, offset, .. } if *offset == 1.0
+        ));
         assert!(matches!(&doc.edits[1], Edit::Audio { gain, duck, .. } if *gain == -8.0 && !*duck));
+    }
+
+    #[tokio::test]
+    async fn add_source_appends_an_asset_or_a_source_and_list_clips_names_the_source() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let clip = crate::assets::test_support::seed_asset(
+            &state,
+            &project,
+            engine::MediaKind::Video,
+            5.0,
+        )
+        .await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+
+        let out = session.tool_add_source(&identity, &clip.id).await.unwrap();
+        assert_eq!(out["source"]["index"], 1);
+        assert_eq!(out["source"]["offset"], 10.0);
+        assert_eq!(out["duration"], 15.0);
+        let clips = session.tool_list_clips(&identity).await.unwrap();
+        let clips = clips.as_array().unwrap();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0]["source"], 0);
+        assert_eq!(clips[1]["source"], 1);
+        assert_eq!(clips[1]["start"], 10.0);
+
+        // The same asset again shares its media directory.
+        let again = session.tool_add_source(&identity, &clip.id).await.unwrap();
+        assert_eq!(again["source"]["mediaId"], out["source"]["mediaId"]);
+        assert_eq!(again["source"]["offset"], 15.0);
+
+        assert!(session.tool_add_source(&identity, "nope").await.is_err());
+    }
+
+    /// The media directory `add_source` would promote `asset` into.
+    fn promoted_dir(state: &AppState, asset: &str) -> std::path::PathBuf {
+        let id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("type-n-stitch:asset:{asset}").as_bytes(),
+        );
+        state.config.data_dir.join(id.to_string())
+    }
+
+    #[tokio::test]
+    async fn add_source_removes_its_copy_when_the_add_is_refused() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let clip = crate::assets::test_support::seed_asset(
+            &state,
+            &project,
+            engine::MediaKind::Video,
+            5.0,
+        )
+        .await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+
+        // Too many splits: the op is refused after the copy was made.
+        let splits: Vec<Value> = (1..=engine::MAX_SPLITS)
+            .map(|i| json!({ "opId": format!("s{i}"), "kind": "split", "at": i as f64 * 0.1 }))
+            .collect();
+        let (status, body, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{}/ops", project.id),
+                Some(&ada),
+                Some(json!({ "ops": splits })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let err = session.tool_add_source(&identity, &clip.id).await;
+        assert!(err.is_err());
+        assert!(
+            !promoted_dir(&state, &clip.id).exists(),
+            "a refused add removes the copy it made"
+        );
+        let promoted = promoted_dir(&state, &clip.id);
+        let promoted = promoted.file_name().unwrap().to_str().unwrap();
+        assert!(
+            !crate::sources::in_registry(&state.db, &project.id, promoted)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn add_source_at_the_cap_copies_nothing() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        for _ in 1..crate::sources::MAX_SOURCES {
+            let m = crate::sources::test_support::seed_source(&state, 1.0, &[]).await;
+            crate::sources::add_source(&state, &project, &owner, &m)
+                .await
+                .unwrap();
+        }
+        let clip = crate::assets::test_support::seed_asset(
+            &state,
+            &project,
+            engine::MediaKind::Video,
+            5.0,
+        )
+        .await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let err = session
+            .tool_add_source(&identity, &clip.id)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("at most 20"), "{err:?}");
+        assert!(
+            !promoted_dir(&state, &clip.id).exists(),
+            "a full project copies nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_layer_and_set_layer_stack_a_source_over_the_first() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = crate::sources::test_support::seed_source(&state, 4.0, &["d", "e"]).await;
+        crate::sources::add_source(&state, &project, &owner, &second)
+            .await
+            .unwrap();
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        let opened = session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        assert_eq!(opened["sources"].as_array().unwrap().len(), 2);
+
+        let out = session
+            .tool_add_layer(
+                &identity,
+                AddLayerArgs {
+                    from: 0,
+                    to: 1,
+                    media: second.id.clone(),
+                    track: Some(3),
+                    frame: Some("pipTopRight".into()),
+                    audio: Some(-6.0),
+                    offset: Some(0.5),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["touched"].as_array().unwrap().len(), 2);
+        assert_eq!(out["layers"][0]["track"], 3);
+        let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
+        assert!(matches!(
+            &doc.edits[0],
+            Edit::Layer { track: 3, start, end, frame: engine::Frame::PipTopRight, audio: Some(a), offset, .. }
+                if *start == 0.0 && *end == 2.0 && *a == -6.0 && *offset == 0.5
+        ));
+
+        session
+            .tool_set_layer(
+                &identity,
+                SetLayerArgs {
+                    track: 3,
+                    start: 0.0,
+                    to_track: Some(2),
+                    frame: None,
+                    audio: None,
+                },
+            )
+            .await
+            .unwrap();
+        let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
+        assert!(matches!(
+            &doc.edits[0],
+            Edit::Layer {
+                track: 2,
+                frame: engine::Frame::PipTopRight,
+                audio: None,
+                ..
+            }
+        ));
+
+        let bad_track = AddLayerArgs {
+            from: 0,
+            to: 0,
+            media: second.id.clone(),
+            track: Some(4),
+            frame: None,
+            audio: None,
+            offset: None,
+        };
+        assert!(session.tool_add_layer(&identity, bad_track).await.is_err());
+        let bad_frame = AddLayerArgs {
+            from: 0,
+            to: 0,
+            media: second.id.clone(),
+            track: None,
+            frame: Some("middle".into()),
+            audio: None,
+            offset: None,
+        };
+        let err = session
+            .tool_add_layer(&identity, bad_frame)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pipTopLeft"), "{err}");
+        let missing = SetLayerArgs {
+            track: 3,
+            start: 0.0,
+            to_track: None,
+            frame: None,
+            audio: None,
+        };
+        assert!(session.tool_set_layer(&identity, missing).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_transcript_picks_up_a_source_a_peer_added() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let second = crate::sources::test_support::seed_source(&state, 4.0, &["d"]).await;
+        crate::sources::add_source(&state, &project, &owner, &second)
+            .await
+            .unwrap();
+        let transcript = session.tool_get_transcript(&identity).await.unwrap();
+        assert_eq!(transcript.as_array().unwrap().len(), 4);
+        assert_eq!(transcript[3]["start"], 10.0);
     }
 }

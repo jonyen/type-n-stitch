@@ -2,9 +2,9 @@ import { Popover } from 'radix-ui';
 import { useMemo } from 'react';
 
 import { cx } from '../cx';
+import { overlayKey, type OverlayRef } from '../selection';
 import ui from '../styles/ui.module.css';
 import styles from './SelectionToolbar.module.css';
-import type { OverlayRef } from './Timeline';
 
 interface Props {
   /** Index of the first selected word; the toolbar floats above it, full actions. */
@@ -13,13 +13,14 @@ interface Props {
   titleAt: number | null;
   /** A selected clip divider's start; Delete-only, anchored to the clip. */
   clipStart: number | null;
-  /** A selected B-roll or music bar; Delete-only, anchored to the timeline bar. */
+  /** A selected layer or music bar; Delete-only, anchored to the timeline bar. */
   overlay: OverlayRef | null;
   open: boolean;
   onDelete: () => void;
   onOverdub: () => void;
   onCaption: () => void;
-  onBroll: () => void;
+  /** Put a layer over the selected words. */
+  onLayer: () => void;
   /**
    * Escape while the toolbar shows: clear the selection. The popover's layer
    * takes the key before the editor's own Escape handler can see it. Clicks
@@ -44,7 +45,7 @@ function target(
   // Below the bar, so it does not cover the lane above it.
   if (overlay !== null)
     return {
-      selector: `[data-overlay="${overlay.kind}:${overlay.start}"]`,
+      selector: `[data-overlay="${overlayKey(overlay)}"]`,
       deleteOnly: true,
       side: 'bottom',
     };
@@ -68,7 +69,7 @@ export function SelectionToolbar({
   onDelete,
   onOverdub,
   onCaption,
-  onBroll,
+  onLayer,
   onDismiss,
 }: Props) {
   const t = target(anchorIndex, titleAt, clipStart, overlay);
@@ -121,8 +122,8 @@ export function SelectionToolbar({
               <button type="button" className={button} onClick={onCaption}>
                 Caption
               </button>
-              <button type="button" className={button} onClick={onBroll}>
-                B-roll
+              <button type="button" className={button} onClick={onLayer}>
+                Layer
               </button>
             </>
           )}

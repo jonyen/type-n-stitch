@@ -49,12 +49,64 @@ mod tests {
             "projects",
             "project_members",
             "edit_ops",
+            "project_sources",
         ] {
             assert!(
                 names.contains(&expected),
                 "missing table {expected} in {names:?}"
             );
         }
+    }
+
+    /// A database from before sources: every project gets its own media as
+    /// source 0 when 0005 runs.
+    #[tokio::test]
+    async fn sources_backfill_gives_every_project_its_first_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}/t.db", dir.path().display());
+        let options = SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        migrator.run_to(4, &pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, display_name, color, created_at)
+             VALUES ('u', 'u@example.com', 'h', 'U', '#000000', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, media) in [("p1", "m1"), ("p2", "m2")] {
+            sqlx::query(
+                "INSERT INTO projects (id, media_id, owner_id, title, created_at)
+                 VALUES (?, ?, 'u', 'T', 0)",
+            )
+            .bind(id)
+            .bind(media)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        migrator.run(&pool).await.unwrap();
+        let rows: Vec<(String, i64, String, f64, f64)> = sqlx::query_as(
+            "SELECT project_id, position, media_id, start_at, duration
+             FROM project_sources ORDER BY project_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("p1".into(), 0, "m1".into(), 0.0, 0.0),
+                ("p2".into(), 0, "m2".into(), 0.0, 0.0),
+            ]
+        );
     }
 
     #[tokio::test]
