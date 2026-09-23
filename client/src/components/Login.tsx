@@ -2,6 +2,9 @@ import { useState, type SubmitEvent } from 'react';
 
 import { login, register } from '../api';
 import type { User } from '../types';
+import { cx } from '../cx';
+import styles from './Login.module.css';
+import ui from '../styles/ui.module.css';
 
 interface Props {
   /** No accounts exist yet: show "create the first account" instead of sign in. */
@@ -43,15 +46,15 @@ export function Login({ needsSetup, onSignedIn }: Props) {
       : 'Projects, edits and comments are saved to your account.';
 
   return (
-    <div className="login-wrap">
-      <form className="login" onSubmit={onSubmit}>
-        <div className="login-brand">
-          <span className="logo" aria-hidden />
-          <span className="wordmark">type-n-stitch</span>
-          <span className="muted">edit media by editing its words</span>
+    <div className={styles.wrap}>
+      <form className={styles.card} onSubmit={onSubmit}>
+        <div className={styles.brand}>
+          <span className={styles.logo} aria-hidden />
+          <span className={styles.wordmark}>type-n-stitch</span>
+          <span>edit media by editing its words</span>
         </div>
         <h2>{title}</h2>
-        <p className="muted hint">{hint}</p>
+        <p className={styles.hint}>{hint}</p>
         {mode === 'register' && (
           <label>
             Name
@@ -88,14 +91,14 @@ export function Login({ needsSetup, onSignedIn }: Props) {
             required
           />
         </label>
-        {error && <p className="error">{error}</p>}
-        <button type="submit" className="primary" disabled={busy}>
+        {error && <p className={ui.error}>{error}</p>}
+        <button type="submit" className={cx(ui.button, ui.primary, styles.submit)} disabled={busy}>
           {busy ? 'One moment…' : mode === 'login' ? 'Sign in' : 'Create account'}
         </button>
         {!needsSetup && (
           <button
             type="button"
-            className="link"
+            className={styles.link}
             disabled={busy}
             onClick={() => {
               setError(null);

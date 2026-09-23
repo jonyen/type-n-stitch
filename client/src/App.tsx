@@ -715,12 +715,7 @@ export function App() {
         <p className={ui.muted}>Loading…</p>
       </div>
     );
-  if (!user)
-    return (
-      <div className={styles.app}>
-        <Login needsSetup={needsSetup} onSignedIn={setUser} />
-      </div>
-    );
+  if (!user) return <Login needsSetup={needsSetup} onSignedIn={setUser} />;
 
   const controls = project
     ? {

@@ -1,7 +1,10 @@
 import { useRef, useState, type DragEvent, type ReactNode } from 'react';
 
 import type { LibraryItem } from '../types';
+import { cx } from '../cx';
 import { Library } from './Library';
+import styles from './Home.module.css';
+import ui from '../styles/ui.module.css';
 
 const ACCEPT = '.mp3,.wav,.m4a,.mp4,.mov,audio/*,video/*';
 
@@ -26,10 +29,10 @@ export function Dropzone({ onFile, onLibraryClip, busy, error, children }: Props
   };
 
   return (
-    <div className="dropzone-wrap">
+    <div className={styles.wrap}>
       <button
         type="button"
-        className={`dropzone${over ? ' over' : ''}${busy ? ' busy' : ''}`}
+        className={cx(styles.dropzone, over && styles.over, busy && styles.busy)}
         onClick={() => input.current?.click()}
         onDragOver={(e) => {
           e.preventDefault();
@@ -52,19 +55,19 @@ export function Dropzone({ onFile, onLibraryClip, busy, error, children }: Props
         />
         {busy ? (
           <>
-            <span className="spinner" aria-hidden />
+            <span className={ui.spinner} aria-hidden />
             <strong>{busy}</strong>
-            <span className="muted">whisper.cpp is listening, hold on…</span>
+            <span className={ui.muted}>whisper.cpp is listening, hold on…</span>
           </>
         ) : (
           <>
             <strong>Drop an audio or video file</strong>
-            <span className="muted">mp3, wav, m4a, mp4, mov, or click to browse</span>
+            <span className={ui.muted}>mp3, wav, m4a, mp4, mov, or click to browse</span>
           </>
         )}
       </button>
-      {error && <p className="error">{error}</p>}
-      <ol className="how">
+      {error && <p className={ui.error}>{error}</p>}
+      <ol className={styles.how}>
         <li>Transcribe with word timestamps</li>
         <li>Select words, press Delete to cut them</li>
         <li>Overdub a phrase in a cloned voice</li>

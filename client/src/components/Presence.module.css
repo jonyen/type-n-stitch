@@ -1,0 +1,60 @@
+.presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--text-md);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.open .dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent);
+}
+
+.waiting .dot {
+  animation: pulse 1s ease-in-out infinite alternate;
+}
+
+.error {
+  color: var(--danger);
+}
+
+.error .dot {
+  background: var(--danger);
+}
+
+.peers {
+  display: inline-flex;
+}
+
+.peers > * + * {
+  margin-left: -6px;
+}
+
+.more {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.35;
+  }
+  to {
+    opacity: 1;
+  }
+}
