@@ -216,27 +216,56 @@ pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>>
         return Ok(serde_json::from_str(&json).context("parsing cached words")?);
     }
 
-    let meta = read_meta(&dir).await?;
-    let source = dir.join(format!("source.{}", meta.ext));
-    let wav = dir.join("whisper.wav");
-    media::to_whisper_wav(&source, &wav)
+    whisper_guarded(state, &dir, || async {
+        let meta = read_meta(&dir).await?;
+        let source = dir.join(format!("source.{}", meta.ext));
+        let wav = dir.join("whisper.wav");
+        media::to_whisper_wav(&source, &wav)
+            .await
+            .map_err(|e| AppError::upstream(format!("{e:#}")))?;
+        let words = media::transcribe(
+            &state.config.whisper_bin,
+            &state.config.whisper_model,
+            &wav,
+            &dir.join("whisper"),
+        )
         .await
         .map_err(|e| AppError::upstream(format!("{e:#}")))?;
-    let words = media::transcribe(
-        &state.config.whisper_bin,
-        &state.config.whisper_model,
-        &wav,
-        &dir.join("whisper"),
-    )
-    .await
-    .map_err(|e| AppError::upstream(format!("{e:#}")))?;
 
-    // Atomically: a client polling `/transcribe` must never read half a file.
-    write_json_atomic(&cached, &serde_json::to_vec(&words)?)
+        // Atomically: a client polling `/transcribe` must never read half a file.
+        write_json_atomic(&cached, &serde_json::to_vec(&words)?)
+            .await
+            .context("caching words")?;
+        tracing::info!(id, words = words.len(), "transcribed");
+        Ok(words)
+    })
+    .await
+}
+
+/// Run `whisper` (a transcription of the media in `dir` that caches its
+/// words there) holding a slot of `AppState::whisper`, unless the words were
+/// cached while it waited. Every run goes through here, the foreground
+/// `/transcribe` and background jobs alike, so with one slot whisper never
+/// runs twice on one directory at once, and a caller that queued behind a
+/// run of the same media reads its words instead of running again.
+pub(crate) async fn whisper_guarded<F, Fut>(
+    state: &AppState,
+    dir: &Path,
+    whisper: F,
+) -> AppResult<Vec<Word>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = AppResult<Vec<Word>>>,
+{
+    let _slot = state
+        .whisper
+        .acquire()
         .await
-        .context("caching words")?;
-    tracing::info!(id, words = words.len(), "transcribed");
-    Ok(words)
+        .context("whisper slots closed")?;
+    if let Ok(json) = tokio::fs::read_to_string(dir.join(WORDS_CACHE)).await {
+        return Ok(serde_json::from_str(&json).context("parsing cached words")?);
+    }
+    whisper().await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

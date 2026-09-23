@@ -40,6 +40,7 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
         bus: Arc::new(bus::LocalBus::new()),
         agents: Default::default(),
         transcripts: Mutex::new(HashMap::new()),
+        whisper: tokio::sync::Semaphore::new(crate::WHISPER_SLOTS),
     });
     (state, dir)
 }

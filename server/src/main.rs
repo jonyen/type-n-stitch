@@ -46,7 +46,13 @@ pub struct AppState {
     /// failed until the server restarts. A finished one leaves no entry; its
     /// words cache is the record.
     pub transcripts: Mutex<HashMap<String, sources::TranscriptJob>>,
+    /// Whisper runs at once, foreground or background: whisper is CPU-bound,
+    /// and a project of many videos would otherwise start one per file.
+    pub whisper: tokio::sync::Semaphore,
 }
+
+/// How many whisper runs `AppState::whisper` allows at once.
+pub const WHISPER_SLOTS: usize = 1;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -73,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         bus: Arc::new(bus::LocalBus::new()),
         agents: mcp::Agents::default(),
         transcripts: Mutex::new(HashMap::new()),
+        whisper: tokio::sync::Semaphore::new(WHISPER_SLOTS),
     });
 
     let app = app::router(state.clone());

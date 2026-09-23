@@ -1326,6 +1326,73 @@ mod tests {
             .collect()
     }
 
+    /// A stand-in for whisper: counts runs and the most at once, then caches
+    /// words for `dir` the way `transcribe_item` would.
+    async fn stub_whisper(
+        dir: PathBuf,
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> AppResult<Vec<Word>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        runs.fetch_add(1, SeqCst);
+        let now = active.fetch_add(1, SeqCst) + 1;
+        peak.fetch_max(now, SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        active.fetch_sub(1, SeqCst);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join(WORDS_CACHE), b"[]")
+            .await
+            .unwrap();
+        Ok(Vec::new())
+    }
+
+    #[tokio::test]
+    async fn whisper_runs_one_at_a_time_and_once_per_media() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (state, _d) = state().await;
+        let runs = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        // Three different media and a second caller for the first.
+        let dirs = ["a", "b", "c", "a"].map(|m| state.config.data_dir.join(m));
+        let calls = dirs.iter().cloned().map(|dir| {
+            let (state, runs, active, peak) =
+                (state.clone(), runs.clone(), active.clone(), peak.clone());
+            tokio::spawn(async move {
+                crate::routes::whisper_guarded(&state, &dir, || {
+                    stub_whisper(dir.clone(), runs, active, peak)
+                })
+                .await
+            })
+        });
+        for call in futures_util::future::join_all(calls).await {
+            call.unwrap().unwrap();
+        }
+        assert_eq!(peak.load(SeqCst), 1, "one whisper at a time");
+        assert_eq!(
+            runs.load(SeqCst),
+            3,
+            "the second caller for `a` found its words cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_starts_on_one_media_make_one_job() {
+        let (state, _d) = state().await;
+        let media = seed_media(&state, 2.0).await;
+        // Hold the whisper slot so the job cannot finish under the test.
+        let slot = state.whisper.acquire().await.unwrap();
+        let starts = (0..2).map(|_| {
+            let (state, media) = (state.clone(), media.clone());
+            tokio::spawn(async move { start_transcription(&state, &media) })
+        });
+        futures_util::future::join_all(starts).await;
+        assert_eq!(state.transcripts.lock().unwrap().len(), 1);
+        assert_eq!(transcript_status(&state, &media), TranscriptStatus::Running);
+        drop(slot);
+    }
+
     #[tokio::test]
     async fn transcribe_stitches_ready_sources_and_reports_each_status() {
         let (state, _d) = state().await;
