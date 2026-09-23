@@ -205,8 +205,13 @@ Claude Code (or any MCP client) can open a project over `/mcp` and edit it as a 
 up in the project like anyone else, with its own cursor and colour, and everyone watching sees
 its selection move just before each edit lands.
 
-From the avatar menu, choose **Connect an agent** to mint an API token. The token is shown once
-— copy it before closing the dialog — and the dialog gives you the ready-to-paste command:
+From the top bar or the avatar menu, choose **Connect AI** to open the dialog. It always shows
+the MCP endpoint (`<origin>/mcp`) in a copy box, so any client can be pointed at it by hand. To
+mint an API token, give it a label; the token is shown once — copy it before closing the dialog.
+
+Once a token exists, the dialog's setup snippets fill in with it: the ready-to-paste
+`claude mcp add` command for Claude Code, a JSON block for HTTP-aware clients (Cursor, VS Code,
+Windsurf), and an `mcp-remote` JSON block for stdio-only clients like Claude Desktop.
 
 ```sh
 claude mcp add --transport http type-n-stitch <origin>/mcp --header "Authorization: Bearer <token>"

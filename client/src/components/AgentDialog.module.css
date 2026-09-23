@@ -1,3 +1,18 @@
+.endpoint {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.endpoint p {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.endpoint code {
+  font-family: var(--font-mono);
+}
+
 .create {
   display: flex;
   align-items: flex-end;
@@ -38,6 +53,16 @@
   white-space: nowrap;
   font-family: var(--font-mono);
   font-size: var(--text-sm);
+}
+
+.copyBoxMultiline {
+  align-items: flex-start;
+}
+
+.copyBoxMultiline .copyValue {
+  white-space: pre;
+  max-height: 160px;
+  overflow-y: auto;
 }
 
 .list {
@@ -86,4 +111,53 @@
   font-size: var(--text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.snippets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.snippets h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-md);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.tab {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.tab:hover {
+  background: var(--hover);
+}
+
+.tab[data-state='active'] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }

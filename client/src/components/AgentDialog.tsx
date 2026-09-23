@@ -1,6 +1,7 @@
+import { Tabs } from 'radix-ui';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
-import { mcpAddCommand } from '../agent';
+import { authHeader, mcpAddCommand, mcpEndpoint, mcpJsonConfig, mcpRemoteConfig } from '../agent';
 import { createToken, listTokens, revokeToken } from '../api';
 import { cx } from '../cx';
 import { relativeTime } from '../format';
@@ -14,7 +15,10 @@ interface Props {
   onCancel: () => void;
 }
 
-/** A label input, then (once minted) the token and the `claude mcp add` line, shown once. */
+/** Shown in the setup snippets until a token has been minted this visit. */
+const PLACEHOLDER_TOKEN = '<token>';
+
+/** A label input, then (once minted) the token, shown once, plus setup snippets for any client. */
 export function AgentDialog({ onCancel }: Props) {
   const [tokens, setTokens] = useState<TokenInfo[] | null>(null);
   const [label, setLabel] = useState('');
@@ -64,21 +68,26 @@ export function AgentDialog({ onCancel }: Props) {
     }
   };
 
+  const origin = window.location.origin;
+
   return (
     <DialogFrame
-      title="Connect an agent"
-      description="Mint a token so Claude can join this project as its own agent — cursor, edits, and undo all its own."
+      title="Connect AI"
+      description="Any MCP client — Claude Code, Cursor and others — can join a project as its own agent with this endpoint and a token."
       busy={busy || minted !== null}
       wide
       onClose={onCancel}
     >
       <div className={frame.form}>
+        <div className={agent.endpoint}>
+          <CopyBox label="MCP endpoint" value={mcpEndpoint(origin)} />
+          <p className={ui.muted}>
+            Clients authenticate with the header <code>Authorization: Bearer &lt;token&gt;</code>.
+          </p>
+        </div>
+
         {minted ? (
-          <MintedToken
-            origin={window.location.origin}
-            token={minted.token}
-            onDone={() => setMinted(null)}
-          />
+          <MintedToken token={minted.token} onDone={() => setMinted(null)} />
         ) : (
           <form className={agent.create} onSubmit={create}>
             <label className={ui.field}>
@@ -133,6 +142,8 @@ export function AgentDialog({ onCancel }: Props) {
           )}
         </div>
 
+        <SetupSnippets origin={origin} token={minted?.token ?? null} />
+
         {!minted && (
           <div className={frame.actions}>
             <span className={frame.spacer} />
@@ -146,23 +157,13 @@ export function AgentDialog({ onCancel }: Props) {
   );
 }
 
-function MintedToken({
-  origin,
-  token,
-  onDone,
-}: {
-  origin: string;
-  token: string;
-  onDone: () => void;
-}) {
-  const command = mcpAddCommand(origin, token);
+function MintedToken({ token, onDone }: { token: string; onDone: () => void }) {
   return (
     <div className={agent.minted}>
       <p className={ui.muted}>
         This token is shown once — copy it now. Anyone with it can edit as this agent.
       </p>
       <CopyBox label="Token" value={token} />
-      <CopyBox label="claude mcp add" value={command} />
       <div className={frame.actions}>
         <span className={frame.spacer} />
         <button type="button" className={cx(ui.button, ui.primary)} onClick={onDone}>
@@ -173,7 +174,64 @@ function MintedToken({
   );
 }
 
-function CopyBox({ label, value }: { label: string; value: string }) {
+type SnippetTab = 'claude' | 'json' | 'remote' | 'other';
+
+const TABS: { value: SnippetTab; label: string }[] = [
+  { value: 'claude', label: 'Claude Code' },
+  { value: 'json', label: 'Cursor / VS Code / Windsurf' },
+  { value: 'remote', label: 'Claude Desktop / stdio' },
+  { value: 'other', label: 'Other' },
+];
+
+/** A client picker: one setup snippet per tab, with the real token once one's minted. */
+function SetupSnippets({ origin, token }: { origin: string; token: string | null }) {
+  const [tab, setTab] = useState<SnippetTab>('claude');
+  const value = token ?? PLACEHOLDER_TOKEN;
+
+  return (
+    <div className={agent.snippets}>
+      <h3>Setup</h3>
+      <Tabs.Root value={tab} onValueChange={(v) => setTab(v as SnippetTab)}>
+        <Tabs.List className={agent.tabs} aria-label="Client">
+          {TABS.map((t) => (
+            <Tabs.Trigger key={t.value} value={t.value} className={agent.tab}>
+              {t.label}
+            </Tabs.Trigger>
+          ))}
+        </Tabs.List>
+
+        <Tabs.Content value="claude" className={agent.panel}>
+          <CopyBox label="claude mcp add" value={mcpAddCommand(origin, value)} multiline />
+        </Tabs.Content>
+
+        <Tabs.Content value="json" className={agent.panel}>
+          <CopyBox label="JSON config" value={mcpJsonConfig(origin, value)} multiline />
+        </Tabs.Content>
+
+        <Tabs.Content value="remote" className={agent.panel}>
+          <CopyBox label="JSON config" value={mcpRemoteConfig(origin, value)} multiline />
+        </Tabs.Content>
+
+        <Tabs.Content value="other" className={agent.panel}>
+          <CopyBox label="URL" value={mcpEndpoint(origin)} />
+          <CopyBox label="Header" value={authHeader(value)} />
+        </Tabs.Content>
+      </Tabs.Root>
+
+      {!token && <p className={ui.muted}>Create a token above; it is shown once.</p>}
+    </div>
+  );
+}
+
+function CopyBox({
+  label,
+  value,
+  multiline = false,
+}: {
+  label: string;
+  value: string;
+  multiline?: boolean;
+}) {
   const [copied, setCopied] = useState(false);
 
   const copy = async () => {
@@ -187,10 +245,15 @@ function CopyBox({ label, value }: { label: string; value: string }) {
   };
 
   return (
-    <div className={agent.copyBox}>
+    <div className={cx(agent.copyBox, multiline && agent.copyBoxMultiline)}>
       <span className={cx(agent.copyLabel, ui.muted)}>{label}</span>
       <code className={agent.copyValue}>{value}</code>
-      <button type="button" className={cx(ui.button, ui.ghost)} onClick={copy}>
+      <button
+        type="button"
+        className={cx(ui.button, ui.ghost)}
+        aria-label={`Copy ${label}`}
+        onClick={copy}
+      >
         {copied ? 'Copied' : 'Copy'}
       </button>
     </div>

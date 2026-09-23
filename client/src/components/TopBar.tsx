@@ -107,7 +107,7 @@ export function TopBar({
         <Presence peers={editor.peers} status={editor.status} lastError={editor.lastError} />
       )}
       <button type="button" className={cx(ui.button, ui.ghost)} onClick={onAgent}>
-        Agent
+        Connect AI
       </button>
       {editor && <ExportButton editor={editor} />}
 
@@ -121,6 +121,10 @@ export function TopBar({
             <DropdownMenu.Separator className={styles.separator} />
             <DropdownMenu.Label className={styles.label}>Theme</DropdownMenu.Label>
             <ThemeToggle value={theme} onChange={onTheme} itemClassName={styles.item} />
+            <DropdownMenu.Separator className={styles.separator} />
+            <DropdownMenu.Item className={styles.item} onSelect={onAgent}>
+              Connect AI…
+            </DropdownMenu.Item>
             <DropdownMenu.Separator className={styles.separator} />
             <DropdownMenu.Item className={styles.item} onSelect={onSignOut}>
               Sign out
