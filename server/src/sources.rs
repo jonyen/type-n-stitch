@@ -225,7 +225,25 @@ pub async fn stitched_words(state: &AppState, sources: &[Source]) -> AppResult<V
 pub async fn views(state: &AppState, sources: &[Source]) -> AppResult<Vec<SourceView>> {
     let mut out = Vec::with_capacity(sources.len());
     for (index, source) in sources.iter().enumerate() {
-        let meta = read_meta(&state.config.data_dir.join(&source.media)).await?;
+        // A source whose files are gone reads as a failed transcript with the
+        // fold's timing, rather than making the whole project unopenable.
+        let meta = match read_meta(&state.config.data_dir.join(&source.media)).await {
+            Ok(meta) => meta,
+            Err(e) => {
+                tracing::warn!(id = source.media, "source unreadable: {e:?}");
+                out.push(SourceView {
+                    index,
+                    media_id: source.media.clone(),
+                    url: String::new(),
+                    filename: String::new(),
+                    kind: MediaKind::Video,
+                    offset: source.offset,
+                    duration: source.duration,
+                    transcript: TranscriptStatus::Error,
+                });
+                continue;
+            }
+        };
         out.push(SourceView {
             index,
             media_id: source.media.clone(),
@@ -1325,6 +1343,49 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         body
+    }
+
+    #[tokio::test]
+    async fn a_source_whose_files_are_gone_still_lets_the_project_open() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = seed_source(&state, 4.0, &["d"]).await;
+        add_source(&state, &project, &owner, &second).await.unwrap();
+        tokio::fs::remove_dir_all(state.config.data_dir.join(&second.id))
+            .await
+            .unwrap();
+
+        let (status, body, _) = call(
+            app(&state),
+            json_req(
+                Method::GET,
+                &format!("/api/projects/{}", project.id),
+                Some(&ada),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let sources = body["project"]["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[1]["mediaId"], second.id.as_str());
+        assert_eq!(sources[1]["transcript"], "error");
+        assert_eq!(sources[1]["duration"], 4.0, "from the fold");
+
+        let body = transcribe(&state, &ada, &project.id).await;
+        assert_eq!(statuses(&body), ["ready", "error"]);
+
+        let identity = crate::mcp::McpIdentity {
+            bot: crate::auth::ensure_bot(&state.db, &owner).await.unwrap(),
+            owner,
+        };
+        let session = crate::mcp::McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
     }
 
     fn ids(body: &Value) -> Vec<String> {
