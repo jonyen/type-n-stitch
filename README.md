@@ -24,8 +24,10 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    boundaries — captions are text drawn over a word range, and a project-wide (or per-cut) transition
    dips to black where pieces meet; all three are operations like any other. Splitting adds a
    boundary between clips and the clip strip lets you drag clips into a new order; the output
-   plays pieces in that order while every edit stays anchored to its words. B-roll shows an
-   uploaded shot over a range of words (the voice continues); music plays an uploaded file
+   plays pieces in that order while every edit stays anchored to its words. A layer shows an
+   uploaded shot, or a stretch of one of the project's own videos, over a range of words on track
+   V2 or V3, full frame or as a picture-in-picture corner, muted or at a set level (the voice
+   continues); music plays an uploaded file
    under a range, ducked beneath speech. Everyone with the
    project open holds
    a WebSocket (`GET /api/projects/:id/ws`); after each append the server pushes its fold to all
@@ -33,7 +35,7 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    are playing. Edits still go over `POST …/ops`, one at a time from a queue that retries after a
    dropped connection — the socket only fans out. On the timeline, the Razor tool (C) splits a
    clip at the nearest word start and the Range tool (X) cuts out a dragged stretch, snapped to
-   word boundaries and undone in one step; Select (V) seeks, reorders clips and picks B-roll or
+   word boundaries and undone in one step; Select (V) seeks, reorders clips and picks layer or
    music bars.
 3. **Preview.** The browser plays the original file and honours the edit list live: an
    animation-frame loop seeks past cuts as the playhead reaches them, and for an overdub it
@@ -43,7 +45,9 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    one ffmpeg `filter_complex`: `trim`/`atrim` + `setpts` per kept piece, a `select`/`tpad`
    freeze-frame over the synthesized audio per overdub, title cards as looped PNG inputs,
    `overlay` for captions, and `fade`/`afade` for dip transitions, joined with a `concat`, plus
-   `overlay` per B-roll window and `amix` with a word-timed `volume` envelope for music.
+   `overlay` per layer window (V2, then V3; picture-in-picture layers scaled to 30 % of the width
+   first), every source fitted onto the canvas of the first video with a picture, and `amix` with a
+   word-timed `volume` envelope for music.
    ffmpeg renders an mp4
    (or mp3/wav for audio-only sources) and the UI offers a download.
 
@@ -126,11 +130,11 @@ to PNGs in Rust and composited by ffmpeg's `overlay` — no extra ffmpeg build f
 (`drawtext`/libfreetype) are needed. The same files are served at `/fonts/` so the client's
 preview can match the exported look.
 
-**Assets.** B-roll and music files you upload land under `data/<media id>/assets/<asset
+**Assets.** Layer videos and music files you upload land under `data/<media id>/assets/<asset
 id>.<ext>` and are served the same way as the source media. Allowed extensions are `mp3`,
 `wav`, `m4a`, `mp4`, `mov`, `aac`, `ogg` and `webm`; ffprobe reads back the actual kind
 (video or audio) rather than trusting the extension, so the wrong kind of file for the button
-you used it on still fails cleanly. Deleting an asset that a B-roll or music edit still
+you used it on still fails cleanly. Deleting an asset that a layer or music edit still
 references is a 409, naming how many edits use it — remove those edits first.
 
 | Variable                     | Default                                                          | Purpose                                                 |
