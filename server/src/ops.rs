@@ -6,9 +6,9 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use engine::{
-    apply_op, fold, piece_starts, Edit, Frame, MediaKind, Op, ProjectDoc, SeqOp, Transition, EPS,
-    MAX_AUDIO, MAX_BROLL, MAX_CAPTIONS, MAX_GAIN_DB, MAX_SPEAKERS, MAX_SPLITS, MAX_TITLES,
-    MIN_GAIN_DB,
+    all_sources, apply_op, fold, piece_starts, stitched_duration, Edit, Frame, MediaKind, Op,
+    ProjectDoc, SeqOp, Source, Transition, EPS, MAX_AUDIO, MAX_BROLL, MAX_CAPTIONS, MAX_GAIN_DB,
+    MAX_SPEAKERS, MAX_SPLITS, MAX_TITLES, MIN_GAIN_DB,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,6 +19,7 @@ use crate::db::now;
 use crate::error::{AppError, AppResult};
 use crate::projects::{summary, Project, ProjectAccess};
 use crate::routes::read_meta;
+use crate::sources::MAX_SOURCES;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +45,10 @@ pub struct DocState {
     pub transition: Transition,
     pub splits: Vec<f64>,
     pub order: Vec<f64>,
+    /// Sources appended after the project's own media, exactly as the fold
+    /// holds them (`doc.sources`). `GET /api/projects/:id` lists every source,
+    /// the first included, in `project.sources`.
+    pub sources: Vec<Source>,
 }
 
 /// Every stored operation for a project, in order. Takes any executor so the
@@ -150,12 +155,13 @@ pub async fn doc_state(state: &AppState, project: &Project, user: &User) -> AppR
         transition: doc.transition,
         splits: doc.splits,
         order: doc.order,
+        sources: doc.sources,
     })
 }
 
 /// Reject operations that cannot apply to this media: ranges outside the
 /// duration, overdub audio that is not this media's, undo of someone else's.
-/// `duration` is read once by the caller and shared across the whole batch;
+/// `first` is read once by the caller and shared across the whole batch;
 /// `current` is the fold so far, batch included, so the per-project caps and
 /// split/order checks see what this batch has already added.
 #[allow(clippy::too_many_arguments)]
@@ -166,9 +172,12 @@ async fn validate(
     user: &User,
     index: usize,
     op: &Op,
-    duration: f64,
+    first: &Source,
     current: &ProjectDoc,
 ) -> AppResult<()> {
+    // Every range is checked against the stitched main track, which this
+    // batch may itself have lengthened with an `AddSource`.
+    let duration = stitched_duration(&all_sources(first.clone(), &current.sources));
     let dir = state.config.data_dir.join(&project.media_id);
     let check_transition = |transition: Transition| -> AppResult<()> {
         if transition == Transition::Crossfade {
@@ -187,6 +196,36 @@ async fn validate(
             ));
         }
         Ok(())
+    };
+    let check_track = |track: u8| -> AppResult<()> {
+        if track == 2 || track == 3 {
+            Ok(())
+        } else {
+            Err(AppError::bad_request_at(
+                index,
+                "a layer goes on track 2 or 3",
+            ))
+        }
+    };
+    let check_sound = |audio: Option<f64>| -> AppResult<()> {
+        match audio {
+            Some(db) if !(MIN_GAIN_DB..=MAX_GAIN_DB).contains(&db) => Err(
+                AppError::bad_request_at(index, "layer sound must be between -30 and 12 dB"),
+            ),
+            _ => Ok(()),
+        }
+    };
+    let layer_at = |track: u8, start: f64| {
+        current.edits.iter().any(|e| {
+            matches!(e, Edit::Layer { track: t, start: s, .. } if *t == track && (s - start).abs() < EPS)
+        })
+    };
+    let layer_count = || {
+        current
+            .edits
+            .iter()
+            .filter(|e| matches!(e, Edit::Layer { .. }))
+            .count()
     };
     match op {
         Op::Cut { start, end } => check_range(*start, *end),
@@ -265,6 +304,44 @@ async fn validate(
                     index,
                     "that operation cannot be targeted",
                 ));
+            }
+            if want_undo_row {
+                // A redo revives whatever that undo row undid. A source can
+                // only come back where it was if that is still the end.
+                let revived: Option<(String,)> = sqlx::query_as(
+                    "SELECT op FROM edit_ops WHERE project_id = ? AND undone_by = ?",
+                )
+                .bind(&project.id)
+                .bind(target_seq)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if let Some((json,)) = revived {
+                    if let Ok(Op::AddSource { offset, .. }) = serde_json::from_str::<Op>(&json) {
+                        if (offset - duration).abs() > EPS {
+                            return Err(AppError::bad_request_at(
+                                index,
+                                "a video was added since; this one cannot come back in its old place",
+                            ));
+                        }
+                    }
+                }
+            } else if kind == "addsource" {
+                // Undoing a video in the middle would leave a hole in the
+                // main track: the later videos keep their offsets.
+                let (later,): (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM edit_ops WHERE project_id = ? AND seq > ?
+                     AND undone_by IS NULL AND json_extract(op, '$.kind') = 'addsource'",
+                )
+                .bind(&project.id)
+                .bind(target_seq)
+                .fetch_one(&mut **tx)
+                .await?;
+                if later > 0 {
+                    return Err(AppError::bad_request_at(
+                        index,
+                        "remove the videos added after this one first",
+                    ));
+                }
             }
             Ok(())
         }
@@ -412,47 +489,137 @@ async fn validate(
                 _ => Ok(()),
             }
         }
+        Op::AddSource {
+            media,
+            offset,
+            duration: length,
+        } => {
+            if all_sources(first.clone(), &current.sources).len() >= MAX_SOURCES {
+                return Err(AppError::bad_request_at(
+                    index,
+                    format!("a project holds at most {MAX_SOURCES} videos"),
+                ));
+            }
+            if (offset - duration).abs() > EPS {
+                return Err(AppError::bad_request_at(
+                    index,
+                    format!("a video can only be added at the end, at {duration} s"),
+                ));
+            }
+            if !crate::sources::in_registry(&mut **tx, &project.id, media).await? {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "that media was not uploaded to this project",
+                ));
+            }
+            let meta = read_meta(&state.config.data_dir.join(media))
+                .await
+                .map_err(|_| AppError::bad_request_at(index, "that media is missing"))?;
+            if *length <= 0.0 || (meta.duration - length).abs() > EPS {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "the duration does not match the media",
+                ));
+            }
+            Ok(())
+        }
+        Op::AddLayer {
+            track,
+            start,
+            end,
+            media,
+            offset,
+            audio,
+            ..
+        } => {
+            check_track(*track)?;
+            check_range(*start, *end)?;
+            if *end <= *start {
+                return Err(AppError::bad_request_at(index, "layer range is empty"));
+            }
+            let Some((kind, length)) =
+                crate::sources::layer_media(tx, state, project, media).await?
+            else {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "that media does not belong to this project",
+                ));
+            };
+            if kind != MediaKind::Video {
+                return Err(AppError::bad_request_at(index, "a layer needs a video"));
+            }
+            if *offset < 0.0 || offset + (end - start) > length + EPS {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "the layer runs past the end of its video",
+                ));
+            }
+            check_sound(*audio)?;
+            if layer_count() >= MAX_BROLL {
+                return Err(AppError::bad_request_at(index, "too many layers"));
+            }
+            Ok(())
+        }
+        Op::SetLayer {
+            track,
+            start,
+            to_track,
+            audio,
+            ..
+        } => {
+            check_track(*track)?;
+            check_track(*to_track)?;
+            if !layer_at(*track, *start) {
+                return Err(AppError::bad_request_at(
+                    index,
+                    format!("no layer starts at {start} on V{track}"),
+                ));
+            }
+            if to_track != track && layer_at(*to_track, *start) {
+                return Err(AppError::bad_request_at(
+                    index,
+                    format!("V{to_track} already has a layer starting there"),
+                ));
+            }
+            check_sound(*audio)
+        }
+        Op::RemoveLayer { track, start } => {
+            check_track(*track)?;
+            check_range(*start, *start)
+        }
+        // B-roll folds to a track-2, full-frame, muted layer, and its removal
+        // to a track-2 `RemoveLayer`: each is validated as the op it folds to,
+        // so both share one code path with the layer ops.
         Op::AddBroll {
             start,
             end,
             media,
             offset,
         } => {
-            check_range(*start, *end)?;
-            if *end <= *start {
-                return Err(AppError::bad_request_at(index, "B-roll range is empty"));
-            }
-            let Some((kind, length)) = crate::assets::find(&mut **tx, &project.id, media).await?
-            else {
-                return Err(AppError::bad_request_at(
-                    index,
-                    "asset does not belong to this project",
-                ));
+            let layer = Op::AddLayer {
+                track: 2,
+                start: *start,
+                end: *end,
+                media: media.clone(),
+                offset: *offset,
+                frame: Frame::Full,
+                audio: None,
             };
-            if kind != MediaKind::Video {
-                return Err(AppError::bad_request_at(
-                    index,
-                    "B-roll needs a video asset",
-                ));
-            }
-            if *offset < 0.0 || offset + (end - start) > length + EPS {
-                return Err(AppError::bad_request_at(
-                    index,
-                    "B-roll runs past the end of the asset",
-                ));
-            }
-            if current
-                .edits
-                .iter()
-                .filter(|e| matches!(e, Edit::Layer { track: 2, .. }))
-                .count()
-                >= MAX_BROLL
-            {
-                return Err(AppError::bad_request_at(index, "too many B-roll shots"));
-            }
-            Ok(())
+            Box::pin(validate(
+                tx, state, project, user, index, &layer, first, current,
+            ))
+            .await
         }
-        Op::RemoveBroll { start } => check_range(*start, *start),
+        Op::RemoveBroll { start } => {
+            let layer = Op::RemoveLayer {
+                track: 2,
+                start: *start,
+            };
+            Box::pin(validate(
+                tx, state, project, user, index, &layer, first, current,
+            ))
+            .await
+        }
         Op::AddAudio {
             start,
             end,
@@ -522,62 +689,6 @@ async fn validate(
             Ok(())
         }
         Op::RemoveAudio { start } => check_range(*start, *start),
-        // Task 3 validates these against the stitched timeline and the source
-        // registry; until then nothing may store them, except a track-2,
-        // full-frame, muted AddLayer, which is what the client now sends for
-        // B-roll — it is validated exactly as `Op::AddBroll` was, so B-roll
-        // keeps working between this task and Task 3.
-        Op::AddLayer {
-            track: 2,
-            start,
-            end,
-            media,
-            offset,
-            frame: Frame::Full,
-            audio: None,
-        } => {
-            check_range(*start, *end)?;
-            if *end <= *start {
-                return Err(AppError::bad_request_at(index, "B-roll range is empty"));
-            }
-            let Some((kind, length)) = crate::assets::find(&mut **tx, &project.id, media).await?
-            else {
-                return Err(AppError::bad_request_at(
-                    index,
-                    "asset does not belong to this project",
-                ));
-            };
-            if kind != MediaKind::Video {
-                return Err(AppError::bad_request_at(
-                    index,
-                    "B-roll needs a video asset",
-                ));
-            }
-            if *offset < 0.0 || offset + (end - start) > length + EPS {
-                return Err(AppError::bad_request_at(
-                    index,
-                    "B-roll runs past the end of the asset",
-                ));
-            }
-            if current
-                .edits
-                .iter()
-                .filter(|e| matches!(e, Edit::Layer { track: 2, .. }))
-                .count()
-                >= MAX_BROLL
-            {
-                return Err(AppError::bad_request_at(index, "too many B-roll shots"));
-            }
-            Ok(())
-        }
-        // The client's B-roll delete now sends this; validated exactly as
-        // `Op::RemoveBroll` was, so removal keeps working between this task
-        // and Task 3.
-        Op::RemoveLayer { track: 2, start } => check_range(*start, *start),
-        Op::AddSource { .. }
-        | Op::AddLayer { .. }
-        | Op::SetLayer { .. }
-        | Op::RemoveLayer { .. } => Err(AppError::bad_request_at(index, "not supported yet")),
     }
 }
 
@@ -597,8 +708,7 @@ pub async fn apply_ops(
     user: &User,
     ops: Vec<ClientOp>,
 ) -> AppResult<DocState> {
-    let dir = state.config.data_dir.join(&project.media_id);
-    let duration = read_meta(&dir).await?.duration;
+    let first = crate::sources::first_source(state, project).await?;
     let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
     // Title and caption caps count what the project already holds plus what
     // this batch adds, so a single batch cannot slip past them either. The
@@ -625,7 +735,7 @@ pub async fn apply_ops(
             user,
             index,
             &client_op.op,
-            duration,
+            &first,
             &current,
         )
         .await?;
@@ -695,6 +805,7 @@ pub async fn apply_ops(
                 transition: doc.transition,
                 splits: doc.splits,
                 order: doc.order,
+                sources: doc.sources,
             },
         );
     }
@@ -718,13 +829,20 @@ pub async fn submit(
     ))
 }
 
-/// `GET /api/projects/:id` — the project summary plus its folded document.
+/// `GET /api/projects/:id` — the project summary, its sources, and its
+/// folded document. `project.media` is the first source and stays for one
+/// release, so a tab running an older client keeps working.
 pub async fn get_project(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
 ) -> AppResult<Json<Value>> {
-    let project = summary(&state, &access.project, access.role).await?;
+    let summary = summary(&state, &access.project, access.role).await?;
     let doc = doc_state(&state, &access.project, &access.user).await?;
+    // The doc holds the appended sources; the project lists every one, first included.
+    let first = crate::sources::first_source(&state, &access.project).await?;
+    let sources = crate::sources::views(&state, &all_sources(first, &doc.sources)).await?;
+    let mut project = serde_json::to_value(summary)?;
+    project["sources"] = serde_json::to_value(sources)?;
     Ok(Json(json!({ "project": project, "doc": doc })))
 }
 
@@ -822,6 +940,12 @@ mod tests {
         assert_eq!(body["doc"]["headSeq"], 0);
         assert_eq!(body["doc"]["edits"], json!([]));
         assert_eq!(body["doc"]["undoable"], Value::Null);
+        assert_eq!(body["project"]["sources"].as_array().unwrap().len(), 1);
+        assert_eq!(body["project"]["sources"][0]["offset"], 0.0);
+        assert!(
+            body["doc"]["sources"].as_array().unwrap().is_empty(),
+            "appended sources only"
+        );
     }
 
     #[tokio::test]
@@ -1504,8 +1628,27 @@ mod tests {
         assert_eq!(body["edits"][0]["gain"], 3.0);
     }
 
+    fn layer_op(id: &str, track: Value, start: f64, end: f64, media: &str) -> Value {
+        json!({ "opId": id, "kind": "addlayer", "track": track, "start": start, "end": end,
+                "media": media, "offset": 0.0, "frame": "pipBottomLeft", "audio": -6.0 })
+    }
+
+    async fn head_seq(state: &Arc<AppState>, cookie: &str, project: &str) -> i64 {
+        let (_, body, _) = call(
+            app(state),
+            json_req(
+                Method::GET,
+                &format!("/api/projects/{project}"),
+                Some(cookie),
+                None,
+            ),
+        )
+        .await;
+        body["doc"]["headSeq"].as_i64().unwrap()
+    }
+
     #[tokio::test]
-    async fn removelayer_on_track_2_is_accepted_but_track_3_is_not_supported_yet() {
+    async fn removelayer_is_accepted_on_tracks_2_and_3_only() {
         let (state, _d, ada, _bob, project) = setup(None).await;
         let p = project_of(&state, &project).await;
         let clip = seed_asset(&state, &p, MediaKind::Video, 3.0).await;
@@ -1513,40 +1656,173 @@ mod tests {
             &state,
             &ada,
             &project,
-            vec![json!({
-                "opId": "add",
-                "kind": "addlayer",
-                "track": 2,
-                "start": 1.0,
-                "end": 3.0,
-                "media": clip.id,
-                "offset": 1.0,
-                "frame": "full",
-                "audio": null,
-            })],
+            vec![
+                layer_op("v2", json!(2), 1.0, 3.0, &clip.id),
+                layer_op("v3", json!(3), 1.0, 3.0, &clip.id),
+            ],
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["edits"].as_array().unwrap().len(), 1);
-        // A track-2 RemoveLayer is accepted and actually removes the layer.
+        assert_eq!(body["edits"].as_array().unwrap().len(), 2);
+        for track in [0, 1, 4] {
+            let (status, body) = post_ops(
+                &state,
+                &ada,
+                &project,
+                vec![json!({ "opId": format!("rm{track}"), "kind": "removelayer", "track": track, "start": 1.0 })],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "V{track}: {body}");
+        }
+        for track in [3, 2] {
+            let (status, body) = post_ops(
+                &state,
+                &ada,
+                &project,
+                vec![json!({ "opId": format!("ok{track}"), "kind": "removelayer", "track": track, "start": 1.0 })],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "V{track}: {body}");
+        }
+        let (_, body) = post_ops(&state, &ada, &project, vec![]).await;
+        assert_eq!(body["edits"], json!([]), "both layers removed");
+    }
+
+    #[tokio::test]
+    async fn a_good_addlayer_is_accepted_on_track_2_and_on_track_3() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let p = project_of(&state, &project).await;
+        let clip = seed_asset(&state, &p, MediaKind::Video, 3.0).await;
+        for track in [2, 3] {
+            let (status, body) = post_ops(
+                &state,
+                &ada,
+                &project,
+                vec![layer_op(
+                    &format!("l{track}"),
+                    json!(track),
+                    4.0,
+                    6.0,
+                    &clip.id,
+                )],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "V{track}: {body}");
+            let layer = body["edits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["track"] == track)
+                .cloned()
+                .unwrap();
+            assert_eq!(layer["kind"], "layer");
+            assert_eq!(layer["frame"], "pipBottomLeft");
+            assert_eq!(layer["audio"], -6.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn addlayer_refuses_a_foreign_asset_and_a_bad_track() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let p = project_of(&state, &project).await;
+        let clip = seed_asset(&state, &p, MediaKind::Video, 3.0).await;
+        let owner = me(&state, &ada).await;
+        let other_media = seed_media(&state, 10.0).await;
+        let other = create_project(&state.db, &owner, &other_media, "Other")
+            .await
+            .unwrap();
+        let foreign = seed_asset(&state, &other, MediaKind::Video, 3.0).await;
+        let before = head_seq(&state, &ada, &project).await;
+        let cases = [
+            (
+                "foreign asset",
+                layer_op("f", json!(2), 1.0, 2.0, &foreign.id),
+            ),
+            (
+                "another project's media",
+                layer_op("m", json!(2), 1.0, 2.0, &other_media),
+            ),
+            ("track 0", layer_op("t0", json!(0), 1.0, 2.0, &clip.id)),
+            (
+                "the main track",
+                layer_op("t1", json!(1), 1.0, 2.0, &clip.id),
+            ),
+            ("track 4", layer_op("t4", json!(4), 1.0, 2.0, &clip.id)),
+        ];
+        for (what, op) in cases {
+            let (status, body) = post_ops(&state, &ada, &project, vec![op]).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {body}");
+        }
+        assert_eq!(
+            head_seq(&state, &ada, &project).await,
+            before,
+            "nothing stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_new_ops_are_rejected() {
+        let (state, _d, ada, _bob, project) = setup(None).await;
+        let p = project_of(&state, &project).await;
+        let clip = seed_asset(&state, &p, MediaKind::Video, 3.0).await;
         let (status, body) = post_ops(
             &state,
             &ada,
             &project,
-            vec![json!({ "opId": "rm2", "kind": "removelayer", "track": 2, "start": 1.0 })],
+            vec![layer_op("base", json!(2), 1.0, 2.0, &clip.id)],
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["edits"].as_array().unwrap().len(), 0);
-        // A track-3 RemoveLayer is not supported yet.
-        let (status, body) = post_ops(
-            &state,
-            &ada,
-            &project,
-            vec![json!({ "opId": "rm3", "kind": "removelayer", "track": 3, "start": 1.0 })],
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        assert_eq!(body["error"], "not supported yet");
+        let before = head_seq(&state, &ada, &project).await;
+        let media = p.media_id.clone();
+        let layer = |patch: Value| {
+            let mut op = layer_op("x", json!(3), 1.0, 2.0, &clip.id);
+            for (k, v) in patch.as_object().unwrap() {
+                op[k] = v.clone();
+            }
+            op
+        };
+        // Shapes serde refuses: the extractor rejects the whole batch.
+        let unparsable = [
+            json!({ "opId": "s1", "kind": "addsource", "media": media, "offset": 10.0 }),
+            json!({ "opId": "s2", "kind": "addsource", "media": 7, "offset": 10.0, "duration": 4.0 }),
+            layer(json!({ "frame": "corner" })),
+            layer(json!({ "frame": null })),
+            layer(json!({ "track": "V2" })),
+            layer(json!({ "track": 300 })),
+            json!({ "opId": "t1", "kind": "setlayer", "track": 2, "start": 1.0, "frame": "full", "audio": null }),
+            json!({ "opId": "t2", "kind": "setlayer", "track": 2, "start": 1.0, "toTrack": 3, "frame": "big", "audio": null }),
+            json!({ "opId": "r1", "kind": "removelayer", "start": 1.0 }),
+            json!({ "opId": "r2", "kind": "removelayer", "track": 2 }),
+        ];
+        for op in unparsable {
+            let (status, body) = post_ops(&state, &ada, &project, vec![op.clone()]).await;
+            assert!(status.is_client_error(), "{op}: {status} {body}");
+        }
+        // Well-formed but invalid: validation refuses each with a 400.
+        let invalid = [
+            json!({ "opId": "a1", "kind": "addsource", "media": media, "offset": -1.0, "duration": 10.0 }),
+            json!({ "opId": "a2", "kind": "addsource", "media": media, "offset": 10.0, "duration": 0.0 }),
+            layer(json!({ "end": 1.0 })),                // empty range
+            layer(json!({ "start": 2.0, "end": 1.0 })),  // backwards
+            layer(json!({ "start": 9.0, "end": 11.0 })), // past the stitched end
+            layer(json!({ "offset": -0.5 })),            // before the video starts
+            layer(json!({ "offset": 2.5 })),             // past the video's end
+            layer(json!({ "audio": -31.0 })),            // too quiet
+            json!({ "opId": "t3", "kind": "setlayer", "track": 2, "start": 1.0, "toTrack": 4, "frame": "full", "audio": null }),
+            json!({ "opId": "t4", "kind": "setlayer", "track": 2, "start": 1.0, "toTrack": 3, "frame": "full", "audio": 13.0 }),
+            json!({ "opId": "t5", "kind": "setlayer", "track": 3, "start": 1.0, "toTrack": 2, "frame": "full", "audio": null }),
+            json!({ "opId": "r3", "kind": "removelayer", "track": 2, "start": 11.0 }),
+            json!({ "opId": "r4", "kind": "removelayer", "track": 2, "start": -1.0 }),
+        ];
+        for op in invalid {
+            let (status, body) = post_ops(&state, &ada, &project, vec![op.clone()]).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{op}: {body}");
+        }
+        assert_eq!(
+            head_seq(&state, &ada, &project).await,
+            before,
+            "nothing stored"
+        );
     }
 }

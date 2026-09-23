@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::db::now;
 use crate::error::{AppError, AppResult};
 use crate::projects::{Project, ProjectAccess};
+use crate::sources::LayerMedia;
 use crate::{media, AppState};
 
 const ALLOWED_EXTENSIONS: &[&str] = &["mp3", "wav", "m4a", "mp4", "mov", "aac", "ogg", "webm"];
@@ -116,11 +117,12 @@ where
     Ok(row.map(|(k, d)| (kind_of(&k), d)))
 }
 
+/// How many layers and music edits use `asset_id`.
 pub fn references(edits: &[Edit], asset_id: &str) -> (usize, usize) {
-    edits.iter().fold((0, 0), |(b, a), e| match e {
-        Edit::Layer { media, .. } if media == asset_id => (b + 1, a),
-        Edit::Audio { media, .. } if media == asset_id => (b, a + 1),
-        _ => (b, a),
+    edits.iter().fold((0, 0), |(l, a), e| match e {
+        Edit::Layer { media, .. } if media == asset_id => (l + 1, a),
+        Edit::Audio { media, .. } if media == asset_id => (l, a + 1),
+        _ => (l, a),
     })
 }
 
@@ -128,6 +130,10 @@ fn assets_dir(state: &AppState, project: &Project) -> PathBuf {
     state.config.data_dir.join(&project.media_id).join("assets")
 }
 
+/// The file behind every layer and music edit, by media id. Music plays
+/// project assets only. A layer resolves through
+/// `sources::resolve_layer_media`, the same rule op validation uses: a
+/// project asset, or any media in the project's registry.
 pub async fn asset_files(
     state: &AppState,
     project: &Project,
@@ -138,19 +144,45 @@ pub async fn asset_files(
         .into_iter()
         .map(|a| (a.id.clone(), a))
         .collect();
+    let not_ours = |media: &str| {
+        AppError::bad_request(format!("asset {media} does not belong to this project"))
+    };
+    let mut conn = state.db.acquire().await?;
     let mut files = HashMap::new();
     for edit in edits {
-        let (Edit::Layer { media, .. } | Edit::Audio { media, .. }) = edit else {
-            continue;
+        let (media, layer) = match edit {
+            Edit::Layer { media, .. } => (media, true),
+            Edit::Audio { media, .. } => (media, false),
+            _ => continue,
         };
-        let asset = by_id.get(media).ok_or_else(|| {
-            AppError::bad_request(format!("asset {media} does not belong to this project"))
-        })?;
-        let path = assets_dir(state, project).join(format!("{}.{}", asset.id, asset.ext));
+        if files.contains_key(media) {
+            continue;
+        }
+        let found = if layer {
+            crate::sources::resolve_layer_media(&mut conn, &project.id, media).await?
+        } else {
+            by_id.get(media).map(|a| LayerMedia::Asset {
+                kind: a.kind,
+                duration: a.duration,
+            })
+        };
+        let (path, name) = match found {
+            Some(LayerMedia::Asset { .. }) => {
+                let asset = by_id.get(media).ok_or_else(|| not_ours(media))?;
+                (
+                    assets_dir(state, project).join(format!("{}.{}", asset.id, asset.ext)),
+                    asset.name.clone(),
+                )
+            }
+            Some(LayerMedia::Source) => {
+                let (path, meta) = crate::sources::source_file(state, media).await?;
+                (path, meta.filename)
+            }
+            None => return Err(not_ours(media)),
+        };
         if !path.is_file() {
             return Err(AppError::bad_request(format!(
-                "the file for {} is missing",
-                asset.name
+                "the file for {name} is missing"
             )));
         }
         files.insert(media.clone(), path);
@@ -305,12 +337,12 @@ pub async fn delete(
         .find(|a| a.id == asset_id)
         .ok_or_else(|| AppError::not_found(format!("no asset {asset_id}")))?;
     let (_, doc) = crate::ops::load_doc(&state, &project.id).await?;
-    let (brolls, audios) = references(&doc.edits, &asset.id);
-    if brolls + audios > 0 {
+    let (layers, audios) = references(&doc.edits, &asset.id);
+    if layers + audios > 0 {
         return Err(AppError::conflict(format!(
-            "{} is used by {brolls} B-roll and {audios} music edit{}; remove them first",
+            "{} is used by {layers} layer and {audios} music edit{}; remove them first",
             asset.name,
-            if brolls + audios == 1 { "" } else { "s" }
+            if layers + audios == 1 { "" } else { "s" }
         )));
     }
     sqlx::query("DELETE FROM project_assets WHERE project_id = ? AND id = ?")

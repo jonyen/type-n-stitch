@@ -130,6 +130,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                 transition: doc.transition,
                 splits: doc.splits,
                 order: doc.order,
+                sources: doc.sources,
                 peers,
                 you,
             }
@@ -200,6 +201,7 @@ async fn session(state: Arc<AppState>, access: ProjectAccess, socket: WebSocket)
                                 transition: doc.transition,
                                 splits: doc.splits,
                                 order: doc.order,
+                                sources: doc.sources,
                             },
                             Err(e) => ServerMsg::Error { code: "load".into(), detail: format!("{e:?}") },
                         };
@@ -350,6 +352,8 @@ mod tests {
         let hello = next_json(&mut a).await;
         assert_eq!(hello["t"], "hello");
         assert_eq!(hello["headSeq"], 0);
+        // Appended sources only, as the fold holds them: none in a new project.
+        assert!(hello["sources"].as_array().unwrap().is_empty());
         assert_eq!(hello["you"]["user"]["displayName"], "ada@example.com");
         assert_eq!(hello["peers"].as_array().unwrap().len(), 1); // just ada
                                                                  // Our own join echoes back down the socket; the client filters it.
@@ -448,6 +452,7 @@ mod tests {
                     transition: engine::Transition::None,
                     splits: vec![],
                     order: vec![],
+                    sources: vec![],
                 },
             );
         }

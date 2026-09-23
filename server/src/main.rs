@@ -16,6 +16,7 @@ mod media;
 mod ops;
 mod projects;
 mod routes;
+mod sources;
 #[cfg(test)]
 mod test_util;
 mod tokens;

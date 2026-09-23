@@ -102,7 +102,10 @@ pub async fn upload(
     Err(AppError::bad_request("missing `file` field"))
 }
 
-async fn store_upload(
+/// Store a multipart `file` field as a new media item and probe it. On any
+/// failure after the directory exists, the directory is removed, so a
+/// rejected upload leaves nothing behind.
+pub(crate) async fn store_upload(
     state: &AppState,
     mut field: axum::extract::multipart::Field<'_>,
 ) -> AppResult<Meta> {
@@ -127,21 +130,30 @@ async fn store_upload(
     let source_name = format!("source.{ext}");
     let source = dir.join(&source_name);
 
-    let mut file = tokio::fs::File::create(&source)
-        .await
-        .context("creating upload")?;
-    while let Some(chunk) = field
-        .chunk()
-        .await
-        .map_err(|e| AppError::bad_request(format!("upload interrupted: {e}")))?
-    {
-        file.write_all(&chunk).await.context("writing upload")?;
+    let stored = async {
+        let mut file = tokio::fs::File::create(&source)
+            .await
+            .context("creating upload")?;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| AppError::bad_request(format!("upload interrupted: {e}")))?
+        {
+            file.write_all(&chunk).await.context("writing upload")?;
+        }
+        file.flush().await.context("flushing upload")?;
+        media::probe(&source)
+            .await
+            .map_err(|e| AppError::bad_request(format!("could not read media: {e:#}")))
     }
-    file.flush().await.context("flushing upload")?;
-
-    let probe = media::probe(&source)
-        .await
-        .map_err(|e| AppError::bad_request(format!("could not read media: {e:#}")))?;
+    .await;
+    let probe = match stored {
+        Ok(probe) => probe,
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            return Err(e);
+        }
+    };
     let meta = Meta {
         url: format!("/data/{id}/{source_name}"),
         id,
@@ -283,16 +295,34 @@ pub struct Thumbnails {
 /// Sprite sheet cache file. Bump the version when the sheet layout changes.
 const THUMBS_CACHE: &str = "thumbs-v1.jpg";
 
+#[derive(Default, Deserialize)]
+pub struct ThumbnailsRequest {
+    /// Which of the project's sources; the first when omitted.
+    media: Option<String>,
+}
+
 /// `POST /api/projects/:id/thumbnails` — a sprite sheet of frames for the
-/// scrubber preview, rendered once per video and cached.
+/// scrubber preview, rendered once per video and cached. The body is
+/// optional; `{ "media": id }` picks one of the project's sources.
 ///
 /// Readable by every member, viewers included: the scrubber preview is part
 /// of playback, and the sheet is rendered once per media and cached.
 pub async fn thumbnails(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
+    body: Option<Json<ThumbnailsRequest>>,
 ) -> AppResult<Json<Thumbnails>> {
-    let id = access.project.media_id.clone();
+    let id = match body.and_then(|Json(b)| b.media) {
+        Some(media) => {
+            if !crate::sources::in_registry(&state.db, &access.project.id, &media).await? {
+                return Err(AppError::bad_request(
+                    "that media is not one of this project's videos",
+                ));
+            }
+            media
+        }
+        None => access.project.media_id.clone(),
+    };
     let dir = media_dir(&state, &id)?;
     let meta = read_meta(&dir).await?;
     if meta.kind != MediaKind::Video {

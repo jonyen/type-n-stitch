@@ -216,6 +216,16 @@ pub async fn create_project(
         .bind(&owner.id)
         .execute(&mut *tx)
         .await?;
+    // The project's own media is source 0 of its registry. Its timing lives
+    // in meta.json, so the row records zeros, as the 0005 backfill does.
+    sqlx::query(
+        "INSERT INTO project_sources (project_id, position, media_id, start_at, duration)
+         VALUES (?, 0, ?, 0.0, 0.0)",
+    )
+    .bind(&project.id)
+    .bind(&project.media_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(project)
 }
@@ -419,10 +429,16 @@ pub async fn adopt_orphans(state: &Arc<AppState>, owner_id: &str) -> AppResult<(
                 continue;
             }
         };
-        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM projects WHERE media_id = ?")
-            .bind(&meta.id)
-            .fetch_one(&state.db)
-            .await?;
+        // Media used by a project, as its own media or as a later source, is
+        // not an orphan.
+        let (n,): (i64,) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM projects WHERE media_id = ?)
+                  + (SELECT COUNT(*) FROM project_sources WHERE media_id = ?)",
+        )
+        .bind(&meta.id)
+        .bind(&meta.id)
+        .fetch_one(&state.db)
+        .await?;
         if n == 0 {
             create_project(&state.db, &owner, &meta.id, &meta.filename).await?;
             tracing::info!(media = meta.id, "adopted orphan media into a project");

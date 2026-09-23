@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use engine::{Edit, Transition};
+use engine::{Edit, Source, Transition};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -66,6 +66,9 @@ pub enum ServerMsg {
         splits: Vec<f64>,
         #[serde(default)]
         order: Vec<f64>,
+        /// Sources appended after the project's own media (the fold's `doc.sources`).
+        #[serde(default)]
+        sources: Vec<Source>,
         peers: Vec<Peer>,
         you: Peer,
     },
@@ -82,6 +85,9 @@ pub enum ServerMsg {
         splits: Vec<f64>,
         #[serde(default)]
         order: Vec<f64>,
+        /// Sources appended after the project's own media (the fold's `doc.sources`).
+        #[serde(default)]
+        sources: Vec<Source>,
     },
     Presence(Peer),
     #[serde(rename_all = "camelCase")]
@@ -98,6 +104,9 @@ pub enum ServerMsg {
         splits: Vec<f64>,
         #[serde(default)]
         order: Vec<f64>,
+        /// Sources appended after the project's own media (the fold's `doc.sources`).
+        #[serde(default)]
+        sources: Vec<Source>,
     },
     Error {
         code: String,
@@ -279,6 +288,7 @@ mod tests {
             transition: Transition::None,
             splits: vec![],
             order: vec![],
+            sources: vec![],
         }
     }
 
@@ -378,6 +388,7 @@ mod tests {
             transition: Transition::Dip,
             splits: vec![],
             order: vec![],
+            sources: vec![],
         })
         .unwrap();
         assert_eq!(json["t"], "doc");
@@ -389,6 +400,7 @@ mod tests {
             transition: Transition::None,
             splits: vec![],
             order: vec![],
+            sources: vec![],
         })
         .unwrap();
         assert_eq!(json["transition"], "none");
