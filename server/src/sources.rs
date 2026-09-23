@@ -14,7 +14,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::extract::{Multipart, State};
 use axum::Json;
-use engine::{all_sources, stitched_duration, MediaKind, Op, ProjectDoc, Source, Word};
+use engine::{
+    all_sources, stitched_duration, Edit, MediaKind, Op, ProjectDoc, Source, SpeakerTurn, Word,
+};
 use serde::Serialize;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
 use uuid::Uuid;
@@ -23,7 +25,9 @@ use crate::auth::User;
 use crate::error::{AppError, AppResult};
 use crate::ops::{apply_ops, ClientOp};
 use crate::projects::{Project, ProjectAccess};
-use crate::routes::{read_meta, Meta, WORDS_CACHE};
+use crate::routes::{
+    read_meta, speakers_item, suggest_for, Meta, Speakers, Suggestions, WORDS_CACHE,
+};
 use crate::AppState;
 
 /// Most videos one project's main track may hold.
@@ -236,6 +240,176 @@ pub async fn views(state: &AppState, sources: &[Source]) -> AppResult<Vec<Source
         });
     }
     Ok(out)
+}
+
+/// One source's share of the stitched speaker list: where it sits, how many
+/// words it has, and its diarization if there is one to use.
+pub struct SpeakerPart<'a> {
+    pub offset: f64,
+    pub words: usize,
+    pub speakers: Option<&'a Speakers>,
+}
+
+/// Concatenate per-source speaker labels, namespaced so speaker 0 of one
+/// file and speaker 0 of the next are different people. The labels and the
+/// count come from `engine::stitch_speakers`, the one implementation of the
+/// base rule. This adds only what the engine does not know about: each
+/// source's labels padded or cut to its word count, and its turns shifted
+/// into stitched time by the same base as its labels. A part without
+/// diarization labels its words `None` and adds no speakers.
+pub fn stitch_speaker_labels(parts: &[SpeakerPart]) -> Speakers {
+    // A cache out of step with its words is padded or cut to fit, so the
+    // list stays parallel to the stitched words.
+    let labels: Vec<(u32, Vec<Option<u32>>)> = parts
+        .iter()
+        .map(|part| match part.speakers {
+            Some(s) => (
+                s.count,
+                (0..part.words)
+                    .map(|i| s.words.get(i).copied().flatten())
+                    .collect(),
+            ),
+            None => (0, vec![None; part.words]),
+        })
+        .collect();
+    let slices: Vec<(u32, &[Option<u32>])> = labels
+        .iter()
+        .map(|(count, words)| (*count, words.as_slice()))
+        .collect();
+    let (count, words) = engine::stitch_speakers(&slices);
+    let mut turns = Vec::new();
+    for (k, part) in parts.iter().enumerate() {
+        let Some(s) = part.speakers else {
+            continue;
+        };
+        // The base the engine gave this part's labels: the stitched count of
+        // the parts before it.
+        let (base, _) = engine::stitch_speakers(&slices[..k]);
+        turns.extend(s.turns.iter().map(|t| SpeakerTurn {
+            start: t.start + part.offset,
+            end: t.end + part.offset,
+            speaker: t.speaker + base,
+        }));
+    }
+    Speakers {
+        count,
+        words,
+        turns,
+    }
+}
+
+/// Speaker labels for the project's stitched words.
+///
+/// Labels stop at the first source that is not transcribed yet: only the
+/// ready prefix is passed with its diarization, and every source after it
+/// is passed with no labels (`None` for each word, no speakers) until it is. Otherwise that source's count,
+/// once known, would shift every later base and move a name someone typed
+/// onto a different voice. A source whose diarization fails counts as no
+/// speakers. Fails only when no source could be diarized at all, with the
+/// same error the single-file route gave.
+pub async fn stitched_speakers(state: &AppState, sources: &[Source]) -> AppResult<Speakers> {
+    let mut counts = Vec::with_capacity(sources.len());
+    let mut diarized = Vec::with_capacity(sources.len());
+    let mut labelled = true;
+    let mut any = false;
+    let mut first_error = None;
+    for source in sources {
+        counts.push(cached_words(state, &source.media).await?.len());
+        labelled &= transcript_status(state, &source.media) == TranscriptStatus::Ready;
+        let speakers = if labelled {
+            match speakers_item(state, &source.media).await {
+                Ok(s) => {
+                    any = true;
+                    Some(s)
+                }
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        diarized.push(speakers);
+    }
+    if !any {
+        return Err(
+            first_error.unwrap_or_else(|| AppError::not_found("transcribe this media first"))
+        );
+    }
+    let parts: Vec<SpeakerPart> = sources
+        .iter()
+        .zip(&counts)
+        .zip(&diarized)
+        .map(|((s, n), sp)| SpeakerPart {
+            offset: s.offset,
+            words: *n,
+            speakers: sp.as_ref(),
+        })
+        .collect();
+    Ok(stitch_speaker_labels(&parts))
+}
+
+/// A suggested cut moved from a source's own time into stitched time.
+fn shifted(edit: Edit, by: f64) -> Edit {
+    match edit {
+        Edit::Cut {
+            start,
+            end,
+            transition,
+        } => Edit::Cut {
+            start: start + by,
+            end: end + by,
+            transition,
+        },
+        // The suggesters only ever produce cuts.
+        other => other,
+    }
+}
+
+/// Filler and pause cuts for every ready source, each computed on its own
+/// words and silences and shifted by its offset. A cut never crosses a join:
+/// each is bounded by its own file's duration. 404 while nothing is ready.
+pub async fn suggest_project(
+    state: &AppState,
+    sources: &[Source],
+    two_word: bool,
+) -> AppResult<Suggestions> {
+    let mut fillers = Vec::new();
+    let mut pauses = Vec::new();
+    let mut any = false;
+    for source in sources {
+        if transcript_status(state, &source.media) != TranscriptStatus::Ready {
+            continue;
+        }
+        let part = suggest_for(state, &source.media, two_word).await?;
+        any = true;
+        fillers.extend(part.fillers.into_iter().map(|e| shifted(e, source.offset)));
+        pauses.extend(part.pauses.into_iter().map(|e| shifted(e, source.offset)));
+    }
+    if !any {
+        return Err(AppError::not_found("transcribe this media first"));
+    }
+    Ok(Suggestions { fillers, pauses })
+}
+
+/// Everything an agent reads at open: the project's sources, its stitched
+/// words and its stitched speaker labels (`None` when diarization is not
+/// available). The first source is transcribed first, as it always was; the
+/// others are started in the background.
+pub async fn project_transcript(
+    state: &Arc<AppState>,
+    project: &Project,
+) -> AppResult<(Vec<Source>, Vec<Word>, Option<Speakers>)> {
+    crate::routes::transcribe_item(state, &project.media_id).await?;
+    let (_, doc) = crate::ops::load_doc(state, &project.id).await?;
+    let sources = timeline(state, project, &doc).await?;
+    for source in sources.iter().skip(1) {
+        start_transcription(state, &source.media);
+    }
+    let words = stitched_words(state, &sources).await?;
+    let speakers = stitched_speakers(state, &sources).await.ok();
+    Ok((sources, words, speakers))
 }
 
 /// Refuse a project whose main track already holds `count` sources, if that
@@ -1040,5 +1214,219 @@ mod tests {
             TranscriptStatus::Error,
             "polling must not start it again"
         );
+    }
+
+    /// Pre-seed `media`'s diarization cache.
+    async fn seed_speakers(state: &Arc<AppState>, media: &str, speakers: &Speakers) {
+        tokio::fs::write(
+            state
+                .config
+                .data_dir
+                .join(media)
+                .join(crate::routes::SPEAKERS_CACHE),
+            serde_json::to_vec(speakers).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn turn(start: f64, end: f64, speaker: u32) -> engine::SpeakerTurn {
+        engine::SpeakerTurn {
+            start,
+            end,
+            speaker,
+        }
+    }
+
+    #[test]
+    fn speaker_labels_are_namespaced_by_the_counts_before_them() {
+        let a = Speakers {
+            count: 2,
+            words: vec![Some(0), Some(1), None],
+            turns: vec![turn(0.0, 1.0, 0), turn(1.0, 2.0, 1)],
+        };
+        let b = Speakers {
+            count: 1,
+            words: vec![Some(0)],
+            turns: vec![turn(0.0, 1.0, 0)],
+        };
+        let out = stitch_speaker_labels(&[
+            SpeakerPart {
+                offset: 0.0,
+                words: 3,
+                speakers: Some(&a),
+            },
+            SpeakerPart {
+                offset: 10.0,
+                words: 2,
+                speakers: None,
+            },
+            SpeakerPart {
+                offset: 14.0,
+                words: 1,
+                speakers: Some(&b),
+            },
+        ]);
+        assert_eq!(out.count, 3);
+        assert_eq!(out.words, [Some(0), Some(1), None, None, None, Some(2)]);
+        assert_eq!(out.turns.last(), Some(&turn(14.0, 15.0, 2)));
+
+        // The base rule is the engine's: a count below the labels a source
+        // uses never lets two sources share a speaker, in labels or turns.
+        let low = Speakers {
+            count: 1,
+            words: vec![Some(2)],
+            turns: vec![turn(0.0, 1.0, 2)],
+        };
+        let out = stitch_speaker_labels(&[
+            SpeakerPart {
+                offset: 0.0,
+                words: 1,
+                speakers: Some(&low),
+            },
+            SpeakerPart {
+                offset: 5.0,
+                words: 1,
+                speakers: Some(&b),
+            },
+        ]);
+        assert_eq!(out.words, [Some(2), Some(3)]);
+        assert_eq!(out.turns.last(), Some(&turn(5.0, 6.0, 3)));
+        assert_eq!(out.count, 4);
+    }
+
+    #[tokio::test]
+    async fn speakers_read_through_every_source_up_to_the_first_untranscribed_one() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        seed_speakers(
+            &state,
+            &project.media_id,
+            &Speakers {
+                count: 2,
+                words: vec![Some(0), Some(1), Some(0)],
+                turns: vec![turn(0.0, 0.9, 0), turn(0.9, 1.9, 1), turn(1.9, 3.0, 0)],
+            },
+        )
+        .await;
+        let second = seed_source(&state, 4.0, &["d", "e"]).await;
+        seed_speakers(
+            &state,
+            &second.id,
+            &Speakers {
+                count: 1,
+                words: vec![Some(0), Some(0)],
+                turns: vec![turn(0.0, 2.0, 0)],
+            },
+        )
+        .await;
+        add_source(&state, &project, &owner, &second).await.unwrap();
+
+        let speakers = |state: Arc<AppState>| {
+            let (ada, id) = (ada.clone(), project.id.clone());
+            async move {
+                let (status, body, _) = call(
+                    app(&state),
+                    json_req(
+                        Method::POST,
+                        &format!("/api/projects/{id}/speakers"),
+                        Some(&ada),
+                        None,
+                    ),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body
+            }
+        };
+        let body = speakers(state.clone()).await;
+        assert_eq!(body["count"], 3);
+        assert_eq!(body["words"], json!([0, 1, 0, 2, 2]));
+        assert_eq!(
+            body["turns"][3],
+            json!({ "start": 10.0, "end": 12.0, "speaker": 2 })
+        );
+
+        // A third source still transcribing, then a fourth that is ready:
+        // the fourth gets no labels until the third is done, so its base
+        // cannot move under a name.
+        let third = seed_media(&state, 2.0).await;
+        let third = read_meta(&state.config.data_dir.join(&third))
+            .await
+            .unwrap();
+        state
+            .transcripts
+            .lock()
+            .unwrap()
+            .insert(third.id.clone(), TranscriptJob::Running);
+        add_source(&state, &project, &owner, &third).await.unwrap();
+        let fourth = seed_source(&state, 3.0, &["g"]).await;
+        seed_speakers(
+            &state,
+            &fourth.id,
+            &Speakers {
+                count: 1,
+                words: vec![Some(0)],
+                turns: vec![turn(0.0, 1.0, 0)],
+            },
+        )
+        .await;
+        add_source(&state, &project, &owner, &fourth).await.unwrap();
+        let body = speakers(state.clone()).await;
+        assert_eq!(body["words"], json!([0, 1, 0, 2, 2, null]));
+    }
+
+    #[tokio::test]
+    async fn suggestions_cover_every_ready_source_in_stitched_time() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = seed_source(&state, 4.0, &["um", "hello"]).await;
+        // A silence in the second file, cached so nothing shells out.
+        tokio::fs::write(
+            state
+                .config
+                .data_dir
+                .join(&second.id)
+                .join("silences-v1.json"),
+            serde_json::to_vec(&[engine::Range::new(1.5, 3.2)]).unwrap(),
+        )
+        .await
+        .unwrap();
+        add_source(&state, &project, &owner, &second).await.unwrap();
+
+        let (status, body, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{}/suggest", project.id),
+                Some(&ada),
+                Some(json!({})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // "um" is word 0 of the second file: [0, 1) there, [10, 11) here.
+        assert_eq!(
+            body["fillers"],
+            json!([{ "kind": "cut", "start": 10.0, "end": 11.0 }])
+        );
+        // The pauses are the second file's own, shifted by its offset.
+        let local = crate::routes::suggest_for(&state, &second.id, false)
+            .await
+            .unwrap();
+        assert!(!local.pauses.is_empty());
+        let shifted: Vec<Value> = local
+            .pauses
+            .iter()
+            .map(|e| {
+                let r = e.range();
+                json!({ "kind": "cut", "start": r.start + 10.0, "end": r.end + 10.0 })
+            })
+            .collect();
+        assert_eq!(body["pauses"], json!(shifted));
     }
 }

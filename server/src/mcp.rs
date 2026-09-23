@@ -696,8 +696,9 @@ impl McpSession {
         let role =
             ensure_bot_member(&self.state.db, &project.id, &identity.bot.id, owner_role).await?;
 
-        let meta = routes::read_meta(&self.state.config.data_dir.join(&project.media_id)).await?;
-        let (words, speakers) = routes::transcript_for(&self.state, &project.media_id).await?;
+        let (sources, words, speakers) =
+            crate::sources::project_transcript(&self.state, &project).await?;
+        let duration = engine::stitched_duration(&sources);
         let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
 
         let agent = self.agent(identity);
@@ -712,16 +713,16 @@ impl McpSession {
         open.project = Some(project.clone());
         open.role = Some(role);
         open.bot = Some(identity.bot.clone());
-        open.duration = meta.duration;
+        open.duration = duration;
         open.words = words;
         open.speakers = speakers.map(|s| s.words);
 
         Ok(json!({
             "id": project.id,
             "title": project.title,
-            "duration": meta.duration,
+            "duration": duration,
             "outputDuration": engine::output_duration(&engine::timeline_with(
-                meta.duration,
+                duration,
                 &doc.edits,
                 &doc.splits,
                 &doc.order,
@@ -1207,12 +1208,13 @@ impl McpSession {
             require_edit(&open)?;
             project
         };
-        let suggestions = routes::suggest_for(&self.state, &project.media_id, false).await?;
+        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
+        let sources = crate::sources::timeline(&self.state, &project, &doc).await?;
+        let suggestions = crate::sources::suggest_project(&self.state, &sources, false).await?;
         let suggested = match which {
             Suggestion::Fillers => suggestions.fillers,
             Suggestion::Pauses => suggestions.pauses,
         };
-        let (_, doc) = ops::load_doc(&self.state, &project.id).await?;
         let cuts: Vec<Range> = suggested
             .iter()
             .map(Edit::range)
@@ -1546,6 +1548,37 @@ mod tests {
                 "undo"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn open_project_reads_the_transcript_of_every_source() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = crate::sources::test_support::seed_source(&state, 4.0, &["d", "e"]).await;
+        crate::sources::add_source(&state, &project, &owner, &second)
+            .await
+            .unwrap();
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        let out = session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        assert_eq!(out["duration"], 14.0);
+        let transcript = out["transcript"].as_array().unwrap();
+        assert_eq!(transcript.len(), 5);
+        assert_eq!(transcript[3]["text"], "d");
+        assert_eq!(transcript[3]["start"], 10.0);
+        // The last word of the second file owns the gap to the stitched end.
+        let cut = session.tool_cut(&identity, 4, 4).await.unwrap();
+        assert_eq!(cut["touched"][0]["status"], "cut");
+        let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
+        assert!(doc.edits.iter().any(|e| matches!(
+            e,
+            Edit::Cut { start, end, .. } if *start == 11.0 && *end == 14.0
+        )));
     }
 
     #[tokio::test]

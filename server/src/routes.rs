@@ -208,18 +208,6 @@ pub async fn transcribe(
     Ok(Json(Transcript { words, sources }))
 }
 
-/// Transcript words plus speaker labels for a media item, tolerating a
-/// diarization failure the way the client does: labels come back `None` and
-/// the transcript is still usable on its own.
-pub async fn transcript_for(
-    state: &AppState,
-    media_id: &str,
-) -> AppResult<(Vec<Word>, Option<Speakers>)> {
-    let words = transcribe_item(state, media_id).await?;
-    let speakers = speakers_item(state, media_id).await.ok();
-    Ok((words, speakers))
-}
-
 /// Words for a media item, running whisper.cpp only if nothing is cached.
 pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>> {
     let dir = media_dir(state, id)?;
@@ -261,9 +249,10 @@ pub struct Speakers {
 }
 
 /// Speaker cache file. Bump the version when diarization settings change.
-const SPEAKERS_CACHE: &str = "speakers-v1.json";
+pub(crate) const SPEAKERS_CACHE: &str = "speakers-v1.json";
 
-/// `POST /api/projects/:id/speakers` — who says each word (cached).
+/// `POST /api/projects/:id/speakers` — who says each stitched word (cached
+/// per media), namespaced per source.
 ///
 /// Readable by every member, viewers included: speaker turns are part of
 /// viewing the transcript, and the answer is cached per media.
@@ -271,8 +260,11 @@ pub async fn speakers(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
 ) -> AppResult<Json<Speakers>> {
-    let id = access.project.media_id.clone();
-    speakers_item(&state, &id).await.map(Json)
+    let (_, doc) = load_doc(&state, &access.project.id).await?;
+    let sources = crate::sources::timeline(&state, &access.project, &doc).await?;
+    crate::sources::stitched_speakers(&state, &sources)
+        .await
+        .map(Json)
 }
 
 /// Speaker labels for a transcribed item, running the diarizer only if
@@ -403,18 +395,22 @@ pub struct Suggestions {
     pub pauses: Vec<Edit>,
 }
 
-/// `POST /api/projects/:id/suggest` — filler-word and long-pause cuts the
-/// client can apply as one batch. The body is optional. Unlike the other
-/// read-only media routes this one prepares edits, so it needs edit rights.
+/// `POST /api/projects/:id/suggest` — filler-word and long-pause cuts across
+/// every ready source, in stitched time, which the client can apply as one
+/// batch. The body is optional. Unlike the other read-only media routes this
+/// one prepares edits, so it needs edit rights.
 pub async fn suggest(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
     body: Option<Json<SuggestRequest>>,
 ) -> AppResult<Json<Suggestions>> {
     access.require_edit()?;
-    let id = access.project.media_id.clone();
     let two_word_fillers = body.is_some_and(|Json(b)| b.two_word_fillers);
-    suggest_for(&state, &id, two_word_fillers).await.map(Json)
+    let (_, doc) = load_doc(&state, &access.project.id).await?;
+    let sources = crate::sources::timeline(&state, &access.project, &doc).await?;
+    crate::sources::suggest_project(&state, &sources, two_word_fillers)
+        .await
+        .map(Json)
 }
 
 /// Filler-word and long-pause cut suggestions for a media item.
