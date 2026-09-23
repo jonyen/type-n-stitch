@@ -88,7 +88,13 @@ export function Player({
           onClick={playback.toggle}
           muted={playback.overdubbing !== null}
         />
-        <Overlays edits={edits} assets={assets} words={words} playback={playback} />
+        <Overlays
+          edits={edits}
+          assets={assets}
+          sources={sources}
+          words={words}
+          playback={playback}
+        />
         {(audioOnly || dark) && <div className={styles.audioBadge}>audio</div>}
         {playback.overdubbing && (
           <div className={styles.overdubBadge}>Overdub: “{playback.overdubbing.text}”</div>

@@ -1,11 +1,27 @@
-.broll {
+/* A layer fills the frame; a picture-in-picture is placed by inline style
+   (width 30%, 4% in from its corner) and takes its height from the video. */
+.layer {
   position: absolute;
   inset: 0;
+  pointer-events: none;
+}
+
+.pip {
+  inset: auto;
+}
+
+/* Beats the Player's `.frame video` rule (0,1,1) with (0,2,0). */
+.layer .video {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
   background: #000;
-  pointer-events: none;
+  cursor: default;
+}
+
+.pip .video {
+  height: auto;
 }
 
 .missing {

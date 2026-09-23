@@ -363,4 +363,23 @@ describe('Timeline (layers)', () => {
     fireEvent.doubleClick(screen.getByRole('button', { name: 'V2 a1.mp4' }));
     expect(viewer.onOpenLayer).not.toHaveBeenCalled();
   });
+
+  it('keeps the hover preview on the main track’s frame over a layer', () => {
+    const thumbs = {
+      url: '/thumbs.jpg',
+      count: 10,
+      columns: 10,
+      rows: 1,
+      interval: 1,
+      width: 64,
+      height: 36,
+    };
+    setup({ thumbs });
+    // Output 7.5 is source 2.5 (clip 2 is source [0, 5) at output [5, 10)),
+    // under the V2 layer over source [2, 4): the preview is still source frame 2.
+    fireEvent.pointerMove(screen.getByTestId('timeline-lanes'), { clientX: 750 });
+    const frame = document.querySelector<HTMLElement>('[style*="thumbs.jpg"]');
+    expect(frame?.style.backgroundImage).toContain('/thumbs.jpg');
+    expect(frame?.style.backgroundPosition).toMatch(/^-128px/);
+  });
 });
