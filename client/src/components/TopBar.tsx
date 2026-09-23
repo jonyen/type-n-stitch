@@ -13,11 +13,12 @@ import { ThemeToggle } from './ThemeToggle';
 import { Tip } from './Tip';
 import styles from './TopBar.module.css';
 
+/** A finished render carries `seq`, the document version (`headSeq`) it was started from. */
 export type ExportState =
   | { status: 'idle' }
   | { status: 'rendering'; progress: number }
-  | { status: 'done'; url: string; duration: number; bytes: number }
-  | { status: 'error'; message: string };
+  | { status: 'done'; url: string; duration: number; bytes: number; seq: number }
+  | { status: 'error'; message: string; seq: number };
 
 /** Everything the editor's top bar shows and does; null on the home screen. */
 export interface EditorControls {
@@ -45,6 +46,8 @@ export interface EditorControls {
   status: ConnectionStatus;
   lastError: string | null;
   exportState: ExportState;
+  /** The document version now; a finished render of another one is out of date. */
+  headSeq: number;
   onExport: () => void;
 }
 
@@ -256,6 +259,9 @@ function ExportButton({ editor }: { editor: EditorControls }) {
   const [open, setOpen] = useState(false);
   const state = editor.exportState;
   const rendering = state.status === 'rendering';
+  // The edit has changed since this render finished: Export renders afresh.
+  const stale =
+    (state.status === 'done' || state.status === 'error') && state.seq !== editor.headSeq;
 
   // A render that finishes (or fails) while the popover is closed still
   // needs to be seen: bring it back rather than leaving the result stranded
@@ -270,11 +276,12 @@ function ExportButton({ editor }: { editor: EditorControls }) {
         <button
           type="button"
           className={cx(ui.button, ui.primary)}
-          disabled={editor.readOnly || rendering}
+          disabled={editor.readOnly}
           onClick={() => {
-            // A result is already showing: reopen it, don't start a second
-            // render. "Export again" inside the popover does that.
-            if (state.status === 'idle') editor.onExport();
+            // A current result (or a render in flight) is only reopened, not
+            // started again; "Export again" inside the popover does that. A
+            // result of an older edit is replaced.
+            if (state.status === 'idle' || stale) editor.onExport();
             setOpen(true);
           }}
         >
@@ -311,6 +318,9 @@ function ExportButton({ editor }: { editor: EditorControls }) {
                 <div className={styles.fill} style={{ width: `${state.progress * 100}%` }} />
               </div>
             </div>
+          )}
+          {stale && (
+            <p className={ui.muted}>Out of date: the edit has changed since this render.</p>
           )}
           {state.status === 'done' && (
             <div className={styles.progress}>

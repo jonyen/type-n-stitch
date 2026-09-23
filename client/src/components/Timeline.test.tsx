@@ -39,7 +39,7 @@ function setup(overrides: Partial<TimelineProps> = {}): TimelineProps {
     assets: [asset('a1', 'video'), asset('a2', 'audio')],
     ordered: orderedPieces(10, edits, splits, order),
     segments: timelineSegments(10, edits, splits, order),
-    currentTime: 0,
+    outputTime: 0,
     peers: [],
     thumbs: null,
     readOnly: false,
@@ -141,11 +141,22 @@ describe('Timeline (Select tool)', () => {
     );
   });
 
-  it('seeks to the source time under the pointer', () => {
+  it('seeks to the output time under the pointer', () => {
     const props = setup();
+    // Output 2.5 s is inside the first clip (source 7.5); playback maps it.
     fireEvent.pointerDown(screen.getByTestId('timeline-lanes'), { clientX: 250, button: 0 });
-    // Output 2.5 s is inside the first clip, which starts at source 5.
-    expect(props.onSeek).toHaveBeenCalledWith(7.5);
+    expect(props.onSeek).toHaveBeenCalledWith(2.5);
+  });
+
+  it('seeks to the output end at the right edge, not to the piece sharing its source instant', () => {
+    const props = setup();
+    fireEvent.pointerDown(screen.getByTestId('timeline-lanes'), { clientX: 1000, button: 0 });
+    expect(props.onSeek).toHaveBeenCalledWith(10);
+  });
+
+  it('draws the playhead at the output time it is given', () => {
+    setup({ outputTime: 7.5 });
+    expect(screen.getByTestId('playhead').style.left).toBe('75%');
   });
 });
 

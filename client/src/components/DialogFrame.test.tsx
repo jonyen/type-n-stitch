@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { DropdownMenu } from 'radix-ui';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -23,7 +24,43 @@ function Harness({ busy = false }: { busy?: boolean }) {
   );
 }
 
+/** A dialog opened from a menu item, as TopBar's Insert menu does. */
+function MenuHarness() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger>Insert</DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content>
+            <DropdownMenu.Item onSelect={() => setOpen(true)}>Title card</DropdownMenu.Item>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
+      {open && (
+        <DialogFrame title="Title card" onClose={() => setOpen(false)}>
+          <input aria-label="Name" />
+        </DialogFrame>
+      )}
+    </>
+  );
+}
+
 describe('DialogFrame', () => {
+  it('gives focus back to the menu trigger when opened from a menu item', async () => {
+    const user = userEvent.setup();
+    render(<MenuHarness />);
+    const trigger = screen.getByRole('button', { name: 'Insert' });
+    await user.click(trigger);
+    await user.click(screen.getByRole('menuitem', { name: 'Title card' }));
+    expect(screen.getByRole('dialog', { name: 'Title card' })).toBeTruthy();
+    // The menu item that had focus is gone by now.
+    expect(screen.queryByRole('menuitem')).toBeNull();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it('takes focus on open and gives it back on close', async () => {
     const user = userEvent.setup();
     render(<Harness />);

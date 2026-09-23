@@ -1,5 +1,23 @@
 import { isTypingTarget } from './tools';
 
+/** Key events a layer closed itself on without owning them; see `passThrough`. */
+const passedThrough = new WeakSet<Event>();
+
+/**
+ * Let the editor still act on a key a Radix layer dismissed itself on. A
+ * tooltip closes on Escape and, like every dismissable layer, marks it
+ * handled; but it is only a hint, so Escape must still clear the selection
+ * and return to Select underneath it.
+ */
+export function passThrough(e: Event): void {
+  passedThrough.add(e);
+}
+
+/** Whether something upstream already handled this key, for `shouldIgnoreGlobalKey`. */
+export function handledUpstream(e: Event): boolean {
+  return e.defaultPrevented && !passedThrough.has(e);
+}
+
 /**
  * True when the editor's global keyboard shortcuts (Delete, ⌘Z, Space, Escape,
  * arrows) should be ignored for this keydown: a form control, a Radix

@@ -16,6 +16,22 @@ interface Props {
 }
 
 /**
+ * Where focus goes back to when a dialog opened with `el` focused closes. A
+ * menu item unmounts with its menu, so a dialog opened from one (the Insert
+ * menu's items) returns to the menu's trigger instead, walking out through
+ * submenus. Radix points the trigger at its open menu with `aria-controls`.
+ */
+function returnTarget(el: Element | null): HTMLElement | null {
+  let node = el;
+  let menu = node?.closest('[role="menu"]');
+  while (menu) {
+    node = menu.id ? document.querySelector(`[aria-controls="${CSS.escape(menu.id)}"]`) : null;
+    menu = node?.closest('[role="menu"]');
+  }
+  return node instanceof HTMLElement ? node : null;
+}
+
+/**
  * The one modal frame. Radix moves focus in on open and traps it; this
  * component gives it back to the opener on close (see below).
  */
@@ -31,7 +47,7 @@ export function DialogFrame({
   // close and Radix cannot return focus itself. Remember the element that had
   // focus when the dialog appeared, and give focus back to it on unmount.
   const [returnTo] = useState(() =>
-    typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null),
+    typeof document === 'undefined' ? null : returnTarget(document.activeElement),
   );
   useEffect(
     () => () => {

@@ -1,14 +1,20 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { shouldIgnoreGlobalKey } from '../keyboardGuard';
 import { SelectionToolbar } from './SelectionToolbar';
 
-function toolbar(overlay: { kind: 'broll' | 'audio'; start: number } | null) {
+function toolbar(
+  overlay: { kind: 'broll' | 'audio'; start: number } | null,
+  onDismiss = vi.fn(),
+  anchorIndex: number | null = null,
+) {
   const onDelete = vi.fn();
   render(
     <SelectionToolbar
-      anchorIndex={null}
+      anchorIndex={anchorIndex}
       titleAt={null}
       clipStart={null}
       overlay={overlay}
@@ -17,6 +23,7 @@ function toolbar(overlay: { kind: 'broll' | 'audio'; start: number } | null) {
       onOverdub={vi.fn()}
       onCaption={vi.fn()}
       onBroll={vi.fn()}
+      onDismiss={onDismiss}
     />,
   );
   return onDelete;
@@ -54,5 +61,42 @@ describe('SelectionToolbar over a selected overlay bar', () => {
     render(<button type="button" data-overlay="audio:0" />);
     toolbar({ kind: 'audio', start: 0 });
     expect(screen.queryByRole('toolbar')).toBeNull();
+  });
+});
+
+describe('SelectionToolbar and Escape', () => {
+  it('Escape dismisses it through onDismiss, the editor’s clear, though its layer takes the key', async () => {
+    layout(true);
+    const user = userEvent.setup();
+    render(<button type="button" data-index="3" />);
+    // The editor's own Escape handler, guarded as App's is.
+    const appEscape = vi.fn();
+    const onKey = (e: KeyboardEvent) => {
+      if (!shouldIgnoreGlobalKey(e.target as Element | null, e.defaultPrevented)) appEscape();
+    };
+    window.addEventListener('keydown', onKey);
+    const onDismiss = vi.fn();
+    toolbar(null, onDismiss, 3);
+    expect(screen.getByRole('toolbar', { name: 'Selection' })).toBeTruthy();
+    await user.keyboard('{Escape}');
+    window.removeEventListener('keydown', onKey);
+    // The popover's layer swallowed the key, so the clear has to come from it.
+    expect(appEscape).not.toHaveBeenCalled();
+    expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it('a click elsewhere (another word) does not dismiss it', async () => {
+    layout(true);
+    const user = userEvent.setup();
+    render(
+      <>
+        <button type="button" data-index="3" />
+        <button type="button">elsewhere</button>
+      </>,
+    );
+    const onDismiss = vi.fn();
+    toolbar(null, onDismiss, 3);
+    await user.click(screen.getByRole('button', { name: 'elsewhere' }));
+    expect(onDismiss).not.toHaveBeenCalled();
   });
 });

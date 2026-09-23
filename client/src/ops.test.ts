@@ -50,6 +50,26 @@ describe('opForAction', () => {
     });
   });
 
+  it('maps overdub over the range its dialog was opened on, selection or not', () => {
+    // A peer's sync cleared the selection while the dialog was open.
+    const op = opForAction(loaded, {
+      type: 'overdub',
+      text: 'hi',
+      audioUrl: '/data/m/overdub-0.wav',
+      audioDuration: 0.4,
+      range: [1, 2],
+    });
+    expect(op).toMatchObject({ kind: 'overdub', start: 0.91, end: 2.0, text: 'hi' });
+    const state = editorReducer(loaded, {
+      type: 'overdub',
+      text: 'hi',
+      audioUrl: '/data/m/overdub-0.wav',
+      audioDuration: 0.4,
+      range: [1, 2],
+    });
+    expect(state.edits).toEqual([op]);
+  });
+
   it('maps applyCuts to applycuts with bare ranges', () => {
     expect(
       opForAction(loaded, {

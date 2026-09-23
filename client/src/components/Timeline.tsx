@@ -35,14 +35,15 @@ export interface TimelineProps {
   assets: Asset[];
   ordered: Range[];
   segments: Segment[];
-  /** The playhead, in source seconds. */
-  currentTime: number;
+  /** The playhead, in output seconds. */
+  outputTime: number;
   peers: Peer[];
   thumbs: Thumbnails | null;
   readOnly: boolean;
   selectedClip: number | null;
   selectedOverlay: OverlayRef | null;
-  onSeek: (sourceTime: number) => void;
+  /** Seek to an output time; the output length is the end. */
+  onSeek: (outputTime: number) => void;
   onSelectClip: (pieceStart: number) => void;
   onMoveClip: (piece: number, before: number | null) => void;
   onSelectOverlay: (ref: OverlayRef | null) => void;
@@ -68,7 +69,7 @@ interface Drag {
 const DRAG_SLOP = 4;
 
 export function Timeline(props: TimelineProps) {
-  const { words, edits, assets, ordered, segments, currentTime, peers, thumbs, readOnly } = props;
+  const { words, edits, assets, ordered, segments, outputTime, peers, thumbs, readOnly } = props;
   const length = timelineLength(segments);
   const lanes = useRef<HTMLDivElement>(null);
   const spans = useMemo(() => clipSpans(ordered, segments), [ordered, segments]);
@@ -115,7 +116,7 @@ export function Timeline(props: TimelineProps) {
     }
     scrubbing.current = true;
     props.onSelectOverlay(null);
-    props.onSeek(outputToSource(p.t, segments));
+    props.onSeek(p.t);
   };
 
   const onLanesMove = (e: PointerEvent<HTMLDivElement>) => {
@@ -124,7 +125,7 @@ export function Timeline(props: TimelineProps) {
     setHover(p);
     if (props.tool === 'razor') setRazor(razorHit(p.t));
     if (band) setBand({ from: band.from, range: snappedBand(band.from, p.t, words, segments) });
-    if (scrubbing.current) props.onSeek(outputToSource(p.t, segments));
+    if (scrubbing.current) props.onSeek(p.t);
   };
 
   const onLanesUp = (e: PointerEvent<HTMLDivElement>) => {
@@ -299,6 +300,8 @@ export function Timeline(props: TimelineProps) {
           {bars('audio', audios(edits))}
         </div>
 
+        {/* Peers send a source time. Mapped as best it can be: at a piece
+            boundary a reorder makes it ambiguous, and it shows the other side. */}
         {peers.map((p) => (
           <span
             key={p.connId}
@@ -326,8 +329,9 @@ export function Timeline(props: TimelineProps) {
           />
         )}
         <span
+          data-testid="playhead"
           className={styles.playhead}
-          style={{ left: pct(sourceToOutput(currentTime, segments)) }}
+          style={{ left: pct(outputTime) }}
         />
         {hover && length > 0 && (
           <ScrubPreview

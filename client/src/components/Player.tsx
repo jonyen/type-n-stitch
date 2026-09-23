@@ -2,7 +2,7 @@ import { useMemo, type RefObject } from 'react';
 
 import { cx } from '../cx';
 import { captionsAt, cutRanges, formatTime, joins, nearDipJoin, overdubs } from '../editlist';
-import { sourceToOutput, timelineLength, type Segment } from '../timeline';
+import { timelineLength, type Segment } from '../timeline';
 import type { Asset, Edit, Media, Transition, Word } from '../types';
 import type { Playback } from '../usePlayback';
 import { Overlays } from './Overlays';
@@ -79,7 +79,7 @@ export function Player({
           {playback.playing ? <PauseIcon /> : <PlayIcon />}
         </button>
         <span className={styles.time}>
-          {formatTime(sourceToOutput(playback.currentTime, segments))}
+          {formatTime(playback.outputTime)}
           <span className={styles.total}> / {formatTime(outputLength)}</span>
         </span>
         <span className={styles.meta}>

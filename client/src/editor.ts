@@ -53,7 +53,14 @@ export type EditorAction =
   | { type: 'move'; delta: -1 | 1; extend: boolean; skipCut?: boolean }
   | { type: 'clearSelection' }
   | { type: 'deleteSelection' }
-  | { type: 'overdub'; text: string; audioUrl: string; audioDuration: number }
+  /** `range` is the word range captured when the dialog opened, if any. */
+  | {
+      type: 'overdub';
+      text: string;
+      audioUrl: string;
+      audioDuration: number;
+      range?: [number, number];
+    }
   /** Append a batch of cuts (filler removal, pause tightening) as one edit list. */
   | { type: 'applyCuts'; cuts: CutEdit[] }
   | { type: 'renameSpeaker'; speaker: number; name: string }
@@ -199,7 +206,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     }
 
     case 'overdub': {
-      const range = selectedRange(state.selection);
+      const range = action.range ?? selectedRange(state.selection);
       if (!range) return state;
       const span = rangeForWords(state.words, range[0], range[1], state.duration);
       // A new overdub replaces any it overlaps.

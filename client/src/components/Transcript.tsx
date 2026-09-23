@@ -86,7 +86,7 @@ interface Props {
   onAudioClick: (start: number) => void;
   /** The active timeline tool; the transcript's cursor follows it. */
   tool: Tool;
-  /** Fired on mouseup after a press that started on a word (the end of a drag or a click). */
+  /** Fired on mouseup after a press that started on a word and dragged across words; not after a plain click. */
   onWordDragEnd?: () => void;
 }
 
@@ -132,18 +132,23 @@ export function Transcript({
   // Mouse-down on a word starts a drag; every word the pointer enters while
   // the button is held extends the selection, like selecting text.
   const dragging = useRef(false);
+  // Whether the pointer has reached another word since the press: only a real
+  // drag ends in `onWordDragEnd`, so a plain Range click cuts nothing.
+  const dragged = useRef(false);
   const dragEnd = useRef(onWordDragEnd);
   useEffect(() => {
     dragEnd.current = onWordDragEnd;
   }, [onWordDragEnd]);
   useEffect(() => {
     const end = () => {
-      if (dragging.current) dragEnd.current?.();
+      if (dragging.current && dragged.current) dragEnd.current?.();
       dragging.current = false;
+      dragged.current = false;
     };
     // Losing focus mid-drag abandons it rather than completing it.
     const cancel = () => {
       dragging.current = false;
+      dragged.current = false;
     };
     window.addEventListener('mouseup', end);
     window.addEventListener('blur', cancel);
@@ -187,11 +192,14 @@ export function Transcript({
     e.preventDefault();
     e.currentTarget.focus();
     dragging.current = true;
+    dragged.current = false;
     onWordClick(index, e.shiftKey);
     if (!e.shiftKey) after?.();
   };
   const enter = (index: number) => {
-    if (dragging.current) onWordDrag(index);
+    if (!dragging.current) return;
+    dragged.current = true;
+    onWordDrag(index);
   };
   // Buttons also "click" from the keyboard (Enter/Space); detail is 0 then.
   const keyActivate = (index: number, e: MouseEvent) => {

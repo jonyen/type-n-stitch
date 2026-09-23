@@ -20,6 +20,12 @@ interface Props {
   onOverdub: () => void;
   onCaption: () => void;
   onBroll: () => void;
+  /**
+   * Escape while the toolbar shows: clear the selection. The popover's layer
+   * takes the key before the editor's own Escape handler can see it. Clicks
+   * elsewhere do not dismiss it; they make their own selection.
+   */
+  onDismiss: () => void;
 }
 
 /** What the toolbar is anchored to, and whether it shows the full action set. */
@@ -63,6 +69,7 @@ export function SelectionToolbar({
   onOverdub,
   onCaption,
   onBroll,
+  onDismiss,
 }: Props) {
   const t = target(anchorIndex, titleAt, clipStart, overlay);
   const selector = t?.selector ?? null;
@@ -101,6 +108,7 @@ export function SelectionToolbar({
           aria-label="Selection"
           onOpenAutoFocus={(e) => e.preventDefault()}
           onCloseAutoFocus={(e) => e.preventDefault()}
+          onEscapeKeyDown={() => onDismiss()}
         >
           <button type="button" className={cx(button, styles.delete)} onClick={onDelete}>
             Delete

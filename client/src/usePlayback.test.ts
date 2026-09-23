@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+import { act, renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { formatTime, orderedPieces } from './editlist';
+import { timelineLength, timelineSegments } from './timeline';
 import type { Range, TitleEdit } from './types';
 import {
   nextTitleAt,
@@ -8,6 +12,7 @@ import {
   restartAt,
   tickSpan,
   titleCrossed,
+  usePlayback,
 } from './usePlayback';
 
 const t = (at: number): TitleEdit => ({
@@ -196,5 +201,110 @@ describe('nextTitleAt', () => {
     const survivor = { ...t(5), text: 'survivor' };
     // `shown` was removed from the edit list while its card was up.
     expect(nextTitleAt([survivor], 5, [shown])).toEqual(survivor);
+  });
+});
+
+/** Just enough of a media element for the hook: a settable clock, play/pause and their events. */
+class FakeMedia extends EventTarget {
+  currentTime = 0;
+  paused = true;
+  ended = false;
+  play = vi.fn(() => {
+    this.paused = false;
+    this.dispatchEvent(new Event('play'));
+    return Promise.resolve();
+  });
+  pause = vi.fn(() => {
+    if (this.paused) return;
+    this.paused = true;
+    this.dispatchEvent(new Event('pause'));
+  });
+}
+
+describe('usePlayback in output time (a reordered edit)', () => {
+  // The reported repro: 60.04 s of media, split at 47.9, the tail played first.
+  const duration = 60.04;
+  const ordered = orderedPieces(duration, [], [47.9], [47.9, 0]);
+  const segments = timelineSegments(duration, [], [47.9], [47.9, 0]);
+  const length = timelineLength(segments);
+
+  let frames: FrameRequestCallback[] = [];
+  beforeEach(() => {
+    frames = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  /** Run the playhead watchdog once, with the media clock at `t`. */
+  function frameAt(media: FakeMedia, t: number) {
+    media.currentTime = t;
+    const pending = frames;
+    frames = [];
+    act(() => pending.forEach((cb) => cb(0)));
+  }
+
+  function setup() {
+    const media = new FakeMedia();
+    const ref = { current: media as unknown as HTMLMediaElement };
+    const hook = renderHook(() => usePlayback(ref, [], [], duration, '/m.mp4', ordered, segments));
+    return { media, hook };
+  }
+
+  it('shows the output length, not 0:12.1, once playback stops at the end', () => {
+    const { media, hook } = setup();
+    act(() => hook.result.current.toggle());
+    // Starts at the first output piece, the tail [47.9, 60.04).
+    expect(media.currentTime).toBeCloseTo(47.9);
+    expect(hook.result.current.outputTime).toBeCloseTo(0);
+    // The tail ends; the head [0, 47.9) follows.
+    frameAt(media, 60.04);
+    expect(media.currentTime).toBe(0);
+    frameAt(media, 20);
+    expect(hook.result.current.outputTime).toBeCloseTo(32.1);
+    // The head ends: that is the end of the output.
+    frameAt(media, 47.9);
+    expect(media.paused).toBe(true);
+    expect(hook.result.current.atEnd).toBe(true);
+    expect(hook.result.current.outputTime).toBeCloseTo(length);
+    expect(formatTime(hook.result.current.outputTime)).toBe(formatTime(length));
+  });
+
+  it('parks at the end when seeking to the output length, and plays again from the start', () => {
+    const { media, hook } = setup();
+    act(() => hook.result.current.seekOutput(length));
+    expect(hook.result.current.atEnd).toBe(true);
+    expect(hook.result.current.outputTime).toBeCloseTo(length);
+    // Not piece 0, which starts at the source instant the output ends on.
+    expect(media.currentTime).not.toBeCloseTo(47.9);
+    act(() => hook.result.current.toggle());
+    expect(hook.result.current.atEnd).toBe(false);
+    expect(media.currentTime).toBeCloseTo(47.9);
+    expect(hook.result.current.outputTime).toBeCloseTo(0);
+  });
+
+  it('seeks by output time into the piece that plays there', () => {
+    const { media, hook } = setup();
+    act(() => hook.result.current.seekOutput(20));
+    expect(media.currentTime).toBeCloseTo(7.86);
+    expect(hook.result.current.outputTime).toBeCloseTo(20);
+    act(() => hook.result.current.seekOutput(2));
+    expect(media.currentTime).toBeCloseTo(49.9);
+    expect(hook.result.current.outputTime).toBeCloseTo(2);
+  });
+
+  it('keeps source-order edits as they were: output equals source', () => {
+    const plain = orderedPieces(10, [], [], []);
+    const segs = timelineSegments(10, [], [], []);
+    const media = new FakeMedia();
+    const ref = { current: media as unknown as HTMLMediaElement };
+    const hook = renderHook(() => usePlayback(ref, [], [], 10, '/m.mp4', plain, segs));
+    act(() => hook.result.current.seek(4.25));
+    expect(hook.result.current.currentTime).toBeCloseTo(4.3);
+    expect(hook.result.current.outputTime).toBeCloseTo(4.3);
+    act(() => hook.result.current.toggle());
+    frameAt(media, 10);
+    expect(hook.result.current.atEnd).toBe(true);
+    expect(hook.result.current.outputTime).toBe(10);
   });
 });

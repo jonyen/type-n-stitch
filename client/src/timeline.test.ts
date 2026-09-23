@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { orderedPieces } from './editlist';
 import { editorReducer, initialEditor } from './editor';
 import {
   canSplitAt,
@@ -7,6 +8,7 @@ import {
   nearestStop,
   outputToSource,
   overlaySpans,
+  pieceOutputTime,
   pxToOutput,
   razorAt,
   rangeCuts,
@@ -271,5 +273,43 @@ describe('rulerTicks', () => {
     expect(rulerTicks(7)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
     expect(rulerTicks(125)).toEqual([0, 30, 60, 90, 120]);
     expect(rulerTicks(0)).toEqual([0]);
+  });
+});
+
+describe('pieceOutputTime (a reordered edit, where source boundaries are ambiguous)', () => {
+  // The reported repro: 60.04 s of media, split at 47.9, the tail played first.
+  const duration = 60.04;
+  const ordered = orderedPieces(duration, [], [47.9], [47.9, 0]);
+  const segs = timelineSegments(duration, [], [47.9], [47.9, 0]);
+  const length = timelineLength(segs);
+
+  it('shows why the source-time mapping cannot be trusted at the end', () => {
+    // 60.04 rounded to 60.0 lands inside the first output piece.
+    expect(sourceToOutput(60.0, segs)).toBeCloseTo(12.1);
+    // And the output end maps to a source instant that also starts piece 0.
+    expect(outputToSource(length, segs)).toBeCloseTo(47.9);
+  });
+
+  it('maps a source instant through the piece that is playing it', () => {
+    expect(pieceOutputTime(47.9, 0, ordered, segs)).toBeCloseTo(0);
+    expect(pieceOutputTime(50, 0, ordered, segs)).toBeCloseTo(2.1);
+    expect(pieceOutputTime(0, 1, ordered, segs)).toBeCloseTo(12.14);
+    expect(pieceOutputTime(10, 1, ordered, segs)).toBeCloseTo(22.14);
+  });
+
+  it("puts the end of a piece at that piece's end, not at the piece sharing the instant", () => {
+    // Piece 0 ends at source 60.04, at 60.0 once rounded: both are its end, output 12.14.
+    expect(pieceOutputTime(60.04, 0, ordered, segs)).toBeCloseTo(12.14);
+    expect(pieceOutputTime(60.0, 0, ordered, segs)).toBeCloseTo(12.1);
+    // Piece 1 ends at source 47.9, which is the end of the whole output.
+    expect(pieceOutputTime(47.9, 1, ordered, segs)).toBeCloseTo(length);
+  });
+
+  it('agrees with sourceToOutput on an edit in source order', () => {
+    const plain = timelineSegments(10, [cut(2, 4)], [], []);
+    const pieces = orderedPieces(10, [cut(2, 4)], [], []);
+    expect(pieceOutputTime(1, 0, pieces, plain)).toBe(sourceToOutput(1, plain));
+    expect(pieceOutputTime(5, 1, pieces, plain)).toBe(sourceToOutput(5, plain));
+    expect(pieceOutputTime(10, 1, pieces, plain)).toBe(timelineLength(plain));
   });
 });

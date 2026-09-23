@@ -1,7 +1,7 @@
 import { ToggleGroup } from 'radix-ui';
 import { useEffect } from 'react';
 
-import { shouldIgnoreGlobalKey } from '../keyboardGuard';
+import { handledUpstream, shouldIgnoreGlobalKey } from '../keyboardGuard';
 import { TOOLS, toolForKey, type Tool } from '../tools';
 import { Tip } from './Tip';
 import styles from './ToolToolbar.module.css';
@@ -21,7 +21,7 @@ export function ToolToolbar({ tool, onChange, readOnly, shortcuts }: Props) {
     if (!shortcuts) return;
     const onKey = (e: KeyboardEvent) => {
       // Form fields, open Radix menus and handled keys keep their own V / C / X / Escape.
-      if (shouldIgnoreGlobalKey(e.target as Element | null, e.defaultPrevented)) return;
+      if (shouldIgnoreGlobalKey(e.target as Element | null, handledUpstream(e))) return;
       if (e.key === 'Escape') {
         onChange('select');
         return;

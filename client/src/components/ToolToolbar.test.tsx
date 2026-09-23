@@ -48,6 +48,19 @@ describe('ToolToolbar', () => {
     expect(pressed(/Select/)).toBe(true);
   });
 
+  it('Escape returns to Select while a tool’s tooltip is showing', async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.keyboard('c');
+    expect(pressed(/Razor/)).toBe(true);
+    // Keyboard focus on a tool shows its tooltip, a dismissable layer that takes Escape.
+    screen.getByRole('radio', { name: /Razor/ }).focus();
+    expect(await screen.findByRole('tooltip')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(pressed(/Select/)).toBe(true);
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
   it('ignores the shortcuts while typing and while disabled', async () => {
     const user = userEvent.setup();
     const { unmount } = render(<Harness />);

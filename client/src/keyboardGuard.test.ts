@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 
-import { shouldIgnoreGlobalKey } from './keyboardGuard';
+import { handledUpstream, passThrough, shouldIgnoreGlobalKey } from './keyboardGuard';
 
 describe('shouldIgnoreGlobalKey', () => {
   it('ignores when the event was already handled', () => {
@@ -58,5 +58,20 @@ describe('shouldIgnoreGlobalKey', () => {
     dialog.append(inner);
     document.body.append(dialog);
     expect(shouldIgnoreGlobalKey(inner, false)).toBe(true);
+  });
+});
+
+describe('handledUpstream', () => {
+  const escape = () => new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+
+  it('is true once a layer prevents the key, unless it let the key through', () => {
+    const plain = escape();
+    expect(handledUpstream(plain)).toBe(false);
+    plain.preventDefault();
+    expect(handledUpstream(plain)).toBe(true);
+    const tooltip = escape();
+    passThrough(tooltip);
+    tooltip.preventDefault();
+    expect(handledUpstream(tooltip)).toBe(false);
   });
 });

@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 
 import {
   exportMedia,
@@ -35,7 +43,7 @@ import { Transcript } from './components/Transcript';
 import { cx } from './cx';
 import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
-import { shouldIgnoreGlobalKey } from './keyboardGuard';
+import { handledUpstream, shouldIgnoreGlobalKey } from './keyboardGuard';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
 import { audios, brolls } from './overlays';
@@ -72,7 +80,10 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editor, dispatch] = useReducer(editorReducer, initialEditor);
-  const [overdubOpen, setOverdubOpen] = useState(false);
+  // The word range the overdub dialog was opened on; like `captionRange`, a
+  // peer clearing the selection must not unmount the dialog under the user
+  // (and leave the shortcuts off, since they wait for it to close).
+  const [overdubRange, setOverdubRange] = useState<[number, number] | null>(null);
   // The title dialog, adding at `at` or editing `initial`.
   const [titleDialog, setTitleDialog] = useState<{ at: number; initial?: TitleEdit } | null>(null);
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
@@ -127,6 +138,7 @@ export function App() {
     editor.duration,
     project?.media.url,
     ordered,
+    segments,
   );
   const thumbs = useThumbnails(project?.id ?? null, project?.media.kind);
 
@@ -343,6 +355,7 @@ export function App() {
     setSelectedClip(null);
     setSelectedOverlay(null);
     setTitleDialog(null);
+    setOverdubRange(null);
     setCaptionRange(null);
     setBrollRange(null);
     setAudioDialog(null);
@@ -450,7 +463,7 @@ export function App() {
     [tool, canEdit, editor.words, editor.edits, editor.splits, editor.duration, edit, playback],
   );
 
-  // The Range tool cuts the dragged words on release.
+  // The Range tool cuts the dragged words on release; a plain click cuts nothing.
   const onWordDragEnd = useCallback(() => {
     if (tool === 'range') edit({ type: 'deleteSelection' });
   }, [tool, edit]);
@@ -464,8 +477,11 @@ export function App() {
     [tool],
   );
 
+  const headSeq = editor.headSeq;
   const onExport = useCallback(async () => {
     if (!projectId) return;
+    // The version being rendered, so a result can tell when the edit moved on.
+    const seq = headSeq;
     setExportState({ status: 'rendering', progress: 0 });
     try {
       const { jobId } = await exportMedia(projectId);
@@ -482,10 +498,11 @@ export function App() {
             url: job.url,
             duration: job.duration,
             bytes: job.bytes,
+            seq,
           });
           return;
         } else {
-          setExportState({ status: 'error', message: job.message });
+          setExportState({ status: 'error', message: job.message, seq });
           return;
         }
       }
@@ -493,18 +510,19 @@ export function App() {
       setExportState({
         status: 'error',
         message: err instanceof Error ? err.message : String(err),
+        seq,
       });
     }
-  }, [projectId]);
+  }, [projectId, headSeq]);
 
   const onOverdubSubmit = useCallback(
     async (text: string) => {
-      if (!projectId) return;
+      if (!projectId || !overdubRange) return;
       const { audioUrl, duration } = await synthesizeOverdub(projectId, text);
-      edit({ type: 'overdub', text, audioUrl, audioDuration: duration });
-      setOverdubOpen(false);
+      edit({ type: 'overdub', text, audioUrl, audioDuration: duration, range: overdubRange });
+      setOverdubRange(null);
     },
-    [projectId, edit],
+    [projectId, overdubRange, edit],
   );
 
   /** Where a new card goes: the end of the selected words, else the playhead. */
@@ -642,13 +660,32 @@ export function App() {
     setSelectedOverlay(null);
   }, [hasWordSelection, selectedTitle, hasClipSelection, selectedClip, selectedOverlay, edit]);
 
+  /** Escape: no word, title, clip or overlay selection. The floating toolbar's dismiss too. */
+  const clearAll = useCallback(() => {
+    dispatch({ type: 'clearSelection' });
+    setSelectedTitle(null);
+    setSelectedClip(null);
+    setSelectedOverlay(null);
+  }, []);
+
   // Keyboard: Delete cuts, ⌘Z undoes, ⇧⌘Z redoes, Space plays, Esc clears, arrows move.
+  // The window listener is added once per project and calls the latest
+  // handler through a ref. Re-adding it on every render (`playback` is a new
+  // object each time) dropped keys: a listener removed mid-dispatch is not
+  // called, and a render can land between two listeners of one real keydown,
+  // e.g. after the tool picker's own Escape switches back to Select.
+  const keyHandler = useRef<((e: KeyboardEvent) => void) | null>(null);
   useEffect(() => {
     if (!projectId) return;
-    const onKey = (e: KeyboardEvent) => {
+    const onKey = (e: KeyboardEvent) => keyHandler.current?.(e);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [projectId]);
+  useLayoutEffect(() => {
+    keyHandler.current = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (
-        overdubOpen ||
+        overdubRange ||
         titleDialog ||
         captionRange ||
         agentDialogOpen ||
@@ -656,7 +693,7 @@ export function App() {
         audioDialog
       )
         return;
-      if (shouldIgnoreGlobalKey(target, e.defaultPrevented)) return;
+      if (shouldIgnoreGlobalKey(target, handledUpstream(e))) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
         deleteSelected();
@@ -667,10 +704,7 @@ export function App() {
         e.preventDefault();
         playback.toggle();
       } else if (e.key === 'Escape') {
-        dispatch({ type: 'clearSelection' });
-        setSelectedTitle(null);
-        setSelectedClip(null);
-        setSelectedOverlay(null);
+        clearAll();
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         dispatch({
@@ -681,17 +715,15 @@ export function App() {
         });
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
   }, [
-    projectId,
-    overdubOpen,
+    overdubRange,
     titleDialog,
     captionRange,
     agentDialogOpen,
     brollRange,
     audioDialog,
     deleteSelected,
+    clearAll,
     playback,
     showCuts,
     edit,
@@ -705,7 +737,6 @@ export function App() {
           .map((w) => w.text)
           .join(' ')
       : '';
-  const selectedText = wordsIn(selected);
   // The dialog keeps showing the words it was opened on, selection or not.
   const captionText = wordsIn(captionRange);
 
@@ -739,7 +770,9 @@ export function App() {
           if (selected) setBrollRange(selected);
         },
         onAddMusic: () => setAudioDialog({ range: selected }),
-        onOverdub: () => setOverdubOpen(true),
+        onOverdub: () => {
+          if (selected) setOverdubRange(selected);
+        },
         onSplit,
         transition: editor.transition,
         onTransition: (transition: Transition) => edit({ type: 'setTransition', transition }),
@@ -747,6 +780,7 @@ export function App() {
         status,
         lastError,
         exportState,
+        headSeq: editor.headSeq,
         onExport: () => void onExport(),
       }
     : null;
@@ -863,13 +897,16 @@ export function App() {
                 tool === 'select'
               }
               onDelete={deleteSelected}
-              onOverdub={() => setOverdubOpen(true)}
+              onOverdub={() => {
+                if (selected) setOverdubRange(selected);
+              }}
               onCaption={() => {
                 if (selected) setCaptionRange(selected);
               }}
               onBroll={() => {
                 if (selected) setBrollRange(selected);
               }}
+              onDismiss={clearAll}
             />
           </section>
           <section className={styles.dock} aria-label="Timeline">
@@ -879,7 +916,7 @@ export function App() {
               readOnly={!canEdit}
               shortcuts={
                 !(
-                  overdubOpen ||
+                  overdubRange ||
                   titleDialog ||
                   captionRange ||
                   agentDialogOpen ||
@@ -894,13 +931,13 @@ export function App() {
               assets={assets}
               ordered={ordered}
               segments={segments}
-              currentTime={playback.currentTime}
+              outputTime={playback.outputTime}
               peers={peers}
               thumbs={thumbs}
               readOnly={!canEdit}
               selectedClip={selectedClip}
               selectedOverlay={selectedOverlay}
-              onSeek={playback.seek}
+              onSeek={playback.seekOutput}
               onSelectClip={onClipClick}
               onMoveClip={(piece, before) => edit({ type: 'moveClip', piece, before })}
               onSelectOverlay={onSelectOverlay}
@@ -920,11 +957,11 @@ export function App() {
         </main>
       )}
 
-      {overdubOpen && selected && (
+      {overdubRange && (
         <OverdubDialog
-          original={selectedText}
+          original={wordsIn(overdubRange)}
           onSubmit={onOverdubSubmit}
-          onCancel={() => setOverdubOpen(false)}
+          onCancel={() => setOverdubRange(null)}
         />
       )}
 

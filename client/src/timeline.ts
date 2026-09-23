@@ -82,6 +82,30 @@ export function sourceToOutput(t: number, segments: Segment[]): number {
   return best ? best.output.start : timelineLength(segments);
 }
 
+/**
+ * Source time `t` in output time, as played by ordered piece `index`.
+ * Once pieces are reordered, one source instant can sit at two output places
+ * (the end of one piece and the start of the piece that follows it in
+ * source), so `sourceToOutput` alone cannot say where a playhead is; the
+ * piece that is playing can. The end of the piece is the end of its span.
+ */
+export function pieceOutputTime(
+  t: number,
+  index: number,
+  ordered: Range[],
+  segments: Segment[],
+): number {
+  const piece = ordered[index];
+  if (!piece) return sourceToOutput(t, segments);
+  const own = segments.filter(
+    (s) => Math.min(owner(ordered, s.source.start), ordered.length - 1) === index,
+  );
+  const last = own[own.length - 1];
+  if (!last) return sourceToOutput(t, segments);
+  if (t >= piece.end - EPS) return last.output.end;
+  return sourceToOutput(Math.max(t, piece.start), own);
+}
+
 /** Output time to the source frame on screen. Holds show their first frame. */
 export function outputToSource(t: number, segments: Segment[]): number {
   for (const s of segments) {
