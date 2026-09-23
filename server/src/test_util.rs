@@ -24,6 +24,9 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
     config.database_url = format!("sqlite://{}/test.db", dir.path().display());
     config.admin_email = None;
     config.admin_password = None;
+    // Background transcription must never find a real whisper in tests: a
+    // job fails fast instead, which is what the status tests rely on.
+    config.whisper_bin = "type-n-stitch-no-whisper-in-tests".into();
     tokio::fs::create_dir_all(&config.data_dir).await.unwrap();
     let db = db::open(&config.database_url).await.unwrap();
     let state = Arc::new(AppState {
@@ -34,6 +37,7 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
         folds: Mutex::new(HashMap::new()),
         bus: Arc::new(bus::LocalBus::new()),
         agents: Default::default(),
+        transcripts: Mutex::new(HashMap::new()),
     });
     (state, dir)
 }

@@ -42,6 +42,10 @@ pub struct AppState {
     pub bus: Arc<dyn bus::Bus>,
     /// The live MCP agents, one per token owner's bot.
     pub agents: mcp::Agents,
+    /// Background transcriptions of added sources, by media id: running, or
+    /// failed until the server restarts. A finished one leaves no entry; its
+    /// words cache is the record.
+    pub transcripts: Mutex<HashMap<String, sources::TranscriptJob>>,
 }
 
 #[tokio::main]
@@ -68,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
         folds: Mutex::new(HashMap::new()),
         bus: Arc::new(bus::LocalBus::new()),
         agents: mcp::Agents::default(),
+        transcripts: Mutex::new(HashMap::new()),
     });
 
     let app = app::router(state.clone());

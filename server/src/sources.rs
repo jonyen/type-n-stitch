@@ -11,9 +11,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use axum::extract::{Multipart, State};
 use axum::Json;
-use engine::{all_sources, stitched_duration, MediaKind, Op, ProjectDoc, Source};
+use engine::{all_sources, stitched_duration, MediaKind, Op, ProjectDoc, Source, Word};
 use serde::Serialize;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
 use uuid::Uuid;
@@ -129,7 +130,17 @@ pub async fn timeline(
     ))
 }
 
-/// A media item's transcript: ready once its words are cached.
+/// A background transcription the server started and has not cached yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptJob {
+    Running,
+    /// Kept until the server restarts, so a client polling `/transcribe`
+    /// cannot set off an endless retry. The cause is in the log.
+    Failed,
+}
+
+/// A media item's transcript: ready once its words are cached, otherwise
+/// whatever its background job says, and pending when there is none.
 pub fn transcript_status(state: &AppState, media_id: &str) -> TranscriptStatus {
     if state
         .config
@@ -138,10 +149,74 @@ pub fn transcript_status(state: &AppState, media_id: &str) -> TranscriptStatus {
         .join(WORDS_CACHE)
         .is_file()
     {
-        TranscriptStatus::Ready
-    } else {
-        TranscriptStatus::Pending
+        return TranscriptStatus::Ready;
     }
+    match state
+        .transcripts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(media_id)
+    {
+        Some(TranscriptJob::Running) => TranscriptStatus::Running,
+        Some(TranscriptJob::Failed) => TranscriptStatus::Error,
+        None => TranscriptStatus::Pending,
+    }
+}
+
+/// Transcribe `media_id` in the background unless it is cached, running or
+/// has failed. The words land in the per-media cache, exactly as a
+/// foreground `transcribe_item` would leave them.
+pub fn start_transcription(state: &Arc<AppState>, media_id: &str) {
+    if transcript_status(state, media_id) != TranscriptStatus::Pending {
+        return;
+    }
+    {
+        let mut jobs = state.transcripts.lock().unwrap_or_else(|e| e.into_inner());
+        // Checked again under the lock: two callers may both have seen pending.
+        if jobs.contains_key(media_id) {
+            return;
+        }
+        jobs.insert(media_id.to_owned(), TranscriptJob::Running);
+    }
+    let state = state.clone();
+    let id = media_id.to_owned();
+    tokio::spawn(async move {
+        let result = crate::routes::transcribe_item(&state, &id).await;
+        let mut jobs = state.transcripts.lock().unwrap_or_else(|e| e.into_inner());
+        match result {
+            // The cache file now answers `ready`.
+            Ok(_) => {
+                jobs.remove(&id);
+            }
+            Err(e) => {
+                tracing::warn!(id, "background transcription failed: {e:?}");
+                jobs.insert(id, TranscriptJob::Failed);
+            }
+        }
+    });
+}
+
+/// A media item's cached words, or none while it is still being transcribed.
+async fn cached_words(state: &AppState, media_id: &str) -> AppResult<Vec<Word>> {
+    match tokio::fs::read_to_string(state.config.data_dir.join(media_id).join(WORDS_CACHE)).await {
+        Ok(json) => Ok(serde_json::from_str(&json).context("parsing cached words")?),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+/// The project's words: each ready source's words shifted by its offset, in
+/// source order. A source still transcribing contributes nothing yet.
+pub async fn stitched_words(state: &AppState, sources: &[Source]) -> AppResult<Vec<Word>> {
+    let mut per_source = Vec::with_capacity(sources.len());
+    for source in sources {
+        per_source.push(cached_words(state, &source.media).await?);
+    }
+    let parts: Vec<(&Source, &[Word])> = sources
+        .iter()
+        .zip(&per_source)
+        .map(|(s, w)| (s, w.as_slice()))
+        .collect();
+    Ok(engine::stitch_words(&parts))
 }
 
 /// `sources` with each file's name, kind, URL and transcript status.
@@ -204,6 +279,7 @@ pub async fn add_source(
         }],
     )
     .await?;
+    start_transcription(state, &meta.id);
     Ok(SourceView {
         index: sources.len(),
         media_id: meta.id.clone(),
@@ -327,6 +403,7 @@ mod tests {
     use super::*;
     use crate::assets::test_support::seed_asset;
     use crate::projects::test_support::seed_media;
+    use crate::test_util::seed_words;
     use crate::test_util::{app, call, json_req, me, owned_project, register as sign_up, state};
 
     #[tokio::test]
@@ -856,5 +933,112 @@ mod tests {
         // ffmpeg fails and the route answers 502, not 400.
         let (status, body, _) = call(app(&state), thumbs(&second.id)).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    }
+
+    async fn transcribe(state: &Arc<AppState>, cookie: &str, project: &str) -> Value {
+        let (status, body, _) = call(
+            app(state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{project}/transcribe"),
+                Some(cookie),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    fn ids(body: &Value) -> Vec<String> {
+        body["words"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn statuses(body: &Value) -> Vec<String> {
+        body["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["transcript"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn transcribe_stitches_ready_sources_and_reports_each_status() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = seed_source(&state, 4.0, &["d", "e"]).await;
+        add_source(&state, &project, &owner, &second).await.unwrap();
+        // A third whose transcription is already under way.
+        let third = seed_media(&state, 2.0).await;
+        let third = read_meta(&state.config.data_dir.join(&third))
+            .await
+            .unwrap();
+        state
+            .transcripts
+            .lock()
+            .unwrap()
+            .insert(third.id.clone(), TranscriptJob::Running);
+        add_source(&state, &project, &owner, &third).await.unwrap();
+
+        let body = transcribe(&state, &ada, &project.id).await;
+        assert_eq!(ids(&body), ["w0", "w1", "w2", "1:w0", "1:w1"]);
+        assert_eq!(body["words"][3]["start"], 10.0);
+        assert_eq!(body["words"][4]["end"], 11.5);
+        assert_eq!(statuses(&body), ["ready", "ready", "running"]);
+        assert_eq!(body["sources"][2]["offset"], 14.0);
+
+        // It finishes: the words are cached and the job is cleared.
+        seed_words(&state, &third.id, &["f"]).await;
+        state.transcripts.lock().unwrap().remove(&third.id);
+        let body = transcribe(&state, &ada, &project.id).await;
+        assert_eq!(ids(&body).last().unwrap(), "2:w0");
+        assert_eq!(body["words"][5]["start"], 14.0);
+        assert_eq!(statuses(&body), ["ready", "ready", "ready"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_transcription_reports_error_and_polling_does_not_retry_it() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        // No words and no source file: the job's ffmpeg step fails.
+        let broken = seed_media(&state, 4.0).await;
+        let broken = read_meta(&state.config.data_dir.join(&broken))
+            .await
+            .unwrap();
+        let view = add_source(&state, &project, &owner, &broken).await.unwrap();
+        assert_eq!(view.transcript, TranscriptStatus::Running);
+        for _ in 0..200 {
+            if transcript_status(&state, &broken.id) != TranscriptStatus::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            transcript_status(&state, &broken.id),
+            TranscriptStatus::Error
+        );
+
+        let body = transcribe(&state, &ada, &project.id).await;
+        assert_eq!(statuses(&body), ["ready", "error"]);
+        assert_eq!(
+            ids(&body).len(),
+            3,
+            "the first source's words still come back"
+        );
+        assert_eq!(
+            transcript_status(&state, &broken.id),
+            TranscriptStatus::Error,
+            "polling must not start it again"
+        );
     }
 }

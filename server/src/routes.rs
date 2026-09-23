@@ -170,16 +170,25 @@ pub(crate) async fn store_upload(
     Ok(meta)
 }
 
-#[derive(Serialize)]
-pub struct Transcript {
-    words: Vec<Word>,
-}
-
 /// Transcript cache file. Bump the version when the whisper invocation changes
 /// in a way that alters the words (v2: disfluency prompt keeps "um"/"uh").
 pub(crate) const WORDS_CACHE: &str = "words-v2.json";
 
-/// `POST /api/projects/:id/transcribe` — whisper.cpp word timestamps (cached).
+#[derive(Serialize)]
+pub struct Transcript {
+    /// Every ready source's words in stitched time.
+    words: Vec<Word>,
+    /// Every source, with how far its transcript has got.
+    sources: Vec<crate::sources::SourceView>,
+}
+
+/// `POST /api/projects/:id/transcribe` — the project's stitched words, and
+/// each source's transcript status.
+///
+/// The first source is transcribed before answering, as it always was, so
+/// a client that predates sources gets its words exactly as before. Every
+/// other source is transcribed in the background; the client asks again
+/// while any is `pending` or `running`.
 ///
 /// Deliberately open to every member, viewers included: the transcript *is*
 /// the document, so a viewer cannot see the project without it. The result is
@@ -188,9 +197,15 @@ pub async fn transcribe(
     State(state): State<Arc<AppState>>,
     access: ProjectAccess,
 ) -> AppResult<Json<Transcript>> {
-    let id = access.project.media_id.clone();
-    let words = transcribe_item(&state, &id).await?;
-    Ok(Json(Transcript { words }))
+    transcribe_item(&state, &access.project.media_id).await?;
+    let (_, doc) = load_doc(&state, &access.project.id).await?;
+    let sources = crate::sources::timeline(&state, &access.project, &doc).await?;
+    for source in sources.iter().skip(1) {
+        crate::sources::start_transcription(&state, &source.media);
+    }
+    let words = crate::sources::stitched_words(&state, &sources).await?;
+    let sources = crate::sources::views(&state, &sources).await?;
+    Ok(Json(Transcript { words, sources }))
 }
 
 /// Transcript words plus speaker labels for a media item, tolerating a
