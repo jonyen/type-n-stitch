@@ -1,7 +1,15 @@
 // The editor's state machine: words, the edit list, server-fold metadata and
 // the current word selection. Pure, so it is easy to test.
 
-import { EPS, isJoin, pieceStarts, rangeForWords, stitchedDuration, wordStatus } from './editlist';
+import {
+  EPS,
+  isJoin,
+  orderStarts,
+  pieceStarts,
+  rangeForWords,
+  stitchedDuration,
+  wordStatus,
+} from './editlist';
 import type { DocState } from './ops';
 import type {
   AudioEdit,
@@ -423,9 +431,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       const current = pieceStarts(state.edits, state.splits);
       const has = (list: number[], x: number) => list.some((s) => sameInstant(s, x));
       if (!has(current, action.piece)) return state;
-      const effective: number[] = [];
-      for (const s of [...state.order, ...current])
-        if (has(current, s) && !has(effective, s)) effective.push(s);
+      // Materialise the current pieces in output order, as the timeline lays them out.
+      const effective = orderStarts(current, state.order);
       const rest = effective.filter((s) => !sameInstant(s, action.piece));
       const at =
         action.before === null
@@ -445,7 +452,9 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       const splits = state.splits.some((s) => sameInstant(s, action.offset))
         ? state.splits
         : [...state.splits, action.offset].sort((a, b) => a - b);
-      return { ...state, sources, splits, duration: stitchedDuration(sources) };
+      // After a move, a new video still goes last, as in the fold.
+      const order = state.order.length > 0 ? [...state.order, action.offset] : state.order;
+      return { ...state, sources, splits, order, duration: stitchedDuration(sources) };
     }
 
     case 'addLayer': {

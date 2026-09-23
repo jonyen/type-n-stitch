@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::editlist::{piece_starts, EPS};
+use crate::editlist::{order_starts, piece_starts, EPS};
 use crate::types::{default_duck, CaptionPos, Edit, Frame, Range, Source, TitleStyle, Transition};
 
 /// Upper bound on speaker indices. Diarization never finds this many voices;
@@ -391,14 +391,9 @@ pub fn apply_op(doc: &mut ProjectDoc, op: &Op) {
             if !has(&current, *piece) {
                 return;
             }
-            // Materialise: live entries of `order` first, then every other
-            // current piece in source order — the same rule the timeline uses.
-            let mut effective: Vec<f64> = Vec::new();
-            for &s in doc.order.iter().chain(current.iter()) {
-                if has(&current, s) && !has(&effective, s) {
-                    effective.push(s);
-                }
-            }
+            // Materialise the current pieces in output order — the same rule
+            // the timeline uses.
+            let mut effective = order_starts(&current, &doc.order);
             effective.retain(|s| (s - piece).abs() >= EPS);
             let at = before
                 .and_then(|b| effective.iter().position(|s| (s - b).abs() < EPS))
@@ -470,6 +465,10 @@ pub fn apply_op(doc: &mut ProjectDoc, op: &Op) {
                 duration: *duration,
             });
             add_split(doc, *offset);
+            // After a Move, a new video still goes last.
+            if !doc.order.is_empty() {
+                doc.order.push(*offset);
+            }
         }
         Op::AddLayer {
             track,
@@ -1238,6 +1237,83 @@ mod tests {
             ),
         ]);
         assert_eq!(doc.order, vec![10.0, 0.0]);
+    }
+
+    /// Three ten-second videos, the third moved to the front: order [20, 0, 10].
+    fn three_reordered() -> Vec<SeqOp> {
+        vec![
+            op(1, add_source(10.0, 10.0)),
+            op(2, add_source(20.0, 10.0)),
+            op(
+                3,
+                Op::Move {
+                    piece: 20.0,
+                    before: Some(0.0),
+                },
+            ),
+        ]
+    }
+
+    fn laid_out(doc: &ProjectDoc) -> Vec<f64> {
+        crate::editlist::ordered_pieces(30.0, &doc.edits, &doc.splits, &doc.order)
+            .iter()
+            .map(|p| p.start)
+            .collect()
+    }
+
+    #[test]
+    fn a_cut_inside_a_reordered_piece_keeps_the_remainder_with_it() {
+        let mut log = three_reordered();
+        assert_eq!(fold(&log).order, vec![20.0, 0.0, 10.0]);
+        log.push(op(4, cut(3.0, 5.0)));
+        assert_eq!(laid_out(&fold(&log)), vec![20.0, 0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn a_split_inside_a_reordered_piece_keeps_both_halves_in_place() {
+        let mut log = three_reordered();
+        log.push(op(4, Op::Split { at: 5.0 }));
+        assert_eq!(laid_out(&fold(&log)), vec![20.0, 0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn a_head_cut_of_a_reordered_piece_keeps_its_place() {
+        let mut log = three_reordered();
+        log.push(op(4, cut(0.0, 2.0)));
+        assert_eq!(laid_out(&fold(&log)), vec![20.0, 2.0, 10.0]);
+    }
+
+    #[test]
+    fn add_source_after_a_move_goes_last() {
+        let doc = fold(&[
+            op(1, add_source(10.0, 10.0)),
+            op(
+                2,
+                Op::Move {
+                    piece: 10.0,
+                    before: Some(0.0),
+                },
+            ),
+            op(3, add_source(20.0, 10.0)),
+        ]);
+        assert_eq!(doc.order, vec![10.0, 0.0, 20.0]);
+        assert_eq!(laid_out(&doc), vec![10.0, 0.0, 20.0]);
+        // With no Move yet, `order` stays empty: source order.
+        assert!(fold(&[op(1, add_source(10.0, 10.0))]).order.is_empty());
+    }
+
+    #[test]
+    fn a_move_after_a_cut_keeps_the_remainder_next_to_its_parent() {
+        let mut log = three_reordered();
+        log.push(op(4, cut(3.0, 5.0)));
+        log.push(op(
+            5,
+            Op::Move {
+                piece: 20.0,
+                before: None,
+            },
+        ));
+        assert_eq!(fold(&log).order, vec![0.0, 5.0, 10.0, 20.0]);
     }
 
     #[test]

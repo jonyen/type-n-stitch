@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { editorReducer, initialEditor, selectedRange, type EditorState } from './editor';
+import { orderedPieces } from './editlist';
 import type { DocState } from './ops';
 import type { Word } from './types';
 
@@ -525,6 +526,50 @@ describe('sources', () => {
     });
     expect(zero.sources).toEqual([{ media: 'm0', offset: 0, duration: 0 }]);
     expect(zero.duration).toBe(0);
+  });
+
+  // Three ten-second videos, the third moved to the front: order [20, 0, 10].
+  const three = () => {
+    let s = editorReducer(initialEditor, { type: 'load', words, duration: 10, media: 'm0' });
+    s = editorReducer(s, { type: 'addSource', media: 'm1', offset: 10, duration: 10 });
+    s = editorReducer(s, { type: 'addSource', media: 'm2', offset: 20, duration: 10 });
+    return editorReducer(s, { type: 'moveClip', piece: 20, before: 0 });
+  };
+  const laidOut = (s: EditorState) =>
+    orderedPieces(s.duration, s.edits, s.splits, s.order).map((p) => p.start);
+  const withCut = (s: EditorState, start: number, end: number): EditorState => ({
+    ...s,
+    edits: [...s.edits, { kind: 'cut', start, end }],
+  });
+
+  it('a cut inside a reordered piece keeps the remainder with it', () => {
+    expect(three().order).toEqual([20, 0, 10]);
+    expect(laidOut(withCut(three(), 3, 5))).toEqual([20, 0, 5, 10]);
+  });
+
+  it('a split inside a reordered piece keeps both halves in place', () => {
+    expect(laidOut(editorReducer(three(), { type: 'split', at: 5 }))).toEqual([20, 0, 5, 10]);
+  });
+
+  it("a cut of a reordered piece's head keeps its place", () => {
+    expect(laidOut(withCut(three(), 0, 2))).toEqual([20, 2, 10]);
+  });
+
+  it('addSource after a Move goes last', () => {
+    let s = editorReducer(first, { type: 'addSource', media: 'm1', offset: 20, duration: 10 });
+    s = editorReducer(s, { type: 'moveClip', piece: 20, before: 0 });
+    s = editorReducer(s, { type: 'addSource', media: 'm2', offset: 30, duration: 10 });
+    expect(s.order).toEqual([20, 0, 30]);
+    expect(laidOut(s)).toEqual([20, 0, 30]);
+    // With no Move yet, the order stays empty: source order.
+    expect(
+      editorReducer(first, { type: 'addSource', media: 'm1', offset: 20, duration: 10 }).order,
+    ).toEqual([]);
+  });
+
+  it('a Move after a cut keeps the remainder next to its parent', () => {
+    const s = editorReducer(withCut(three(), 3, 5), { type: 'moveClip', piece: 20, before: null });
+    expect(s.order).toEqual([0, 5, 10, 20]);
   });
 
   it('addSource appends at the end with its join, and the duration is stitched', () => {

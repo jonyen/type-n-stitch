@@ -66,8 +66,44 @@ pub enum SegmentKind {
     Title { index: usize },
 }
 
-/// Kept ranges divided at every split, in output order: live entries of
-/// `order` first, then every other piece in source order.
+/// Lay piece starts out in output order. With no `order`, source order.
+/// Otherwise each start joins a parent: the greatest `order` entry at or
+/// before it (entries whose piece has since gone still count), else the
+/// smallest entry. Groups follow `order`; each group is in source order. So
+/// a cut, split or head trim made after a Move keeps what remains of a piece
+/// where the piece was. Mirrors the client's `orderStarts`.
+pub fn order_starts(starts: &[f64], order: &[f64]) -> Vec<f64> {
+    let mut sorted = starts.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    if order.is_empty() {
+        return sorted;
+    }
+    let parent = |s: f64| -> usize {
+        let mut best: Option<usize> = None;
+        for (i, &o) in order.iter().enumerate() {
+            if o <= s + EPS && best.is_none_or(|b| o > order[b]) {
+                best = Some(i);
+            }
+        }
+        best.unwrap_or_else(|| {
+            (0..order.len())
+                .min_by(|&a, &b| order[a].total_cmp(&order[b]))
+                .unwrap_or(0)
+        })
+    };
+    let parents: Vec<usize> = sorted.iter().map(|&s| parent(s)).collect();
+    let mut out = Vec::with_capacity(sorted.len());
+    for i in 0..order.len() {
+        for (j, &s) in sorted.iter().enumerate() {
+            if parents[j] == i {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// Kept ranges divided at every split, in output order (`order_starts`).
 pub fn ordered_pieces(duration: f64, edits: &[Edit], splits: &[f64], order: &[f64]) -> Vec<Range> {
     let mut points = splits.to_vec();
     points.sort_by(f64::total_cmp);
@@ -76,21 +112,11 @@ pub fn ordered_pieces(duration: f64, edits: &[Edit], splits: &[f64], order: &[f6
         .flat_map(|r| split_at(r, &points))
         .filter(|r| !r.is_empty())
         .collect();
-    let same = |a: f64, b: f64| (a - b).abs() < EPS;
-    let mut out: Vec<Range> = Vec::with_capacity(source.len());
-    for &s in order {
-        if let Some(r) = source.iter().find(|r| same(r.start, s)) {
-            if !out.iter().any(|o| same(o.start, s)) {
-                out.push(*r);
-            }
-        }
-    }
-    for r in &source {
-        if !out.iter().any(|o| same(o.start, r.start)) {
-            out.push(*r);
-        }
-    }
-    out
+    let starts: Vec<f64> = source.iter().map(|r| r.start).collect();
+    order_starts(&starts, order)
+        .into_iter()
+        .filter_map(|s| source.iter().find(|r| r.start == s).copied())
+        .collect()
 }
 
 /// Which ordered piece owns an instant: the one containing it, else the
@@ -929,6 +955,43 @@ mod tests {
             ordered_pieces(10.0, &edits, &[4.5, 10.0], &[]),
             vec![r(0.0, 4.0), r(5.0, 10.0)]
         );
+    }
+
+    /// Three ten-second videos moved to C, A, B: `order` = [20, 0, 10].
+    fn starts_of(pieces: &[Range]) -> Vec<f64> {
+        pieces.iter().map(|p| p.start).collect()
+    }
+
+    #[test]
+    fn a_cut_or_split_inside_a_reordered_piece_keeps_the_remainder_with_it() {
+        let joins = [10.0, 20.0];
+        let order = [20.0, 0.0, 10.0];
+        let cut_inside = ordered_pieces(30.0, &[cut(3.0, 5.0)], &joins, &order);
+        assert_eq!(starts_of(&cut_inside), vec![20.0, 0.0, 5.0, 10.0]);
+        let split_inside = ordered_pieces(30.0, &[], &[10.0, 20.0, 5.0], &order);
+        assert_eq!(starts_of(&split_inside), vec![20.0, 0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn order_starts_groups_each_start_under_its_parent() {
+        // No order: source order.
+        assert_eq!(order_starts(&[10.0, 0.0, 5.0], &[]), vec![0.0, 5.0, 10.0]);
+        // A dead entry (0.0) still parents the head-trimmed 2.0.
+        assert_eq!(
+            order_starts(&[2.0, 10.0, 20.0], &[20.0, 0.0, 10.0]),
+            vec![20.0, 2.0, 10.0]
+        );
+        // A start before every entry joins the smallest one.
+        assert_eq!(
+            order_starts(&[1.0, 5.0, 8.0], &[8.0, 5.0]),
+            vec![8.0, 1.0, 5.0]
+        );
+    }
+
+    #[test]
+    fn a_head_cut_of_a_reordered_piece_keeps_its_place() {
+        let pieces = ordered_pieces(30.0, &[cut(0.0, 2.0)], &[10.0, 20.0], &[20.0, 0.0, 10.0]);
+        assert_eq!(starts_of(&pieces), vec![20.0, 2.0, 10.0]);
     }
 
     #[test]

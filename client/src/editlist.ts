@@ -122,10 +122,37 @@ function complement(from: number, to: number, holes: Range[]): Range[] {
 const RANK: Record<Piece['kind'], number> = { title: 0, overdub: 1, source: 2 };
 
 /**
+ * Lay piece starts out in output order. With no `order`, source order.
+ * Otherwise each start joins a parent: the greatest `order` entry at or
+ * before it (entries whose piece has since gone still count), else the
+ * smallest entry. Groups follow `order`; each group is in source order. So a
+ * cut, split or head trim made after a move keeps what remains of a piece
+ * where the piece was. Mirrors the engine's `order_starts`.
+ */
+export function orderStarts(starts: number[], order: number[]): number[] {
+  const sorted = [...starts].sort((a, b) => a - b);
+  if (order.length === 0) return sorted;
+  const parent = (s: number): number => {
+    let best = -1;
+    order.forEach((o, i) => {
+      if (o <= s + EPS && (best === -1 || o > (order[best] as number))) best = i;
+    });
+    if (best !== -1) return best;
+    let least = 0;
+    order.forEach((o, i) => {
+      if (o < (order[least] as number)) least = i;
+    });
+    return least;
+  };
+  const parents = sorted.map(parent);
+  const out: number[] = [];
+  order.forEach((_, i) => sorted.forEach((s, j) => parents[j] === i && out.push(s)));
+  return out;
+}
+
+/**
  * The kept source split at every reorder split point, then laid out in
- * output order: entries named in `order` first (in that order, deduped),
- * then any remaining pieces in source order. Mirrors the engine's
- * `ordered_pieces`.
+ * output order by `orderStarts`. Mirrors the engine's `ordered_pieces`.
  */
 export function orderedPieces(
   duration: number,
@@ -145,14 +172,10 @@ export function orderedPieces(
     }
     source.push({ start: cursor, end: kept.end });
   }
-  const same = (a: number, b: number) => Math.abs(a - b) < EPS;
-  const out: Range[] = [];
-  for (const s of order) {
-    const r = source.find((x) => same(x.start, s));
-    if (r && !out.some((o) => same(o.start, s))) out.push(r);
-  }
-  for (const r of source) if (!out.some((o) => same(o.start, r.start))) out.push(r);
-  return out;
+  return orderStarts(
+    source.map((r) => r.start),
+    order,
+  ).map((s) => source.find((r) => r.start === s) as Range);
 }
 
 /** Index of the ordered piece that owns source time `t`: containing it, or the next one after it. */

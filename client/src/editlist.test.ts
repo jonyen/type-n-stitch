@@ -14,6 +14,7 @@ import {
   nextCutTransition,
   normalizeCuts,
   orderedPieces,
+  orderStarts,
   outputDuration,
   overdubAt,
   pieces,
@@ -252,6 +253,21 @@ describe('orderedPieces and jumps', () => {
       { start: 0, end: 2 },
       { start: 2, end: 4 },
     ]);
+  });
+  // Three ten-second videos moved to C, A, B: order [20, 0, 10].
+  const startsOf = (list: { start: number }[]) => list.map((p) => p.start);
+  it('a cut or split inside a reordered piece keeps the remainder with it', () => {
+    const order = [20, 0, 10];
+    expect(startsOf(orderedPieces(30, [cut(3, 5)], [10, 20], order))).toEqual([20, 0, 5, 10]);
+    expect(startsOf(orderedPieces(30, [], [10, 20, 5], order))).toEqual([20, 0, 5, 10]);
+  });
+  it('orderStarts groups each start under its parent, like the engine', () => {
+    expect(orderStarts([10, 0, 5], [])).toEqual([0, 5, 10]);
+    expect(orderStarts([2, 10, 20], [20, 0, 10])).toEqual([20, 2, 10]);
+    expect(orderStarts([1, 5, 8], [8, 5])).toEqual([8, 1, 5]);
+  });
+  it('a head cut of a reordered piece keeps its place', () => {
+    expect(startsOf(orderedPieces(30, [cut(0, 2)], [10, 20], [20, 0, 10]))).toEqual([20, 2, 10]);
   });
   it('pieces lays out sub-pieces per ordered piece', () => {
     const list = pieces(10, [overdub(6, 7, 2)], [5], [5, 0]);
