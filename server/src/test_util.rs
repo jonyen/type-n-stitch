@@ -27,6 +27,8 @@ pub async fn state() -> (Arc<AppState>, TempDir) {
     // Background transcription must never find a real whisper in tests: a
     // job fails fast instead, which is what the status tests rely on.
     config.whisper_bin = "type-n-stitch-no-whisper-in-tests".into();
+    // Nor a real diarizer: speaker labels come from seeded caches only.
+    config.diarize_bin = dir.path().join("no-diarizer-in-tests");
     tokio::fs::create_dir_all(&config.data_dir).await.unwrap();
     let db = db::open(&config.database_url).await.unwrap();
     let state = Arc::new(AppState {

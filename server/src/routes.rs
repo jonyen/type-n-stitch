@@ -231,7 +231,8 @@ pub async fn transcribe_item(state: &AppState, id: &str) -> AppResult<Vec<Word>>
     .await
     .map_err(|e| AppError::upstream(format!("{e:#}")))?;
 
-    tokio::fs::write(&cached, serde_json::to_vec(&words)?)
+    // Atomically: a client polling `/transcribe` must never read half a file.
+    write_json_atomic(&cached, &serde_json::to_vec(&words)?)
         .await
         .context("caching words")?;
     tracing::info!(id, words = words.len(), "transcribed");
@@ -284,7 +285,7 @@ pub async fn speakers_item(state: &AppState, id: &str) -> AppResult<Speakers> {
         words: assign_speakers(&words, &turns),
         turns,
     };
-    tokio::fs::write(&cached, serde_json::to_vec(&speakers)?)
+    write_json_atomic(&cached, &serde_json::to_vec(&speakers)?)
         .await
         .context("caching speakers")?;
     tracing::info!(id, speakers = speakers.count, "diarized");

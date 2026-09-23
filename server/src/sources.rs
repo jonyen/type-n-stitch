@@ -459,6 +459,10 @@ async fn append_at_end(
     mut sources: Vec<Source>,
 ) -> AppResult<SourceView> {
     let mut retried = false;
+    // The same media may already be on the track (an asset added twice
+    // shares one id), so "did this add land" is "is there one more of it".
+    let copies = |sources: &[Source]| sources.iter().filter(|s| s.media == meta.id).count();
+    let before = copies(&sources);
     let offset = loop {
         let offset = stitched_duration(&sources);
         let appended = apply_ops(
@@ -475,21 +479,33 @@ async fn append_at_end(
             }],
         )
         .await;
-        match appended {
-            Ok(_) => break offset,
-            Err(e) if !retried => {
-                let (_, doc) = crate::ops::load_doc(state, &project.id).await?;
-                let now = timeline(state, project, &doc).await?;
-                if (stitched_duration(&now) - offset).abs() <= EPS {
-                    // The end did not move: the refusal is about this media.
-                    return Err(e);
-                }
-                check_room(now.len())?;
-                sources = now;
-                retried = true;
-            }
-            Err(e) => return Err(e),
+        let Err(e) = appended else {
+            break offset;
+        };
+        let (_, doc) = crate::ops::load_doc(state, &project.id).await?;
+        let now = timeline(state, project, &doc).await?;
+        // The failure may have come after the commit, or an earlier attempt
+        // landed: the source is already live, so this is a success, and
+        // appending again would add it twice (and a caller cleaning up
+        // after an error would delete a live source's files).
+        if copies(&now) > before {
+            let index = now
+                .iter()
+                .rposition(|s| s.media == meta.id)
+                .expect("counted above");
+            let offset = now[index].offset;
+            sources = now;
+            sources.truncate(index);
+            break offset;
         }
+        if retried || (stitched_duration(&now) - offset).abs() <= EPS {
+            // Tried twice, or the end did not move: the refusal is about
+            // this media.
+            return Err(e);
+        }
+        check_room(now.len())?;
+        sources = now;
+        retried = true;
     };
     start_transcription(state, &meta.id);
     Ok(SourceView {
@@ -1730,5 +1746,36 @@ mod tests {
                 .contains("that media is missing"),
             "{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn tests_never_find_a_real_whisper_or_diarizer() {
+        let (state, _d) = state().await;
+        assert!(!std::path::Path::new(&state.config.whisper_bin).is_file());
+        assert!(
+            !state.config.diarize_bin.is_file(),
+            "{}",
+            state.config.diarize_bin.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_the_add_already_landed_does_not_append_it_twice() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let (_, doc) = crate::ops::load_doc(&state, &project.id).await.unwrap();
+        let stale = timeline(&state, &project, &doc).await.unwrap();
+        // The add committed, but its caller saw an error and tries again.
+        let second = seed_source(&state, 4.0, &["d"]).await;
+        add_source(&state, &project, &owner, &second).await.unwrap();
+        let view = append_at_end(&state, &project, &owner, &second, stale)
+            .await
+            .unwrap();
+        assert_eq!(view.index, 1);
+        assert_eq!(view.offset, 10.0);
+        let (_, doc) = crate::ops::load_doc(&state, &project.id).await.unwrap();
+        assert_eq!(doc.sources.len(), 1, "appended once");
     }
 }

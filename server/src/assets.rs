@@ -206,7 +206,7 @@ pub async fn upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?
+        .map_err(|e| AppError::multipart(&e, ""))?
     {
         if field.name() == Some("file") {
             return Ok(Json(store(&state, &access.project, field).await?));
@@ -316,7 +316,7 @@ async fn write_body(path: &Path, field: &mut axum::extract::multipart::Field<'_>
     while let Some(chunk) = field
         .chunk()
         .await
-        .map_err(|e| AppError::bad_request(format!("upload interrupted: {e}")))?
+        .map_err(|e| AppError::multipart(&e, "upload interrupted"))?
     {
         file.write_all(&chunk).await.context("writing asset")?;
     }
@@ -416,6 +416,34 @@ mod tests {
     use super::test_support::seed_asset;
     use super::*;
     use crate::test_util::{add_member, app, call, json_req, owned_project, register, state};
+
+    #[tokio::test]
+    async fn an_oversized_asset_upload_is_413() {
+        let (mut state, _d) = state().await;
+        std::sync::Arc::get_mut(&mut state)
+            .unwrap()
+            .config
+            .max_upload_bytes = 1024;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let mut body =
+            b"--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.mp4\"\r\n\r\n"
+                .to_vec();
+        body.extend_from_slice(&[0u8; 8 * 1024]);
+        body.extend_from_slice(b"\r\n--x--\r\n");
+        let req = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/projects/{}/assets", project.id))
+            .header(axum::http::header::COOKIE, &ada)
+            .header(
+                axum::http::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=x",
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let (status, body, _) = call(app(&state), req).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    }
 
     #[tokio::test]
     async fn members_list_assets_and_only_editors_delete() {

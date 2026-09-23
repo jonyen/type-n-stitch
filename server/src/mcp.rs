@@ -131,8 +131,11 @@ pub struct Open {
     bot: Option<User>,
     conn_id: String,
     subscription: Option<Subscription>,
-    /// The media's source duration, for the range the last word owns.
+    /// The stitched duration of the main track.
     duration: f64,
+    /// The main track's sources, so a word's owned stretch stops at the end
+    /// of its own file.
+    sources: Vec<engine::Source>,
     /// The transcript, fetched once at open: words never change, only edits.
     words: Vec<Word>,
     /// Speaker index per word, when diarization succeeded.
@@ -714,6 +717,7 @@ impl McpSession {
         open.role = Some(role);
         open.bot = Some(identity.bot.clone());
         open.duration = duration;
+        open.sources = sources;
         open.words = words;
         open.speakers = speakers.map(|s| s.words);
 
@@ -1329,7 +1333,7 @@ fn require_edit(open: &Open) -> AppResult<()> {
 
 /// The source range words `from..=to` own, or the server's own 400.
 fn range_of(open: &Open, from: usize, to: usize) -> AppResult<Range> {
-    word_range(&open.words, from, to, open.duration).ok_or_else(|| {
+    word_range(&open.words, from, to, &open.sources).ok_or_else(|| {
         AppError::bad_request(format!(
             "no words {from}..{to} in a transcript of {}",
             open.words.len()
@@ -1357,8 +1361,14 @@ fn already_cut(suggested: Range, edits: &[Edit]) -> bool {
 fn touched_by(open: &Open, cuts: &[Range]) -> Option<(usize, usize)> {
     let mut span: Option<(usize, usize)> = None;
     for i in 0..open.words.len() {
-        let from = if i == 0 { 0.0 } else { open.words[i - 1].end };
-        let to = open.words.get(i + 1).map_or(open.duration, |w| w.start);
+        // Clamped to the word's own file, like `word_range`.
+        let own = crate::mcp_tools::own_source(&open.sources, open.words[i].start);
+        let from = if i == 0 { 0.0 } else { open.words[i - 1].end }.max(own.start);
+        let to = open
+            .words
+            .get(i + 1)
+            .map_or(open.duration, |w| w.start)
+            .min(own.end);
         if cuts.iter().any(|c| from < c.end && to > c.start) {
             span = Some(match span {
                 Some((lo, _)) => (lo, i),
@@ -1548,6 +1558,42 @@ mod tests {
                 "undo"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn cutting_the_last_word_before_an_untranscribed_source_stops_at_the_join() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = crate::projects::test_support::seed_media(&state, 4.0).await;
+        let second = routes::read_meta(&state.config.data_dir.join(&second))
+            .await
+            .unwrap();
+        state
+            .transcripts
+            .lock()
+            .unwrap()
+            .insert(second.id.clone(), crate::sources::TranscriptJob::Running);
+        crate::sources::add_source(&state, &project, &owner, &second)
+            .await
+            .unwrap();
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        let out = session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        assert_eq!(out["transcript"].as_array().unwrap().len(), 3);
+        session.tool_cut(&identity, 2, 2).await.unwrap();
+        let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
+        let cuts: Vec<Range> = doc
+            .edits
+            .iter()
+            .filter(|e| e.is_cut())
+            .map(Edit::range)
+            .collect();
+        assert_eq!(cuts, [Range::new(2.0, 10.0)], "video 2 must survive");
     }
 
     #[tokio::test]
