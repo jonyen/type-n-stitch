@@ -136,8 +136,8 @@ export function wordStops(words: Word[], segments: Segment[]): Stop[] {
   return stops.sort((a, b) => a.at - b.at);
 }
 
-export function nearestStop(t: number, stops: Stop[]): Stop | null {
-  let best: Stop | null = null;
+export function nearestStop<T extends { at: number }>(t: number, stops: T[]): T | null {
+  let best: T | null = null;
   for (const s of stops) if (!best || Math.abs(s.at - t) < Math.abs(best.at - t)) best = s;
   return best;
 }
@@ -178,8 +178,18 @@ export function snappedBand(
   b: number,
   words: Word[],
   segments: Segment[],
+  joins: readonly number[] = [],
 ): Range | null {
-  const stops = wordStops(words, segments);
+  // Where one file meets another is a stop too, so a band can end a file
+  // without taking the next one's opening, transcribed or not. The razor's
+  // `wordStops` stay words only.
+  const atJoin = (t: number) => joins.some((j) => Math.abs(j - t) < EPS);
+  const stops: { at: number }[] = [...wordStops(words, segments)];
+  for (const s of segments) {
+    if (s.kind !== 'source') continue;
+    if (atJoin(s.source.start)) stops.push({ at: s.output.start });
+    if (atJoin(s.source.end)) stops.push({ at: s.output.end });
+  }
   const lo = nearestStop(Math.min(a, b), stops);
   const hi = nearestStop(Math.max(a, b), stops);
   if (!lo || !hi || hi.at - lo.at < EPS) return null;
@@ -187,8 +197,14 @@ export function snappedBand(
 }
 
 /** The source ranges a band removes: overdubs only when wholly covered, titles never. */
-export function rangeCuts(a: number, b: number, words: Word[], segments: Segment[]): Range[] {
-  const band = snappedBand(a, b, words, segments);
+export function rangeCuts(
+  a: number,
+  b: number,
+  words: Word[],
+  segments: Segment[],
+  joins: readonly number[] = [],
+): Range[] {
+  const band = snappedBand(a, b, words, segments, joins);
   if (!band) return [];
   const out: Range[] = [];
   for (const s of segments) {

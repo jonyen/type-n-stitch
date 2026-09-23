@@ -53,7 +53,13 @@ import { audios, layers } from './overlays';
 import { type PresenceState } from './realtime';
 import { deleteAction } from './selection';
 import { useSession } from './session';
-import { isTranscribing, playableSources, sourceViewsOf, unlistedSources } from './sources';
+import {
+  isTranscribing,
+  playableSources,
+  readyKey,
+  sourceViewsOf,
+  unlistedSources,
+} from './sources';
 import { useStitchedMedia } from './stitchedMedia';
 import styles from './App.module.css';
 import ui from './styles/ui.module.css';
@@ -125,8 +131,12 @@ export function App() {
   const [speakers, setSpeakers] = useState<(number | null)[] | null>(null);
   // The project's files as the server lists them: names, urls, transcript status.
   const [sourceViews, setSourceViews] = useState<SourceView[]>([]);
-  // How many ready sources the current words cover; one more finishing brings its words in.
-  const [wordsReady, setWordsReady] = useState(0);
+  // The ready files the current words cover (a `readyKey`). When the timeline's
+  // ready files differ, either way (one finished, or an undo took one away),
+  // the stitched words are fetched again.
+  const [wordsCover, setWordsCover] = useState('');
+  // Bumped to retry a failed words fetch.
+  const [wordsRetry, setWordsRetry] = useState(0);
   // The home screen's import, file by file, while it runs.
   const [imports, setImports] = useState<ImportItem[]>([]);
   // Insert → Add video…, file by file. Failed files stay until dismissed.
@@ -390,30 +400,31 @@ export function App() {
     };
   }, [projectId, unlisted]);
 
-  // Another file's transcript is ready: fetch the stitched words again.
-  const readyCount = sourceViews.filter((v) => v.transcript === 'ready').length;
+  // The timeline's ready files are not the ones the words cover: fetch the
+  // stitched words again. The server stitches its fold's ready files, so an
+  // undone file's words go and a finished file's words arrive.
+  const readyNow = readyKey(sourceViews, editor.sources);
   useEffect(() => {
-    if (!projectId || readyCount <= wordsReady) return;
+    if (!projectId || readyNow === wordsCover) return;
     let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
     transcribeProject(projectId)
       .then(({ words: list, sources: fresh }) => {
         if (cancelled) return;
         // The words cover exactly the sources this reply calls ready.
-        if (fresh) {
-          setSourceViews(fresh);
-          setWordsReady(fresh.filter((v) => v.transcript === 'ready').length);
-        } else {
-          setWordsReady(readyCount);
-        }
+        if (fresh) setSourceViews(fresh);
+        setWordsCover(fresh ? readyKey(fresh) : readyNow);
         dispatch({ type: 'setWords', words: list });
       })
-      .catch((err: unknown) => {
-        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
+      .catch(() => {
+        // A background refresh: the editor still works. Try again shortly.
+        if (!cancelled) retry = setTimeout(() => setWordsRetry((n) => n + 1), 2000);
       });
     return () => {
       cancelled = true;
+      clearTimeout(retry);
     };
-  }, [projectId, readyCount, wordsReady]);
+  }, [projectId, readyNow, wordsCover, wordsRetry]);
 
   useEffect(() => {
     if (!projectId) {
@@ -481,7 +492,7 @@ export function App() {
     setBrollRange(null);
     setAudioDialog(null);
     setSourceViews([]);
-    setWordsReady(0);
+    setWordsCover('');
     setUploads([]);
     setTool('select');
   }, [stitched]);
@@ -528,7 +539,7 @@ export function App() {
       const views = sourceViewsOf(fetched.project);
       setSourceViews(views);
       // The words cover exactly the sources the transcribe reply calls ready.
-      setWordsReady((transcript.sources ?? views).filter((v) => v.transcript === 'ready').length);
+      setWordsCover(readyKey(transcript.sources ?? views));
       setProject(summary);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));

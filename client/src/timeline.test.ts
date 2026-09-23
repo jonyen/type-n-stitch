@@ -313,3 +313,27 @@ describe('pieceOutputTime (a reordered edit, where source boundaries are ambiguo
     expect(pieceOutputTime(10, 1, pieces, plain)).toBe(timelineLength(plain));
   });
 });
+
+describe('range at a join', () => {
+  // Two files: [0, 5) with words at 0..4, and [5, 10). The fold splits at the join.
+  const first = words(5);
+  const second: Word[] = [{ id: '1:w0', text: 'b0', start: 5.6, end: 6 }];
+
+  it('can end the band at the join when the next file has words', () => {
+    const segs = timelineSegments(10, [], [5], []);
+    expect(snappedBand(4.2, 5.1, [...first, ...second], segs, [5])).toEqual(r(4, 5));
+    expect(rangeCuts(4.2, 5.1, [...first, ...second], segs, [5])).toEqual([r(4, 5)]);
+  });
+
+  it('stops at the join, not the output end, when the next file has no words yet', () => {
+    const segs = timelineSegments(10, [], [5], []);
+    expect(rangeCuts(4.2, 5.4, first, segs, [5])).toEqual([r(4, 5)]);
+  });
+
+  it('finds the join in output order after a reorder', () => {
+    // Output: the untranscribed second file [0, 5), then the first [5, 10).
+    // Its only stops are where it starts (the join) and the first file's words.
+    const segs = timelineSegments(10, [], [5], [5, 0]);
+    expect(rangeCuts(0.2, 4.8, first, segs, [5])).toEqual([r(5, 10)]);
+  });
+});

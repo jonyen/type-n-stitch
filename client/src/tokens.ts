@@ -142,8 +142,12 @@ export function clipRuns(words: Word[], tokens: Token[], ordered: Range[]): Clip
     return k;
   };
   const buckets: Token[][] = source.map(() => []);
+  // Words at or past the end belong to no piece: a file an undo took away,
+  // until the words are fetched again. Title cards stay; they sit on the timeline.
+  const end = Math.max(...ordered.map((p) => p.end));
   for (const token of tokens) {
     const start = tokenStart(token);
+    if (token.kind !== 'title' && (words[start]?.start ?? -Infinity) >= end - EPS) continue;
     const k = start >= words.length ? source.length - 1 : runOf(start);
     buckets[k]?.push(token);
   }

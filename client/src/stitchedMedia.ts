@@ -65,12 +65,22 @@ export class StitchedMedia extends EventTarget implements PlaybackMedia {
       });
   };
 
+  /** A file that cannot load ends its swap: the clock is paused where the element is. */
+  private readonly failed = () => {
+    if (this.pending === null) return;
+    const resume = this.resume;
+    this.pending = null;
+    this.resume = false;
+    if (resume) this.dispatchEvent(new Event('pause'));
+  };
+
   /** The callback ref for the Player's <video>. Stable for the clock's life. */
   readonly attach = (el: HTMLVideoElement | null): void => {
     if (el === this.el) return;
     if (this.el) {
       for (const type of FORWARDED) this.el.removeEventListener(type, this.forward);
       this.el.removeEventListener('loadedmetadata', this.landed);
+      this.el.removeEventListener('error', this.failed);
     }
     this.el = el;
     this.loadedUrl = null;
@@ -79,6 +89,7 @@ export class StitchedMedia extends EventTarget implements PlaybackMedia {
     if (!el) return;
     for (const type of FORWARDED) el.addEventListener(type, this.forward);
     el.addEventListener('loadedmetadata', this.landed);
+    el.addEventListener('error', this.failed);
     const source = this.list[this.index];
     if (source) this.load(source.url);
   };
@@ -86,6 +97,9 @@ export class StitchedMedia extends EventTarget implements PlaybackMedia {
   /** The main track's files in stitched order. The loaded file stays if it is still there. */
   setSources(list: PlayableSource[]): void {
     this.list = list;
+    // Shapes of files no longer listed (another project's, an undone one) go.
+    for (const url of this.shapes.keys())
+      if (!list.some((s) => s.url === url)) this.shapes.delete(url);
     if (this.index >= list.length) this.index = 0;
     const source = list[this.index];
     if (source && source.url !== this.loadedUrl) this.load(source.url);
@@ -141,7 +155,12 @@ export class StitchedMedia extends EventTarget implements PlaybackMedia {
       }
       return Promise.resolve();
     }
-    return this.el.play();
+    return this.el.play().catch((err: unknown) => {
+      // A swap or a pause interrupting the play is routine. Anything else
+      // (autoplay refused, a file that will not decode) leaves it paused: say so.
+      if (!(err instanceof DOMException && err.name === 'AbortError'))
+        this.dispatchEvent(new Event('pause'));
+    });
   }
 
   pause(): void {
@@ -190,7 +209,15 @@ export class StitchedMedia extends EventTarget implements PlaybackMedia {
   /** Point a detached, muted element at the next file so its swap starts warm. */
   private preloadNext() {
     const next = this.list[this.index + 1];
-    if (!next || typeof document === 'undefined') return;
+    if (!next) {
+      // Nothing to warm: let the file go rather than hold its buffer.
+      if (this.preloader?.hasAttribute('src')) {
+        this.preloader.removeAttribute('src');
+        this.preloader.load();
+      }
+      return;
+    }
+    if (typeof document === 'undefined') return;
     if (!this.preloader) {
       const preloader = document.createElement('video');
       preloader.preload = 'auto';

@@ -248,7 +248,7 @@ const video = (index: number, offset: number, duration = 5): SourceView => ({
 describe('Timeline sources', () => {
   const badges = () =>
     screen
-      .getAllByRole('button', { name: /^Clip \d/ })
+      .getAllByRole('button', { name: /Clip \d/ })
       .map((c) => c.querySelector('[data-source]')?.textContent);
 
   it('badges each clip with its video and marks where two videos meet', () => {
@@ -260,7 +260,7 @@ describe('Timeline sources', () => {
     expect(joins[0]?.style.left).toBe('50%');
     expect(
       screen
-        .getAllByRole('button', { name: /^Clip \d/ })[0]
+        .getAllByRole('button', { name: /Clip \d/ })[0]
         ?.querySelector('[data-source]')
         ?.getAttribute('title'),
     ).toBe('Video 2 · take2.mp4');
@@ -284,5 +284,14 @@ describe('Timeline sources', () => {
     setup({ sources: [video(0, 0, 10)] });
     expect(document.querySelector('[data-source]')).toBeNull();
     expect(screen.queryAllByTestId('source-join')).toHaveLength(0);
+  });
+});
+
+describe('Timeline sources, for a screen reader', () => {
+  it('names the video in each clip label once there are several', () => {
+    setup({ sources: [video(0, 0), video(1, 5)] });
+    expect(
+      screen.getAllByRole('button', { name: /Clip \d/ }).map((c) => c.getAttribute('aria-label')),
+    ).toEqual(['Video 2 · Clip 1: w5 w6 w7 w8…', 'Video 1 · Clip 2: w0 w1 w2 w3…']);
   });
 });

@@ -144,3 +144,15 @@ describe('clipRuns', () => {
     expect(clips[1]?.tokens.map(tokenStart)).toEqual([0, 1, 2]); // cut word 2 stays with the first source piece
   });
 });
+
+describe('clipRuns past the end', () => {
+  it('leaves out words at or past the last piece: an undone file whose words are still loaded', () => {
+    const stale: Word[] = [...words, { id: '1:w0', text: 'gone', start: 20.4, end: 20.8 }];
+    const edits: Edit[] = [
+      { kind: 'title', at: 20, duration: 1, text: 'T', subtitle: null, style: 'dark' },
+    ];
+    const clips = clipRuns(stale, tokenize(stale, edits, true), [{ start: 0, end: 20 }]);
+    // Every word of the timeline, then the title at the end; never "gone".
+    expect(clips[0]?.tokens.map((t) => t.kind)).toEqual(['word', 'word', 'word', 'word', 'title']);
+  });
+});

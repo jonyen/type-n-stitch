@@ -3,7 +3,7 @@ import { useMemo, useRef, useState, type PointerEvent } from 'react';
 import type { Thumbnails } from '../api';
 import { dropSlot, firstWords, moveFor } from '../clipstrip';
 import { cx } from '../cx';
-import { formatTime, locate } from '../editlist';
+import { formatTime, locate, sourceJoins } from '../editlist';
 import { audios, layers } from '../overlays';
 import type { Peer } from '../realtime';
 import {
@@ -85,6 +85,8 @@ export function Timeline(props: TimelineProps) {
     `${length > 0 ? (Math.min(Math.max(t, 0), length) / length) * 100 : 0}%`;
   const nameOf = (id: string) => assets.find((a) => a.id === id)?.name ?? 'missing file';
   const multi = props.sources.length > 1;
+  /** Where one file meets the next, in source time: the Range band stops there too. */
+  const joinList = sourceJoins(props.sources);
   /** The file a clip plays. No piece spans a join: the fold keeps every join as a split. */
   const videoOf = (piece: Range) => props.sources[locate(props.sources, piece.start)?.index ?? 0];
 
@@ -129,7 +131,8 @@ export function Timeline(props: TimelineProps) {
     if (!p) return;
     setHover(p);
     if (props.tool === 'razor') setRazor(razorHit(p.t));
-    if (band) setBand({ from: band.from, range: snappedBand(band.from, p.t, words, segments) });
+    if (band)
+      setBand({ from: band.from, range: snappedBand(band.from, p.t, words, segments, joinList) });
     if (scrubbing.current) props.onSeek(p.t);
   };
 
@@ -139,7 +142,7 @@ export function Timeline(props: TimelineProps) {
     const p = pointerAt(e.clientX);
     setBand(null);
     if (!p) return;
-    const cuts = rangeCuts(band.from, p.t, words, segments);
+    const cuts = rangeCuts(band.from, p.t, words, segments, joinList);
     if (cuts.length > 0) props.onCut(cuts);
   };
 
@@ -281,7 +284,7 @@ export function Timeline(props: TimelineProps) {
                   drag?.from === k && drag.moved && styles.dragging,
                 )}
                 style={{ left: pct(span.start), width: pct(span.end - span.start) }}
-                aria-label={`Clip ${k + 1}: ${text}`}
+                aria-label={`${src ? `Video ${src.index + 1} · ` : ''}Clip ${k + 1}: ${text}`}
                 title={readOnly ? text : `${text} · drag to reorder`}
                 onPointerDown={(e) => onClipDown(k, e)}
                 onPointerMove={onClipMove}

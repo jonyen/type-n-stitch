@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { isTranscribing, playableSources, sourceViewsOf, unlistedSources } from './sources';
+import {
+  isTranscribing,
+  playableSources,
+  readyKey,
+  sourceViewsOf,
+  unlistedSources,
+} from './sources';
 import type { Media, ProjectSummary, Source, SourceView } from './types';
 
 const media: Media = {
@@ -78,5 +84,32 @@ describe('playableSources', () => {
     expect(isTranscribing(view(1, 'm1', 0, 1, 'running'))).toBe(true);
     expect(isTranscribing(view(1, 'm1', 0, 1, 'ready'))).toBe(false);
     expect(isTranscribing(view(1, 'm1', 0, 1, 'error'))).toBe(false);
+  });
+});
+
+describe('readyKey (which ready files the current words cover)', () => {
+  const s = (media: string, offset: number, duration: number): Source => ({
+    media,
+    offset,
+    duration,
+  });
+
+  it('follows undo, then a new file, then its transcript arriving', () => {
+    const v0 = view(0, 'm0', 0, 10);
+    const v1 = view(1, 'm1', 10, 5);
+    // Loaded with two ready files: the words cover both.
+    let covered = readyKey([v0, v1]);
+    expect(readyKey([v0, v1], [s('m0', 0, 10), s('m1', 10, 5)])).toBe(covered);
+    // Undo the second: the fold drops it before the list does. The words are stale.
+    expect(readyKey([v0, v1], [s('m0', 0, 10)])).not.toBe(covered);
+    // Refetched: the reply lists only the first file.
+    covered = readyKey([v0]);
+    expect(readyKey([v0], [s('m0', 0, 10)])).toBe(covered);
+    // A new file lands and starts transcribing: nothing to fetch yet.
+    const v2 = view(1, 'm2', 10, 3, 'running');
+    expect(readyKey([v0, v2], [s('m0', 0, 10), s('m2', 10, 3)])).toBe(covered);
+    // Its transcript is ready: the count is back where it was before the undo, but the set differs.
+    const ready = { ...v2, transcript: 'ready' as const };
+    expect(readyKey([v0, ready], [s('m0', 0, 10), s('m2', 10, 3)])).not.toBe(covered);
   });
 });

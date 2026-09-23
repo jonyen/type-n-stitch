@@ -31,6 +31,14 @@ export class FakeVideo extends EventTarget {
     this.paused = true;
     this.dispatchEvent(new Event('pause'));
   });
+  /** The file plays out, in the browser's order: a last timeupdate, pause, then ended. */
+  end() {
+    this.dispatchEvent(new Event('timeupdate'));
+    this.paused = true;
+    this.dispatchEvent(new Event('pause'));
+    this.ended = true;
+    this.dispatchEvent(new Event('ended'));
+  }
   loaded(width = 0, height = 0) {
     this.videoWidth = width;
     this.videoHeight = height;

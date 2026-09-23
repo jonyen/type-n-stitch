@@ -44,3 +44,18 @@ export function unlistedSources(sources: Source[], views: SourceView[]): string[
 export function isTranscribing(view: SourceView): boolean {
   return view.transcript === 'pending' || view.transcript === 'running';
 }
+
+/**
+ * The ready files, as one comparable key: of `views`, those transcribed and,
+ * given `sources`, still on the timeline. Words fetched with a reply cover
+ * `readyKey(reply)`; they are stale whenever the timeline's key differs, in
+ * either direction (a file finishing, or an undo taking one away).
+ */
+export function readyKey(views: SourceView[], sources?: readonly Source[]): string {
+  return views
+    .filter((v) => v.transcript === 'ready')
+    .filter((v) => !sources || sources.some((s) => s.media === v.mediaId))
+    .map((v) => v.mediaId)
+    .sort()
+    .join(',');
+}

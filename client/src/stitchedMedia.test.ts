@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { StitchedMedia, type PlayableSource } from './stitchedMedia';
 import { FakeVideo } from './test/fakeVideo';
@@ -9,6 +9,11 @@ const three: PlayableSource[] = [
   { offset: 10, duration: 5, url: '/b' },
   { offset: 15, duration: 2.5, url: '/c' },
 ];
+
+// jsdom has no media loading: releasing the warmed file calls load().
+beforeEach(() => {
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+});
 
 function setup(list = three) {
   const media = new StitchedMedia();
@@ -144,5 +149,48 @@ describe('StitchedMedia', () => {
     media.currentTime = 99;
     expect(video.src).toBe('/a');
     expect(video.currentTime).toBe(0);
+  });
+});
+
+describe('StitchedMedia when things go wrong', () => {
+  it('gives up a swap whose file fails to load, and says it paused', async () => {
+    const { media, video, events } = setup();
+    await media.play();
+    media.currentTime = 12;
+    video.dispatchEvent(new Event('error'));
+    expect(media.paused).toBe(true);
+    expect(events).toEqual(['play', 'pause']);
+    // The clock reads the element again, and a later seek still works.
+    expect(media.currentTime).toBe(10);
+    media.currentTime = 3;
+    expect(video.src).toBe('/a');
+    video.loaded();
+    expect(video.currentTime).toBe(3);
+    expect(video.play).toHaveBeenCalledOnce();
+  });
+
+  it('swallows a play() cut short by a swap or pause, but reports a refusal as a pause', async () => {
+    const { media, video, events } = setup();
+    video.play.mockImplementationOnce(() =>
+      Promise.reject(new DOMException('interrupted', 'AbortError')),
+    );
+    await expect(media.play()).resolves.toBeUndefined();
+    expect(events).toEqual([]);
+    video.play.mockImplementationOnce(() =>
+      Promise.reject(new DOMException('no autoplay', 'NotAllowedError')),
+    );
+    await expect(media.play()).resolves.toBeUndefined();
+    expect(events).toEqual(['pause']);
+  });
+
+  it('lets go of the warmed file when there is no next one', () => {
+    const { media } = setup();
+    expect(media.preloading).toBe('/b');
+    media.setSources(three.slice(0, 1));
+    expect(media.preloading).toBeNull();
+    media.setSources(three);
+    expect(media.preloading).toBe('/b');
+    media.setSources([]);
+    expect(media.preloading).toBeNull();
   });
 });

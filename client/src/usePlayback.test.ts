@@ -17,6 +17,11 @@ import {
   usePlayback,
 } from './usePlayback';
 
+// jsdom has no media loading: the stitched clock releases its warmed file with load().
+beforeEach(() => {
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => undefined);
+});
+
 const t = (at: number): TitleEdit => ({
   kind: 'title',
   at,
@@ -404,5 +409,46 @@ describe('usePlayback across two files', () => {
     act(() => hook.result.current.seekOutput(7));
     expect(video.src).toBe('/a.mp4');
     expect(hook.result.current.outputTime).toBeCloseTo(7);
+  });
+});
+
+describe('usePlayback across two files, ending the way a browser does', () => {
+  let frames: FrameRequestCallback[] = [];
+  beforeEach(() => {
+    frames = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('carries on into the next file after timeupdate, pause and ended at the first file end', () => {
+    const ordered = orderedPieces(10, [], [5], []);
+    const segments = timelineSegments(10, [], [5], []);
+    const video = new FakeVideo();
+    const media = new StitchedMedia();
+    media.setSources([
+      { offset: 0, duration: 5, url: '/a.mp4' },
+      { offset: 5, duration: 5, url: '/b.mp4' },
+    ]);
+    media.attach(video as unknown as HTMLVideoElement);
+    const ref = { current: media };
+    const hook = renderHook(() => usePlayback(ref, [], [], 10, '/a.mp4', ordered, segments));
+    act(() => hook.result.current.toggle());
+    // The file runs out between two watchdog frames.
+    act(() => {
+      video.currentTime = 5;
+      video.end();
+    });
+    expect(video.src).toBe('/b.mp4');
+    expect(hook.result.current.playing).toBe(true);
+    act(() => video.loaded());
+    expect(video.play).toHaveBeenCalledTimes(2);
+    video.currentTime = 1;
+    const pending = frames;
+    frames = [];
+    act(() => pending.forEach((cb) => cb(0)));
+    expect(hook.result.current.outputTime).toBeCloseTo(6);
+    expect(hook.result.current.playing).toBe(true);
+    expect(hook.result.current.atEnd).toBe(false);
   });
 });
