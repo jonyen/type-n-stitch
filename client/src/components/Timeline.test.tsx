@@ -26,7 +26,7 @@ const asset = (id: string, kind: 'video' | 'audio'): Asset => ({
   poster: null,
 });
 const edits: Edit[] = [
-  { kind: 'broll', start: 2, end: 4, media: 'a1', offset: 0 },
+  { kind: 'layer', track: 2, start: 2, end: 4, media: 'a1', offset: 0, frame: 'full', audio: null },
   { kind: 'audio', start: 0, end: 10, media: 'a2', offset: 0, gain: 0, duck: true },
 ];
 const splits = [5];

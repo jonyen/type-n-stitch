@@ -8,6 +8,7 @@ import type {
   Edit,
   OverdubEdit,
   Range,
+  Source,
   TitleEdit,
   Transition,
   Word,
@@ -393,4 +394,47 @@ export function pieceStarts(edits: Edit[], splits: number[]): number[] {
     if (!inCut && !starts.some((x) => Math.abs(x - s) < EPS)) starts.push(s);
   }
   return starts.sort((a, b) => a - b);
+}
+
+type Placed = Pick<Source, 'offset' | 'duration'>;
+
+/** Where the stitched sources end: the last one's offset plus its duration. 0 with none. */
+export function stitchedDuration(sources: readonly Placed[]): number {
+  const last = sources[sources.length - 1];
+  return last ? last.offset + last.duration : 0;
+}
+
+/**
+ * The source holding stitched instant `t` and the time inside it. An instant
+ * within EPS of a join belongs to the later source; the stitched end is the
+ * last source at its full duration. Null before 0, past the end, or with no
+ * sources. Mirrors the engine's `locate`.
+ */
+export function locate(
+  sources: readonly Placed[],
+  t: number,
+): { index: number; local: number } | null {
+  const last = sources.length - 1;
+  const end = stitchedDuration(sources);
+  if (last < 0 || t < -EPS || t > end + EPS) return null;
+  if (t >= end - EPS) return { index: last, local: (sources[last] as Placed).duration };
+  let index = 0;
+  for (let i = last; i >= 0; i--) {
+    if (t >= (sources[i] as Placed).offset - EPS) {
+      index = i;
+      break;
+    }
+  }
+  const s = sources[index] as Placed;
+  return { index, local: Math.min(Math.max(t - s.offset, 0), s.duration) };
+}
+
+/** The instants where one source ends and the next begins: every offset after the first. */
+export function sourceJoins(sources: readonly Placed[]): number[] {
+  return sources.slice(1).map((s) => s.offset);
+}
+
+/** True when `at` is a join. The fold never unsplits one. */
+export function isJoin(at: number, sources: readonly Placed[]): boolean {
+  return sourceJoins(sources).some((j) => Math.abs(j - at) < EPS);
 }

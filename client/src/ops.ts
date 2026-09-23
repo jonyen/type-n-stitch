@@ -2,10 +2,19 @@
 // engine/src/ops.rs. The reducer applies the same change optimistically;
 // the server's fold (a `sync` action) is authoritative.
 
-import { rangeForWords } from './editlist';
+import { isJoin, rangeForWords } from './editlist';
 import type { EditorAction, EditorState } from './editor';
 import { selectedRange, wholeRange } from './editor';
-import type { CaptionPos, Edit, Range, TitleStyle, Transition } from './types';
+import type {
+  CaptionPos,
+  Edit,
+  Frame,
+  LayerTrack,
+  Range,
+  Source,
+  TitleStyle,
+  Transition,
+} from './types';
 
 export type Op =
   | { kind: 'cut'; start: number; end: number }
@@ -45,8 +54,27 @@ export type Op =
   | { kind: 'split'; at: number }
   | { kind: 'unsplit'; at: number }
   | { kind: 'move'; piece: number; before: number | null }
-  | { kind: 'addbroll'; start: number; end: number; media: string; offset: number }
-  | { kind: 'removebroll'; start: number }
+  /** Appended by POST /api/projects/:id/sources; listed for completeness, never sent by the client. */
+  | { kind: 'addsource'; media: string; offset: number; duration: number }
+  | {
+      kind: 'addlayer';
+      track: LayerTrack;
+      start: number;
+      end: number;
+      media: string;
+      offset: number;
+      frame: Frame;
+      audio: number | null;
+    }
+  | {
+      kind: 'setlayer';
+      track: LayerTrack;
+      start: number;
+      toTrack: LayerTrack;
+      frame: Frame;
+      audio: number | null;
+    }
+  | { kind: 'removelayer'; track: LayerTrack; start: number }
   | {
       kind: 'addaudio';
       start: number;
@@ -73,6 +101,8 @@ export interface DocState {
   splits?: number[];
   /** Explicit output order of piece starts. Absent on folds from an older server. */
   order?: number[];
+  /** Sources appended after the project's own media. Absent on folds from an older server. */
+  sources?: Source[];
 }
 
 /**
@@ -148,21 +178,36 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
     case 'split':
       return { kind: 'split', at: action.at };
     case 'unsplit':
-      return { kind: 'unsplit', at: action.at };
+      // The fold ignores an unsplit at a join, so there is nothing to send.
+      return isJoin(action.at, state.sources) ? null : { kind: 'unsplit', at: action.at };
     case 'moveClip':
       return { kind: 'move', piece: action.piece, before: action.before };
-    case 'addBroll': {
+    // `addSource` is deliberately absent: the upload route appends that op
+    // itself, and the reducer's copy is only its optimistic echo.
+    case 'addLayer': {
       const range = action.range ?? selectedRange(state.selection);
       if (!range) return null;
       return {
-        kind: 'addbroll',
+        kind: 'addlayer',
+        track: action.track,
         ...rangeForWords(state.words, range[0], range[1], state.duration),
         media: action.media,
         offset: action.offset,
+        frame: action.frame,
+        audio: action.audio,
       };
     }
-    case 'removeBroll':
-      return { kind: 'removebroll', start: action.start };
+    case 'setLayer':
+      return {
+        kind: 'setlayer',
+        track: action.track,
+        start: action.start,
+        toTrack: action.toTrack,
+        frame: action.frame,
+        audio: action.audio,
+      };
+    case 'removeLayer':
+      return { kind: 'removelayer', track: action.track, start: action.start };
     case 'addAudio': {
       const range =
         action.range === null

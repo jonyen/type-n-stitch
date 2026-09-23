@@ -1,16 +1,19 @@
 // The editor's state machine: words, the edit list, server-fold metadata and
 // the current word selection. Pure, so it is easy to test.
 
-import { EPS, pieceStarts, rangeForWords, wordStatus } from './editlist';
+import { EPS, isJoin, pieceStarts, rangeForWords, stitchedDuration, wordStatus } from './editlist';
 import type { DocState } from './ops';
 import type {
   AudioEdit,
-  BrollEdit,
   CaptionEdit,
   CaptionPos,
   CutEdit,
   Edit,
+  Frame,
+  LayerEdit,
+  LayerTrack,
   OverdubEdit,
+  Source,
   TitleEdit,
   TitleStyle,
   Transition,
@@ -26,7 +29,13 @@ export interface Selection {
 
 export interface EditorState {
   words: Word[];
+  /** Stitched length of every source on the main track, in seconds. */
   duration: number;
+  /**
+   * The main track's files in stitched order: the project's own media, then
+   * the fold's appended sources. Empty before a project loads.
+   */
+  sources: Source[];
   edits: Edit[];
   /** Display names by speaker index; '' means unnamed. */
   speakerNames: string[];
@@ -45,7 +54,10 @@ export interface EditorState {
 }
 
 export type EditorAction =
-  | { type: 'load'; words: Word[]; duration: number }
+  /** `media` is the project's own media id: source 0. */
+  | { type: 'load'; words: Word[]; duration: number; media?: string }
+  /** The stitched words again, once another source's transcript is ready. */
+  | { type: 'setWords'; words: Word[] }
   /** The server's authoritative document replaces local edits. */
   | { type: 'sync'; doc: DocState }
   | { type: 'select'; index: number; extend: boolean }
@@ -90,9 +102,28 @@ export type EditorAction =
   | { type: 'split'; at: number }
   | { type: 'unsplit'; at: number }
   | { type: 'moveClip'; piece: number; before: number | null }
+  /** The optimistic echo of the AddSource the upload route appended. Never sent. */
+  | { type: 'addSource'; media: string; offset: number; duration: number }
+  /** `range` is the word range captured when the dialog opened; else the selection. */
+  | {
+      type: 'addLayer';
+      track: LayerTrack;
+      media: string;
+      offset: number;
+      frame: Frame;
+      audio: number | null;
+      range?: [number, number];
+    }
+  | {
+      type: 'setLayer';
+      track: LayerTrack;
+      start: number;
+      toTrack: LayerTrack;
+      frame: Frame;
+      audio: number | null;
+    }
+  | { type: 'removeLayer'; track: LayerTrack; start: number }
   /** `range` `null` means the whole edit; `undefined` means the current selection. */
-  | { type: 'addBroll'; media: string; offset: number; range?: [number, number] }
-  | { type: 'removeBroll'; start: number }
   | {
       type: 'addAudio';
       media: string;
@@ -111,11 +142,13 @@ export type EditorAction =
       transition?: Transition;
       splits?: number[];
       order?: number[];
+      sources?: Source[];
     };
 
 export const initialEditor: EditorState = {
   words: [],
   duration: 0,
+  sources: [],
   edits: [],
   speakerNames: [],
   transition: 'none',
@@ -150,10 +183,33 @@ export function wholeRange(state: EditorState): [number, number] | null {
   return state.words.length ? [0, state.words.length - 1] : null;
 }
 
+/** The first source (the project's media) followed by a fold's appended sources. */
+function withAppended(state: EditorState, appended: Source[] | undefined): Source[] {
+  const first = state.sources[0];
+  return first ? [first, ...(appended ?? [])] : [...(appended ?? [])];
+}
+
+/** The stitched length of `sources`, or `fallback` when there are none yet. */
+function lengthOf(sources: Source[], fallback: number): number {
+  return sources.length > 0 ? stitchedDuration(sources) : fallback;
+}
+
 export function editorReducer(state: EditorState, action: EditorAction): EditorState {
   switch (action.type) {
     case 'load':
-      return { ...initialEditor, words: action.words, duration: action.duration };
+      return {
+        ...initialEditor,
+        words: action.words,
+        duration: action.duration,
+        sources:
+          action.duration > 0
+            ? [{ media: action.media ?? '', offset: 0, duration: action.duration }]
+            : [],
+      };
+
+    case 'setWords':
+      // Indices shift when another source's words arrive, so the selection goes.
+      return { ...state, words: action.words, selection: null };
 
     case 'select': {
       if (action.index < 0 || action.index >= state.words.length) return state;
@@ -237,6 +293,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       // fold, though, can be older than one a peer's broadcast already
       // applied — a slower reply must not undo newer server truth.
       const stale = action.doc.headSeq < state.headSeq;
+      const sources = stale ? state.sources : withAppended(state, action.doc.sources);
       return {
         ...state,
         edits: stale ? state.edits : action.doc.edits,
@@ -248,13 +305,16 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         selection: stale ? state.selection : null,
         splits: stale ? state.splits : (action.doc.splits ?? []),
         order: stale ? state.order : (action.doc.order ?? []),
+        sources,
+        duration: lengthOf(sources, state.duration),
       };
     }
 
-    case 'remote':
+    case 'remote': {
       // Out-of-order broadcasts, and our own append arriving before its POST
       // reply, are both harmless as long as only newer folds win.
       if (action.headSeq <= state.headSeq) return state;
+      const sources = withAppended(state, action.sources);
       return {
         ...state,
         edits: action.edits,
@@ -263,7 +323,10 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         headSeq: action.headSeq,
         splits: action.splits ?? [],
         order: action.order ?? [],
+        sources,
+        duration: lengthOf(sources, state.duration),
       };
+    }
 
     case 'renameSpeaker': {
       const speakerNames = [...state.speakerNames];
@@ -350,6 +413,8 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     }
 
     case 'unsplit':
+      // A join between two files is permanent, as in the engine's fold.
+      if (isJoin(action.at, state.sources)) return state;
       return { ...state, splits: state.splits.filter((s) => !sameInstant(s, action.at)) };
 
     case 'moveClip': {
@@ -368,27 +433,76 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return { ...state, order: rest };
     }
 
-    case 'addBroll': {
+    case 'addSource': {
+      if (state.sources.some((s) => sameInstant(s.offset, action.offset))) return state;
+      const sources = [
+        ...state.sources,
+        { media: action.media, offset: action.offset, duration: action.duration },
+      ];
+      // Each file starts as its own clip, as the fold's permanent split does.
+      const splits = state.splits.some((s) => sameInstant(s, action.offset))
+        ? state.splits
+        : [...state.splits, action.offset].sort((a, b) => a - b);
+      return { ...state, sources, splits, duration: stitchedDuration(sources) };
+    }
+
+    case 'addLayer': {
       const range = action.range ?? selectedRange(state.selection);
       if (!range) return state;
       const span = rangeForWords(state.words, range[0], range[1], state.duration);
+      // A new layer replaces those it overlaps on its own track, as B-roll did.
       const kept = state.edits.filter(
-        (e) => !(e.kind === 'broll' && e.start < span.end && e.end > span.start),
+        (e) =>
+          !(
+            e.kind === 'layer' &&
+            e.track === action.track &&
+            e.start < span.end &&
+            e.end > span.start
+          ),
       );
-      const broll: BrollEdit = {
-        kind: 'broll',
+      const layer: LayerEdit = {
+        kind: 'layer',
+        track: action.track,
         ...span,
         media: action.media,
         offset: action.offset,
+        frame: action.frame,
+        audio: action.audio,
       };
-      return withEdits(state, [...kept, broll]);
+      return withEdits(state, [...kept, layer]);
     }
 
-    case 'removeBroll':
+    case 'setLayer': {
+      const at = state.edits.findIndex(
+        (e) => e.kind === 'layer' && e.track === action.track && sameInstant(e.start, action.start),
+      );
+      const found = state.edits[at];
+      if (at === -1 || found?.kind !== 'layer') return state;
+      const moved: LayerEdit = {
+        ...found,
+        track: action.toTrack,
+        frame: action.frame,
+        audio: action.audio,
+      };
+      // In place, as the fold does; a layer it now overlaps on the new track goes.
+      const edits = state.edits.flatMap((e, i): Edit[] => {
+        if (i === at) return [moved];
+        const covered =
+          e.kind === 'layer' &&
+          e.track === action.toTrack &&
+          e.start < moved.end &&
+          e.end > moved.start;
+        return covered ? [] : [e];
+      });
+      return { ...state, edits };
+    }
+
+    case 'removeLayer':
       return {
         ...state,
         edits: state.edits.filter(
-          (e) => !(e.kind === 'broll' && sameInstant(e.start, action.start)),
+          (e) =>
+            !(e.kind === 'layer' && e.track === action.track && sameInstant(e.start, action.start)),
         ),
       };
 

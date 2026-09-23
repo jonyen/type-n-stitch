@@ -3,10 +3,13 @@ import { describe, expect, it } from 'vitest';
 import {
   captionsAt,
   cutTransitionAt,
+  EPS,
   formatTime,
+  isJoin,
   joins,
   jumpTarget,
   keptSegments,
+  locate,
   nearDipJoin,
   nextCutTransition,
   normalizeCuts,
@@ -17,10 +20,12 @@ import {
   pieceStarts,
   rangeForWords,
   skipTarget,
+  sourceJoins,
+  stitchedDuration,
   wordIndexAt,
   wordStatus,
 } from './editlist';
-import type { CaptionEdit, Edit, TitleEdit, Word } from './types';
+import type { CaptionEdit, Edit, Source, TitleEdit, Word } from './types';
 
 const words: Word[] = [
   { id: 'w0', text: 'thankful', start: 0, end: 0.91 },
@@ -256,5 +261,54 @@ describe('orderedPieces and jumps', () => {
   it('a reorder join takes the project transition', () => {
     const list = pieces(10, [], [5], [5, 0]);
     expect(joins(list, [], 'dip')).toEqual([{ after: 0, transition: 'dip' }]);
+  });
+});
+
+describe('stitched sources (mirror engine/src/editlist.rs)', () => {
+  // The engine's `three()`: 10 s, 5 s and 2.5 s files end to end.
+  const three: Source[] = [
+    { media: 'm1', offset: 0, duration: 10 },
+    { media: 'm2', offset: 10, duration: 5 },
+    { media: 'm3', offset: 15, duration: 2.5 },
+  ];
+
+  it('ends where the last source ends', () => {
+    expect(stitchedDuration(three)).toBe(17.5);
+    expect(stitchedDuration([])).toBe(0);
+  });
+
+  it('locates at every boundary', () => {
+    expect(locate(three, 0)).toEqual({ index: 0, local: 0 }); // the very start
+    expect(locate(three, 4.25)).toEqual({ index: 0, local: 4.25 }); // inside the first
+    expect(locate(three, 9.5)).toEqual({ index: 0, local: 9.5 }); // just before a join
+    expect(locate(three, 10)).toEqual({ index: 1, local: 0 }); // a join belongs to the later source
+    expect(locate(three, 12)).toEqual({ index: 1, local: 2 }); // inside the second
+    expect(locate(three, 15)).toEqual({ index: 2, local: 0 }); // the second join
+    expect(locate(three, 17.5)).toEqual({ index: 2, local: 2.5 }); // the exact end: last source at its duration
+    expect(locate(three, 17.6)).toBeNull(); // past the end
+    expect(locate(three, -0.1)).toBeNull(); // before the start
+    expect(locate([], 0)).toBeNull(); // no sources
+  });
+
+  it('snaps within EPS of a join or the end', () => {
+    expect(locate(three, 10 - EPS / 2)).toEqual({ index: 1, local: 0 });
+    expect(locate(three, 17.5 + EPS / 2)).toEqual({ index: 2, local: 2.5 });
+    expect(locate(three, -EPS / 2)).toEqual({ index: 0, local: 0 });
+  });
+
+  it('is the identity on one source', () => {
+    const one: Source[] = [{ media: 'm1', offset: 0, duration: 10 }];
+    expect(locate(one, 3.5)).toEqual({ index: 0, local: 3.5 });
+    expect(locate(one, 10)).toEqual({ index: 0, local: 10 });
+    expect(locate(one, 10.5)).toBeNull();
+  });
+
+  it('lists the joins, and knows an instant on one', () => {
+    expect(sourceJoins(three)).toEqual([10, 15]);
+    expect(sourceJoins(three.slice(0, 1))).toEqual([]);
+    expect(isJoin(15, three)).toBe(true);
+    expect(isJoin(15 + EPS / 2, three)).toBe(true);
+    expect(isJoin(12, three)).toBe(false);
+    expect(isJoin(0, three)).toBe(false);
   });
 });

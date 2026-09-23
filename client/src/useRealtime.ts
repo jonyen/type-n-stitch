@@ -11,7 +11,7 @@ import {
   type Realtime,
   type ServerMsg,
 } from './realtime';
-import type { Edit, Transition } from './types';
+import type { Edit, Source, Transition } from './types';
 
 export interface RemoteDoc {
   headSeq: number;
@@ -23,6 +23,8 @@ export interface RemoteDoc {
   splits?: number[];
   /** Absent on folds from a server that does not know order yet. */
   order?: number[];
+  /** Sources appended after the project's own media. Absent from an older server. */
+  sources?: Source[];
 }
 
 /**

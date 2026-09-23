@@ -165,12 +165,39 @@ describe('clip and overlay operations', () => {
       piece: 2,
       before: null,
     });
-    expect(opForAction(selected01, { type: 'addBroll', media: 'b', offset: 1 })).toEqual({
-      kind: 'addbroll',
+    expect(
+      opForAction(selected01, {
+        type: 'addLayer',
+        track: 2,
+        media: 'b',
+        offset: 1,
+        frame: 'full',
+        audio: null,
+      }),
+    ).toEqual({
+      kind: 'addlayer',
+      track: 2,
       start: 0,
       end: 1.25,
       media: 'b',
       offset: 1,
+      frame: 'full',
+      audio: null,
+    });
+    expect(
+      opForAction(state, {
+        type: 'setLayer',
+        track: 2,
+        start: 0,
+        toTrack: 3,
+        frame: 'pipTopLeft',
+        audio: -3,
+      }),
+    ).toEqual({ kind: 'setlayer', track: 2, start: 0, toTrack: 3, frame: 'pipTopLeft', audio: -3 });
+    expect(opForAction(state, { type: 'removeLayer', track: 3, start: 0 })).toEqual({
+      kind: 'removelayer',
+      track: 3,
+      start: 0,
     });
     expect(
       opForAction(state, { type: 'addAudio', media: 'm', gain: 0, duck: true, range: null }),
@@ -181,5 +208,13 @@ describe('clip and overlay operations', () => {
       gain: 1,
       duck: false,
     });
+  });
+
+  it('sends no AddSource (the upload route appends it) and never unsplits a join', () => {
+    const add = { type: 'addSource', media: 'm1', offset: 20, duration: 5 } as const;
+    expect(opForAction(state, add)).toBeNull();
+    const joined = editorReducer(state, add);
+    expect(opForAction(joined, { type: 'unsplit', at: 20 })).toBeNull();
+    expect(opForAction(joined, { type: 'unsplit', at: 2 })).toEqual({ kind: 'unsplit', at: 2 });
   });
 });

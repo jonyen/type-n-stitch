@@ -4,7 +4,7 @@ import type { Thumbnails } from '../api';
 import { dropSlot, firstWords, moveFor } from '../clipstrip';
 import { cx } from '../cx';
 import { formatTime } from '../editlist';
-import { audios, brolls } from '../overlays';
+import { audios, layers } from '../overlays';
 import type { Peer } from '../realtime';
 import {
   clipSpans,
@@ -20,7 +20,7 @@ import {
   type Segment,
 } from '../timeline';
 import type { Tool } from '../tools';
-import type { Asset, AudioEdit, BrollEdit, Edit, Range, Word } from '../types';
+import type { Asset, AudioEdit, Edit, LayerEdit, Range, Word } from '../types';
 import { ScrubPreview } from './ScrubPreview';
 import styles from './Timeline.module.css';
 
@@ -189,7 +189,7 @@ export function Timeline(props: TimelineProps) {
       ? (spans[drag.slot]?.start ?? length)
       : null;
 
-  const bars = (kind: OverlayRef['kind'], list: (BrollEdit | AudioEdit)[]) =>
+  const bars = (kind: OverlayRef['kind'], list: (LayerEdit | AudioEdit)[]) =>
     list.flatMap((e) => {
       const selected =
         props.selectedOverlay?.kind === kind && props.selectedOverlay.start === e.start;
@@ -294,7 +294,7 @@ export function Timeline(props: TimelineProps) {
         </div>
 
         <div className={cx(styles.lane, styles.overlayLane)} data-lane="broll">
-          {bars('broll', brolls(edits))}
+          {bars('broll', layers(edits, 2))}
         </div>
         <div className={cx(styles.lane, styles.overlayLane)} data-lane="music">
           {bars('audio', audios(edits))}

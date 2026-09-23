@@ -16,7 +16,7 @@ import {
   nextCutTransition,
   wordStatus,
 } from '../editlist';
-import { audios, brolls } from '../overlays';
+import { audios, layers } from '../overlays';
 import type { Peer } from '../realtime';
 import {
   clipRuns,
@@ -237,7 +237,7 @@ export function Transcript({
 
   const nameOf = (id: string) => assets.find((a) => a.id === id)?.name ?? 'missing asset';
   const overlayTags = (i: number): ReactNode => {
-    const b = startingAt(brolls(edits), i);
+    const b = startingAt(layers(edits, 2), i);
     const a = startingAt(audios(edits), i);
     return (
       <>

@@ -21,7 +21,7 @@ export function deleteAction({ hasWords, title, clip, overlay }: Selections): Ed
   if (clip !== null) return { type: 'unsplit', at: clip };
   if (overlay) {
     return overlay.kind === 'broll'
-      ? { type: 'removeBroll', start: overlay.start }
+      ? { type: 'removeLayer', track: 2, start: overlay.start }
       : { type: 'removeAudio', start: overlay.start };
   }
   return { type: 'deleteSelection' };

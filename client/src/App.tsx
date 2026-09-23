@@ -46,7 +46,7 @@ import { editorReducer, initialEditor, selectedRange, type EditorAction } from '
 import { handledUpstream, shouldIgnoreGlobalKey } from './keyboardGuard';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
-import { audios, brolls } from './overlays';
+import { audios, layers } from './overlays';
 import { type PresenceState } from './realtime';
 import { deleteAction } from './selection';
 import { useSession } from './session';
@@ -277,7 +277,7 @@ export function App() {
   // unknown ids has to actually change before we ask again.
   useEffect(() => {
     const have = new Set(assets.map((a) => a.id));
-    const unknown = [...brolls(editor.edits), ...audios(editor.edits)]
+    const unknown = [...layers(editor.edits), ...audios(editor.edits)]
       .map((e) => e.media)
       .filter((id) => !have.has(id) && !soughtAssets.current.has(id));
     if (unknown.length === 0) return;
@@ -397,7 +397,7 @@ export function App() {
         transcribeMedia(summary.id),
         fetchProject(summary.id),
       ]);
-      dispatch({ type: 'load', words, duration: summary.media.duration });
+      dispatch({ type: 'load', words, duration: summary.media.duration, media: summary.media.id });
       dispatch({ type: 'sync', doc });
       confirmed.current = doc;
       setProject(summary);
@@ -627,7 +627,7 @@ export function App() {
   // A peer's edit (or an undo) can remove the B-roll or music we had selected.
   useEffect(() => {
     if (!selectedOverlay) return;
-    const list = selectedOverlay.kind === 'broll' ? brolls(editor.edits) : audios(editor.edits);
+    const list = selectedOverlay.kind === 'broll' ? layers(editor.edits, 2) : audios(editor.edits);
     if (!list.some((e) => Math.abs(e.start - selectedOverlay.start) < EPS))
       setSelectedOverlay(null);
   }, [editor.edits, selectedOverlay]);
@@ -878,7 +878,7 @@ export function App() {
               selectedClip={selectedClip}
               onClipClick={onClipClick}
               assets={assets}
-              onBrollClick={(start) => edit({ type: 'removeBroll', start })}
+              onBrollClick={(start) => edit({ type: 'removeLayer', track: 2, start })}
               onAudioClick={openAudio}
               tool={tool}
               onWordDragEnd={onWordDragEnd}
@@ -994,7 +994,15 @@ export function App() {
           })()}
           onUpload={onUploadAsset}
           onSubmit={(asset, offset) => {
-            edit({ type: 'addBroll', media: asset.id, offset, range: brollRange });
+            edit({
+              type: 'addLayer',
+              track: 2,
+              media: asset.id,
+              offset,
+              frame: 'full',
+              audio: null,
+              range: brollRange,
+            });
             setBrollRange(null);
           }}
           onCancel={() => setBrollRange(null)}

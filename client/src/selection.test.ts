@@ -16,7 +16,8 @@ describe('deleteAction', () => {
 
   it('removes a selected B-roll or music bar', () => {
     expect(deleteAction({ ...none, overlay: { kind: 'broll', start: 2 } })).toEqual({
-      type: 'removeBroll',
+      type: 'removeLayer',
+      track: 2,
       start: 2,
     });
     expect(deleteAction({ ...none, overlay: { kind: 'audio', start: 0 } })).toEqual({

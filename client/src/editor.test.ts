@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { editorReducer, initialEditor, selectedRange, type EditorState } from './editor';
+import type { DocState } from './ops';
 import type { Word } from './types';
 
 const words: Word[] = [
@@ -387,12 +388,15 @@ describe('clips', () => {
     expect(r.splits).toEqual([]);
   });
 
-  it('addBroll replaces overlaps; audio edits by start; whole-edit range covers every word', () => {
-    let s = editorReducer(select(loaded, 0, 1), { type: 'addBroll', media: 'b', offset: 1 });
-    s = editorReducer(select(s, 1, 2), { type: 'addBroll', media: 'b', offset: 0 });
-    expect(s.edits).toEqual([{ kind: 'broll', start: 0.91, end: 2, media: 'b', offset: 0 }]);
-    s = editorReducer(s, { type: 'addAudio', media: 'm', gain: -6, duck: true, range: null });
-    expect(s.edits[1]).toEqual({
+  it('audio edits by start; whole-edit range covers every word', () => {
+    let s = editorReducer(loaded, {
+      type: 'addAudio',
+      media: 'm',
+      gain: -6,
+      duck: true,
+      range: null,
+    });
+    expect(s.edits[0]).toEqual({
       kind: 'audio',
       start: 0,
       end: 20,
@@ -402,9 +406,177 @@ describe('clips', () => {
       duck: true,
     });
     s = editorReducer(s, { type: 'editAudio', start: 0, gain: 3, duck: false });
-    expect(s.edits[1]).toMatchObject({ gain: 3, duck: false });
+    expect(s.edits[0]).toMatchObject({ gain: 3, duck: false });
     s = editorReducer(s, { type: 'removeAudio', start: 0 });
-    s = editorReducer(s, { type: 'removeBroll', start: 0.91 });
     expect(s.edits).toEqual([]);
+  });
+});
+
+describe('layers', () => {
+  it('addLayer replaces the layers it overlaps on its own track only', () => {
+    let s = editorReducer(select(loaded, 0, 1), {
+      type: 'addLayer',
+      track: 2,
+      media: 'b',
+      offset: 1,
+      frame: 'full',
+      audio: null,
+    });
+    s = editorReducer(select(s, 1, 2), {
+      type: 'addLayer',
+      track: 3,
+      media: 'c',
+      offset: 0,
+      frame: 'pipTopRight',
+      audio: -6,
+    });
+    s = editorReducer(select(s, 1, 2), {
+      type: 'addLayer',
+      track: 2,
+      media: 'b',
+      offset: 0,
+      frame: 'full',
+      audio: null,
+    });
+    expect(s.edits).toEqual([
+      {
+        kind: 'layer',
+        track: 3,
+        start: 0.91,
+        end: 2,
+        media: 'c',
+        offset: 0,
+        frame: 'pipTopRight',
+        audio: -6,
+      },
+      {
+        kind: 'layer',
+        track: 2,
+        start: 0.91,
+        end: 2,
+        media: 'b',
+        offset: 0,
+        frame: 'full',
+        audio: null,
+      },
+    ]);
+  });
+
+  it('setLayer edits in place and drops what it now overlaps on the new track; removeLayer by track and start', () => {
+    let s = editorReducer(select(loaded, 1, 2), {
+      type: 'addLayer',
+      track: 3,
+      media: 'c',
+      offset: 0,
+      frame: 'pipTopRight',
+      audio: -6,
+    });
+    s = editorReducer(select(s, 1, 2), {
+      type: 'addLayer',
+      track: 2,
+      media: 'b',
+      offset: 0,
+      frame: 'full',
+      audio: null,
+    });
+    s = editorReducer(s, {
+      type: 'setLayer',
+      track: 3,
+      start: 0.91,
+      toTrack: 2,
+      frame: 'pipBottomLeft',
+      audio: 0,
+    });
+    expect(s.edits).toEqual([
+      {
+        kind: 'layer',
+        track: 2,
+        start: 0.91,
+        end: 2,
+        media: 'c',
+        offset: 0,
+        frame: 'pipBottomLeft',
+        audio: 0,
+      },
+    ]);
+    // Wrong track: nothing matches.
+    expect(editorReducer(s, { type: 'removeLayer', track: 3, start: 0.91 }).edits).toHaveLength(1);
+    expect(editorReducer(s, { type: 'removeLayer', track: 2, start: 0.91 }).edits).toEqual([]);
+  });
+});
+
+describe('sources', () => {
+  const first = editorReducer(initialEditor, { type: 'load', words, duration: 20, media: 'm0' });
+
+  it("starts with the project's own media as the only source", () => {
+    expect(first.sources).toEqual([{ media: 'm0', offset: 0, duration: 20 }]);
+    expect(first.duration).toBe(20);
+    expect(editorReducer(initialEditor, { type: 'load', words: [], duration: 0 }).sources).toEqual(
+      [],
+    );
+  });
+
+  it('addSource appends at the end with its join, and the duration is stitched', () => {
+    const s = editorReducer(first, { type: 'addSource', media: 'm1', offset: 20, duration: 12.5 });
+    expect(s.sources).toEqual([
+      { media: 'm0', offset: 0, duration: 20 },
+      { media: 'm1', offset: 20, duration: 12.5 },
+    ]);
+    expect(s.duration).toBe(32.5);
+    expect(s.splits).toEqual([20]);
+    // The server's broadcast of the same append can beat the upload's reply.
+    expect(editorReducer(s, { type: 'addSource', media: 'm1', offset: 20, duration: 12.5 })).toBe(
+      s,
+    );
+  });
+
+  it("takes the fold's appended sources on sync, and drops them on its undo", () => {
+    const doc: DocState = {
+      headSeq: 2,
+      edits: [],
+      speakerNames: [],
+      undoable: 2,
+      redoable: null,
+      splits: [3, 20],
+      sources: [{ media: 'm1', offset: 20, duration: 10 }],
+    };
+    const s = editorReducer(first, { type: 'sync', doc });
+    expect(s.sources.map((x) => x.media)).toEqual(['m0', 'm1']);
+    expect(s.duration).toBe(30);
+    expect(s.splits).toEqual([3, 20]);
+    const undone = editorReducer(s, {
+      type: 'sync',
+      doc: { ...doc, headSeq: 3, sources: [], splits: [3] },
+    });
+    expect(undone.sources).toEqual([{ media: 'm0', offset: 0, duration: 20 }]);
+    expect(undone.duration).toBe(20);
+  });
+
+  it("reads a peer's fold the same way, and an older server's fold as one source", () => {
+    const r = editorReducer(first, {
+      type: 'remote',
+      headSeq: 5,
+      edits: [],
+      speakerNames: [],
+      splits: [20],
+      sources: [{ media: 'm1', offset: 20, duration: 4 }],
+    });
+    expect(r.duration).toBe(24);
+    const old = editorReducer(first, { type: 'remote', headSeq: 6, edits: [], speakerNames: [] });
+    expect(old.sources).toHaveLength(1);
+    expect(old.duration).toBe(20);
+  });
+
+  it('never unsplits a join', () => {
+    const s = editorReducer(first, { type: 'addSource', media: 'm1', offset: 20, duration: 5 });
+    expect(editorReducer(s, { type: 'unsplit', at: 20 })).toBe(s);
+  });
+
+  it('setWords swaps in the stitched words and drops the selection', () => {
+    const more = [...words, { id: '1:w0', text: 'later', start: 20.5, end: 21 }];
+    const s = editorReducer(select(first, 1), { type: 'setWords', words: more });
+    expect(s.words).toBe(more);
+    expect(s.selection).toBeNull();
+    expect(s.sources).toBe(first.sources);
   });
 });
