@@ -126,7 +126,7 @@ pub fn references(edits: &[Edit], asset_id: &str) -> (usize, usize) {
     })
 }
 
-fn assets_dir(state: &AppState, project: &Project) -> PathBuf {
+pub(crate) fn assets_dir(state: &AppState, project: &Project) -> PathBuf {
     state.config.data_dir.join(&project.media_id).join("assets")
 }
 

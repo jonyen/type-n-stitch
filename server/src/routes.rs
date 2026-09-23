@@ -585,7 +585,7 @@ fn image_hash(parts: &[&str], video: VideoInfo) -> String {
 }
 
 /// `write_atomic` for a file the handler rewrites off the async path.
-async fn write_json_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) async fn write_json_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let partial = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
     tokio::fs::write(&partial, bytes)
         .await

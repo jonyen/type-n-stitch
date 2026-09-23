@@ -230,35 +230,44 @@ every Claude Code window using the same token drives the same peer — open a pr
 the others are already there. An agent that calls nothing for ten minutes is retired and leaves
 the project; the next call starts it again, and it opens a project as usual.
 
-| Tool                                                   | What it does                                                                                                 |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `list_projects()`                                      | Every project you can open, with your role and its duration.                                                 |
-| `open_project(project_id)`                             | Opens a project and joins it as a visible peer; returns duration, edit counts and the transcript.            |
-| `get_transcript()`                                     | The open project's transcript, with each word's status under the current edits.                              |
-| `find(text)`                                           | Whole-word search, ignoring case and punctuation; returns inclusive word-index ranges.                       |
-| `look_at(from, to)`                                    | Moves the agent's cursor to a range of words so collaborators can see where it's looking. No edit.           |
-| `cut(from, to)`                                        | Deletes words `from`..`to`, exactly as pressing Delete on that selection would.                              |
-| `remove_fillers()`                                     | Cuts every filler word the engine finds, in one operation.                                                   |
-| `tighten_pauses()`                                     | Shortens every long silence the engine finds, in one operation.                                              |
-| `overdub(from, to, text)`                              | Replaces what's said over `from`..`to` with synthesized speech saying `text`.                                |
-| `add_title(after, text, subtitle?, style?, duration?)` | Inserts a full-screen title card just after word `after` (`-1` for before the first word).                   |
-| `add_caption(from, to, text, position?)`               | Draws text over the picture while words `from`..`to` play.                                                   |
-| `set_transition(kind)`                                 | How pieces meet at every cut: `none` for a hard cut, `dip` to dip through black.                             |
-| `list_clips()`                                         | The clips in output order, each with its index, source start/end, duration and first words.                  |
-| `split(after)`                                         | Splits the edit into two clips just after word `after`, so the new clip can be moved.                        |
-| `move_clip(clip, before?)`                             | Moves clip `clip` so it plays before clip `before`; omit `before` to move it to the end.                     |
-| `list_assets()`                                        | B-roll videos and music files uploaded to this project, with ids for `add_broll` and `add_audio`.            |
-| `add_broll(from, to, asset, offset?)`                  | Shows video asset `asset` over the picture while words `from`..`to` play, starting `offset` seconds in.      |
-| `add_audio(from, to, asset, gain?, duck?)`             | Plays audio asset `asset` under words `from`..`to` at `gain` dB, ducked under speech unless `duck` is false. |
-| `undo()`                                               | Undoes the agent's own most recent edit; other people's edits are theirs to undo.                            |
-| `redo()`                                               | Redoes the edit the agent last undid.                                                                        |
-| `export(format?)`                                      | Renders and waits; returns `{ url, duration, bytes }`, or a job id with `pending: true` past ten minutes.    |
+| Tool                                                          | What it does                                                                                                                                             |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_projects()`                                             | Every project you can open, with your role and its duration.                                                                                             |
+| `open_project(project_id)`                                    | Opens a project and joins it as a visible peer; returns duration, edit counts, sources, layers and the transcript.                                       |
+| `get_transcript()`                                            | The open project's transcript, with each word's status under the current edits.                                                                          |
+| `find(text)`                                                  | Whole-word search, ignoring case and punctuation; returns inclusive word-index ranges.                                                                   |
+| `look_at(from, to)`                                           | Moves the agent's cursor to a range of words so collaborators can see where it's looking. No edit.                                                       |
+| `cut(from, to)`                                               | Deletes words `from`..`to`, exactly as pressing Delete on that selection would.                                                                          |
+| `remove_fillers()`                                            | Cuts every filler word the engine finds, in one operation.                                                                                               |
+| `tighten_pauses()`                                            | Shortens every long silence the engine finds, in one operation.                                                                                          |
+| `overdub(from, to, text)`                                     | Replaces what's said over `from`..`to` with synthesized speech saying `text`.                                                                            |
+| `add_title(after, text, subtitle?, style?, duration?)`        | Inserts a full-screen title card just after word `after` (`-1` for before the first word).                                                               |
+| `add_caption(from, to, text, position?)`                      | Draws text over the picture while words `from`..`to` play.                                                                                               |
+| `set_transition(kind)`                                        | How pieces meet at every cut: `none` for a hard cut, `dip` to dip through black.                                                                         |
+| `list_clips()`                                                | The clips in output order, each with its index, the source it comes from, start/end, duration and first words.                                           |
+| `split(after)`                                                | Splits the edit into two clips just after word `after`, so the new clip can be moved.                                                                    |
+| `move_clip(clip, before?)`                                    | Moves clip `clip` so it plays before clip `before`; omit `before` to move it to the end.                                                                 |
+| `list_assets()`                                               | Videos and music files uploaded to this project, with ids for `add_layer`, `add_source` and `add_audio`.                                                 |
+| `add_broll(from, to, asset, offset?)`                         | Same as `add_layer` on track 2, full frame, muted: shows video asset `asset` while words `from`..`to` play.                                              |
+| `add_audio(from, to, asset, gain?, duck?)`                    | Plays audio asset `asset` under words `from`..`to` at `gain` dB, ducked under speech unless `duck` is false.                                             |
+| `add_source(media)`                                           | Appends a video to the end of the main track: an asset from `list_assets`, or a source used again. Its words join the transcript once it is transcribed. |
+| `add_layer(from, to, media, track?, frame?, audio?, offset?)` | Shows a video on track 2 or 3 over words `from`..`to`, full frame or as a picture-in-picture corner, muted unless `audio` gives a level in dB.           |
+| `set_layer(track, start, to_track?, frame?, audio?)`          | Moves the layer starting at `start` on `track` to another track, reframes it, or sets its sound (omit `audio` to mute).                                  |
+| `undo()`                                                      | Undoes the agent's own most recent edit; other people's edits are theirs to undo.                                                                        |
+| `redo()`                                                      | Redoes the edit the agent last undid.                                                                                                                    |
+| `export(format?)`                                             | Renders and waits; returns `{ url, duration, bytes }`, or a job id with `pending: true` past ten minutes.                                                |
 
 Every editing tool moves the agent's cursor onto the words it's about to touch and pauses about
 half a second before applying, so the change is visible to anyone watching. `undo`, `redo`,
 `set_transition` and `add_title` with `after: -1` have no range to point at, so they leave the
 cursor where it is. `export` can take minutes to render; if it's still going after ten minutes
 the tool returns the job id instead of blocking, and calling `export` again picks up the same job.
+
+A project can hold up to 20 videos laid end to end on its main track; the transcript reads
+straight through them, and word indices count across every video. A video an agent adds with
+`add_source` joins the transcript once it has been transcribed, so call `get_transcript` again
+before using indices past the old end. Layers on tracks 2 and 3 cover the tracks below them;
+a picture-in-picture layer sits in a corner at 30% of the width.
 
 ## Limitations
 

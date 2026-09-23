@@ -591,6 +591,68 @@ pub async fn source_file(state: &AppState, media: &str) -> AppResult<(PathBuf, M
     Ok((dir.join(format!("source.{}", meta.ext)), meta))
 }
 
+/// The media an agent means by `media`: a media item already in the
+/// project's registry, or a project asset promoted to a media item of its
+/// own. A source needs its own directory (transcript cache, `meta.json`,
+/// `/data` URL), and assets live inside the first media's, so an asset is
+/// hard-linked (copied across filesystems) into one. Its id is derived from
+/// the asset's, so adding the same asset twice shares one transcript.
+pub async fn source_media(state: &AppState, project: &Project, media: &str) -> AppResult<Meta> {
+    if in_registry(&state.db, &project.id, media).await? {
+        return read_meta(&state.config.data_dir.join(media)).await;
+    }
+    let asset = crate::assets::list_for(&state.db, project)
+        .await?
+        .into_iter()
+        .find(|a| a.id == media)
+        .ok_or_else(|| {
+            AppError::bad_request(format!(
+                "{media} is neither an asset from list_assets nor one of this project's videos"
+            ))
+        })?;
+    let id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("type-n-stitch:asset:{}", asset.id).as_bytes(),
+    )
+    .to_string();
+    let dir = state.config.data_dir.join(&id);
+    if dir.join("meta.json").is_file() {
+        return read_meta(&dir).await;
+    }
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .context("creating media dir")?;
+    let source_name = format!("source.{}", asset.ext);
+    let from =
+        crate::assets::assets_dir(state, project).join(format!("{}.{}", asset.id, asset.ext));
+    // Staged under a name of its own and renamed into place, so two agents
+    // promoting the same asset at once never copy onto a link to the asset
+    // itself, which would truncate it.
+    let partial = dir.join(format!("{source_name}.tmp-{}", Uuid::new_v4()));
+    if tokio::fs::hard_link(&from, &partial).await.is_err() {
+        tokio::fs::copy(&from, &partial)
+            .await
+            .context("copying the asset")?;
+    }
+    tokio::fs::rename(&partial, dir.join(&source_name))
+        .await
+        .context("placing the asset")?;
+    let meta = Meta {
+        url: format!("/data/{id}/{source_name}"),
+        id,
+        filename: asset.name,
+        ext: asset.ext,
+        duration: asset.duration,
+        kind: asset.kind,
+        // The asset row keeps no frame rate; the export re-probes, as it
+        // does for any media stored before dimensions were recorded.
+        video: None,
+    };
+    crate::routes::write_json_atomic(&dir.join("meta.json"), &serde_json::to_vec_pretty(&meta)?)
+        .await?;
+    Ok(meta)
+}
+
 /// `POST /api/projects/:id/sources` — multipart with one `file` field.
 /// Stores the media, probes it, registers it and appends `AddSource` at the
 /// current end of the main track. Editors and owners only. A full project is
