@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use engine::{
-    apply_op, fold, piece_starts, Edit, MediaKind, Op, ProjectDoc, SeqOp, Transition, EPS,
+    apply_op, fold, piece_starts, Edit, Frame, MediaKind, Op, ProjectDoc, SeqOp, Transition, EPS,
     MAX_AUDIO, MAX_BROLL, MAX_CAPTIONS, MAX_GAIN_DB, MAX_SPEAKERS, MAX_SPLITS, MAX_TITLES,
     MIN_GAIN_DB,
 };
@@ -444,7 +444,7 @@ async fn validate(
             if current
                 .edits
                 .iter()
-                .filter(|e| matches!(e, Edit::Broll { .. }))
+                .filter(|e| matches!(e, Edit::Layer { track: 2, .. }))
                 .count()
                 >= MAX_BROLL
             {
@@ -522,6 +522,58 @@ async fn validate(
             Ok(())
         }
         Op::RemoveAudio { start } => check_range(*start, *start),
+        // Task 3 validates these against the stitched timeline and the source
+        // registry; until then nothing may store them, except a track-2,
+        // full-frame, muted AddLayer, which is what the client now sends for
+        // B-roll — it is validated exactly as `Op::AddBroll` was, so B-roll
+        // keeps working between this task and Task 3.
+        Op::AddLayer {
+            track: 2,
+            start,
+            end,
+            media,
+            offset,
+            frame: Frame::Full,
+            audio: None,
+        } => {
+            check_range(*start, *end)?;
+            if *end <= *start {
+                return Err(AppError::bad_request_at(index, "B-roll range is empty"));
+            }
+            let Some((kind, length)) = crate::assets::find(&mut **tx, &project.id, media).await?
+            else {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "asset does not belong to this project",
+                ));
+            };
+            if kind != MediaKind::Video {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "B-roll needs a video asset",
+                ));
+            }
+            if *offset < 0.0 || offset + (end - start) > length + EPS {
+                return Err(AppError::bad_request_at(
+                    index,
+                    "B-roll runs past the end of the asset",
+                ));
+            }
+            if current
+                .edits
+                .iter()
+                .filter(|e| matches!(e, Edit::Layer { track: 2, .. }))
+                .count()
+                >= MAX_BROLL
+            {
+                return Err(AppError::bad_request_at(index, "too many B-roll shots"));
+            }
+            Ok(())
+        }
+        Op::AddSource { .. }
+        | Op::AddLayer { .. }
+        | Op::SetLayer { .. }
+        | Op::RemoveLayer { .. } => Err(AppError::bad_request_at(index, "not supported yet")),
     }
 }
 

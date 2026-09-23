@@ -218,7 +218,7 @@ pub fn build_ffmpeg_args(
     if render_video {
         for (i, ws) in brolls.iter().enumerate() {
             for w in ws {
-                let Edit::Broll { media, .. } = &edits[w.index] else {
+                let Edit::Layer { media, .. } = &edits[w.index] else {
                     continue;
                 };
                 args.push("-i".into());
@@ -278,7 +278,7 @@ pub fn build_ffmpeg_args(
             // far under a temporary label and starts a new one from it.
             let mut chain = base;
             for (n, w) in brolls[i].iter().enumerate() {
-                let Edit::Broll { start, offset, .. } = &edits[w.index] else {
+                let Edit::Layer { start, offset, .. } = &edits[w.index] else {
                     continue;
                 };
                 let from = offset + (w.source_start - start);
@@ -535,7 +535,7 @@ fn duck_runs(seg: &Segment, w: &Window, words: &[Word]) -> Vec<Range> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CaptionPos, TitleStyle};
+    use crate::types::{CaptionPos, Frame, TitleStyle};
 
     /// An empty map that lives as long as the test needs it.
     fn leak<T: 'static>(value: T) -> &'static T {
@@ -1143,11 +1143,14 @@ mod tests {
 
     #[test]
     fn broll_is_trimmed_delayed_scaled_and_overlaid_under_captions() {
-        let edits = [Edit::Broll {
+        let edits = [Edit::Layer {
+            track: 2,
             start: 2.0,
             end: 4.0,
             media: "b1".into(),
             offset: 1.5,
+            frame: Frame::Full,
+            audio: None,
         }];
         let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
             o.assets = assets(&[("b1", "/assets/b1.mp4")]);
@@ -1165,11 +1168,14 @@ mod tests {
     #[test]
     fn broll_across_a_reordered_boundary_offsets_into_the_asset() {
         // Window on the second output piece starts 1 s into the B-roll range.
-        let edits = [Edit::Broll {
+        let edits = [Edit::Layer {
+            track: 2,
             start: 4.0,
             end: 6.0,
             media: "b1".into(),
             offset: 0.0,
+            frame: Frame::Full,
+            audio: None,
         }];
         let g = graph_with(
             &[edits[0].clone()],
@@ -1191,6 +1197,30 @@ mod tests {
             g.contains("[2:v]trim=start=0:end=1,setpts=PTS-STARTPTS+4/TB"),
             "{g}"
         );
+    }
+
+    #[test]
+    fn a_layer_on_any_track_exports_full_frame_and_muted_for_now() {
+        let edits = [Edit::Layer {
+            track: 3,
+            start: 2.0,
+            end: 4.0,
+            media: "b1".into(),
+            offset: 1.5,
+            frame: Frame::PipTopRight,
+            audio: Some(-6.0),
+        }];
+        let args = args_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
+            o.assets = assets(&[("b1", "/assets/b1.mp4")]);
+        })
+        .unwrap();
+        let g = filter_complex(&args);
+        assert!(g.contains("[1:v]trim=start=1.5:end=3.5,setpts=PTS-STARTPTS+2/TB,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1[v0b0];"), "{g}");
+        assert!(
+            g.contains("[v0bo0][v0b0]overlay=x=0:y=0:eof_action=pass:enable='between(t,2,4)'"),
+            "{g}"
+        );
+        assert!(!g.contains("[1:a]"), "layer sound is not mixed yet: {g}");
     }
 
     #[test]
@@ -1302,11 +1332,14 @@ mod tests {
                 text: "c".into(),
                 position: CaptionPos::BottomLeft,
             },
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 0.0,
                 end: 10.0,
                 media: "b1".into(),
                 offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             },
         ];
         let g = graph_with(&edits, MediaKind::Video, OutputFormat::Mp4, |o| {
@@ -1356,11 +1389,14 @@ mod tests {
     #[test]
     fn audio_only_export_mixes_music_and_ignores_broll() {
         let edits = [
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 1.0,
                 end: 2.0,
                 media: "b1".into(),
                 offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             },
             Edit::Audio {
                 start: 0.0,

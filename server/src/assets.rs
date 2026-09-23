@@ -118,7 +118,7 @@ where
 
 pub fn references(edits: &[Edit], asset_id: &str) -> (usize, usize) {
     edits.iter().fold((0, 0), |(b, a), e| match e {
-        Edit::Broll { media, .. } if media == asset_id => (b + 1, a),
+        Edit::Layer { media, .. } if media == asset_id => (b + 1, a),
         Edit::Audio { media, .. } if media == asset_id => (b, a + 1),
         _ => (b, a),
     })
@@ -140,7 +140,7 @@ pub async fn asset_files(
         .collect();
     let mut files = HashMap::new();
     for edit in edits {
-        let (Edit::Broll { media, .. } | Edit::Audio { media, .. }) = edit else {
+        let (Edit::Layer { media, .. } | Edit::Audio { media, .. }) = edit else {
             continue;
         };
         let asset = by_id.get(media).ok_or_else(|| {
@@ -572,11 +572,14 @@ mod tests {
     #[test]
     fn references_count_by_kind() {
         let edits = [
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 0.0,
                 end: 1.0,
                 media: "a".into(),
                 offset: 0.0,
+                frame: engine::Frame::Full,
+                audio: None,
             },
             Edit::Audio {
                 start: 0.0,

@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Edit, Range, Transition, Word};
+use crate::types::{Edit, Range, Source, Transition, Word};
 
 /// Two ranges closer than this are treated as touching.
 pub const EPS: f64 = 1e-6;
@@ -124,6 +124,65 @@ pub fn normalize_cuts(cuts: &[Range]) -> Vec<Range> {
         }
     }
     merged
+}
+
+/// The project's own media (source 0) followed by the sources `AddSource`
+/// appended (`ProjectDoc::sources`), in stitched order.
+pub fn all_sources(first: Source, doc_sources: &[Source]) -> Vec<Source> {
+    let mut all = Vec::with_capacity(doc_sources.len() + 1);
+    all.push(first);
+    all.extend_from_slice(doc_sources);
+    all
+}
+
+/// End of the stitched timeline: the last source's offset plus its duration.
+/// Zero with no sources.
+pub fn stitched_duration(sources: &[Source]) -> f64 {
+    sources.last().map_or(0.0, |s| s.offset + s.duration)
+}
+
+/// Which source holds stitched instant `t`, and the time inside that file.
+/// An instant on a join (within `EPS`) belongs to the later source; the
+/// stitched end maps to the last source at its duration. `None` before 0,
+/// past the end, or with no sources.
+pub fn locate(sources: &[Source], t: f64) -> Option<(usize, f64)> {
+    let last = sources.len().checked_sub(1)?;
+    let end = stitched_duration(sources);
+    if t < -EPS || t > end + EPS {
+        return None;
+    }
+    if t >= end - EPS {
+        return Some((last, sources[last].duration));
+    }
+    let i = sources
+        .iter()
+        .rposition(|s| t >= s.offset - EPS)
+        .unwrap_or(0);
+    let s = &sources[i];
+    Some((i, (t - s.offset).clamp(0.0, s.duration)))
+}
+
+/// The project's word list: each source's words shifted by its offset, in
+/// source order. Part `k` must be source `k` (pass untranscribed sources with
+/// no words). Source 0's ids are unchanged, so existing logs and clients keep
+/// working; source `k > 0` ids become `"{k}:{id}"`, unique across files.
+pub fn stitch_words(parts: &[(&Source, &[Word])]) -> Vec<Word> {
+    parts
+        .iter()
+        .enumerate()
+        .flat_map(|(k, (source, words))| {
+            words.iter().map(move |w| Word {
+                id: if k == 0 {
+                    w.id.clone()
+                } else {
+                    format!("{k}:{}", w.id)
+                },
+                text: w.text.clone(),
+                start: w.start + source.offset,
+                end: w.end + source.offset,
+            })
+        })
+        .collect()
 }
 
 fn cut_ranges(edits: &[Edit]) -> Vec<Range> {
@@ -446,11 +505,13 @@ pub fn caption_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>>
     )
 }
 
-/// Per segment, every B-roll overlay that intersects it.
+/// Per segment, every layer overlay that intersects it, in edit order. Every
+/// layer, whatever its track, frame or sound, is drawn as full-frame B-roll
+/// until the planner learns tracks.
 pub fn broll_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
     overlay_windows(
         segments,
-        &ranges_of(edits, |e| matches!(e, Edit::Broll { .. })),
+        &ranges_of(edits, |e| matches!(e, Edit::Layer { .. })),
     )
 }
 
@@ -508,7 +569,7 @@ pub fn joins(segments: &[Segment], edits: &[Edit], project: Transition) -> Vec<J
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CaptionPos, TitleStyle, Transition};
+    use crate::types::{CaptionPos, Frame, Source, TitleStyle, Transition};
 
     fn cut(start: f64, end: f64) -> Edit {
         Edit::Cut {
@@ -945,11 +1006,14 @@ mod tests {
             }]
         );
         let edits = [
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 1.0,
                 end: 2.0,
                 media: "b".into(),
                 offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             },
             Edit::Audio {
                 start: 0.0,
@@ -971,11 +1035,14 @@ mod tests {
         let edits = [
             title(5.0, 1.0),
             caption(0.0, 10.0),
-            Edit::Broll {
+            Edit::Layer {
+                track: 2,
                 start: 0.0,
                 end: 10.0,
                 media: "b".into(),
                 offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             },
             Edit::Audio {
                 start: 0.0,
@@ -1064,5 +1131,109 @@ mod tests {
             joins(&tl, &edits, Transition::None)[1].transition,
             Transition::None
         );
+    }
+
+    fn src(media: &str, offset: f64, duration: f64) -> Source {
+        Source {
+            media: media.into(),
+            offset,
+            duration,
+        }
+    }
+
+    /// [0,10) [10,15) [15,17.5)
+    fn three() -> Vec<Source> {
+        all_sources(
+            src("m1", 0.0, 10.0),
+            &[src("m2", 10.0, 5.0), src("m3", 15.0, 2.5)],
+        )
+    }
+
+    #[test]
+    fn all_sources_puts_the_project_media_first() {
+        let all = three();
+        assert_eq!(
+            all.iter().map(|s| s.media.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2", "m3"]
+        );
+        assert_eq!(
+            all_sources(src("m1", 0.0, 4.0), &[]),
+            vec![src("m1", 0.0, 4.0)]
+        );
+    }
+
+    #[test]
+    fn stitched_duration_is_the_last_sources_end() {
+        assert_eq!(stitched_duration(&three()), 17.5);
+        assert_eq!(stitched_duration(&[src("m1", 0.0, 4.0)]), 4.0);
+        assert_eq!(stitched_duration(&[]), 0.0);
+    }
+
+    #[test]
+    fn locate_at_every_boundary() {
+        let s = three();
+        assert_eq!(locate(&s, 0.0), Some((0, 0.0)), "the very start");
+        assert_eq!(locate(&s, 4.25), Some((0, 4.25)), "inside the first");
+        assert_eq!(locate(&s, 9.5), Some((0, 9.5)), "just before a join");
+        assert_eq!(
+            locate(&s, 10.0),
+            Some((1, 0.0)),
+            "a join belongs to the later source"
+        );
+        assert_eq!(locate(&s, 12.0), Some((1, 2.0)), "inside the second");
+        assert_eq!(locate(&s, 15.0), Some((2, 0.0)), "the second join");
+        assert_eq!(
+            locate(&s, 17.5),
+            Some((2, 2.5)),
+            "the exact end is the last source at its duration"
+        );
+        assert_eq!(locate(&s, 17.6), None, "past the end");
+        assert_eq!(locate(&s, -0.1), None, "before the start");
+        assert_eq!(locate(&[], 0.0), None, "no sources");
+    }
+
+    #[test]
+    fn locate_snaps_within_eps_of_a_join_or_the_end() {
+        let s = three();
+        assert_eq!(locate(&s, 10.0 - EPS / 2.0), Some((1, 0.0)));
+        assert_eq!(locate(&s, 17.5 + EPS / 2.0), Some((2, 2.5)));
+        assert_eq!(locate(&s, -EPS / 2.0), Some((0, 0.0)));
+    }
+
+    #[test]
+    fn locate_on_one_source_is_the_identity() {
+        let s = [src("m1", 0.0, 10.0)];
+        assert_eq!(locate(&s, 0.0), Some((0, 0.0)));
+        assert_eq!(locate(&s, 3.5), Some((0, 3.5)));
+        assert_eq!(locate(&s, 10.0), Some((0, 10.0)));
+        assert_eq!(locate(&s, 10.5), None);
+    }
+
+    #[test]
+    fn stitch_words_shifts_by_offset_and_prefixes_later_ids() {
+        let w = |id: &str, start: f64, end: f64| Word {
+            id: id.into(),
+            text: id.into(),
+            start,
+            end,
+        };
+        let s = three();
+        let first = [w("w0", 0.5, 1.0), w("w1", 1.0, 1.5)];
+        let third = [w("w0", 0.0, 0.25)];
+        let words = stitch_words(&[(&s[0], &first), (&s[1], &[]), (&s[2], &third)]);
+        assert_eq!(
+            words,
+            vec![
+                w("w0", 0.5, 1.0),
+                w("w1", 1.0, 1.5),
+                Word {
+                    id: "2:w0".into(),
+                    text: "w0".into(),
+                    start: 15.0,
+                    end: 15.25,
+                },
+            ]
+        );
+        assert!(stitch_words(&[]).is_empty());
     }
 }

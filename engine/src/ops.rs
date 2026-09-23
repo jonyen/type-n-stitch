@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::editlist::{piece_starts, EPS};
-use crate::types::{default_duck, CaptionPos, Edit, Range, TitleStyle, Transition};
+use crate::types::{default_duck, CaptionPos, Edit, Frame, Range, Source, TitleStyle, Transition};
 
 /// Upper bound on speaker indices. Diarization never finds this many voices;
 /// the cap exists so a stored `RenameSpeaker` cannot ask the fold for an
@@ -123,6 +123,41 @@ pub enum Op {
     RemoveAudio {
         start: f64,
     },
+    /// Append a video to the main track at stitched `offset` (the current
+    /// stitched end). The fold adds a permanent split there.
+    #[serde(rename_all = "camelCase")]
+    AddSource {
+        media: String,
+        offset: f64,
+        duration: f64,
+    },
+    /// `audio: None` is muted; `Some(db)` mixes the layer's sound at that level.
+    #[serde(rename_all = "camelCase")]
+    AddLayer {
+        track: u8,
+        start: f64,
+        end: f64,
+        media: String,
+        #[serde(default)]
+        offset: f64,
+        frame: Frame,
+        audio: Option<f64>,
+    },
+    /// Move the layer on `track` starting at `start` to `to_track` and set
+    /// its frame and sound.
+    #[serde(rename_all = "camelCase")]
+    SetLayer {
+        track: u8,
+        start: f64,
+        to_track: u8,
+        frame: Frame,
+        audio: Option<f64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoveLayer {
+        track: u8,
+        start: f64,
+    },
 }
 
 /// An operation as stored: its position in the log, who sent it, and
@@ -153,6 +188,10 @@ pub struct ProjectDoc {
     /// build a timeline ignore them.
     #[serde(default)]
     pub order: Vec<f64>,
+    /// Videos appended by `AddSource`, in stitched order. The project's own
+    /// media is source 0 and is *not* listed here; see `all_sources`.
+    #[serde(default)]
+    pub sources: Vec<Source>,
 }
 
 /// Replay the log in order, skipping undone operations.
@@ -170,6 +209,39 @@ fn inside(inner: Range, outer: Range) -> bool {
 
 fn overlaps(a: Range, b: Range) -> bool {
     a.start < b.end && a.end > b.start
+}
+
+/// Add a layer, replacing every layer it overlaps on its own track, which is
+/// the old B-roll rule applied per track.
+fn add_layer(doc: &mut ProjectDoc, layer: Edit) {
+    let Edit::Layer { track, .. } = &layer else {
+        return;
+    };
+    let (track, span) = (*track, layer.range());
+    doc.edits.retain(
+        |e| !matches!(e, Edit::Layer { track: t, .. } if *t == track && overlaps(e.range(), span)),
+    );
+    doc.edits.push(layer);
+}
+
+/// Remove the layer on `track` that starts at `start`.
+fn remove_layer(doc: &mut ProjectDoc, track: u8, start: f64) {
+    doc.edits.retain(|e| {
+        !matches!(e, Edit::Layer { track: t, start: s, .. } if *t == track && (s - start).abs() < EPS)
+    });
+}
+
+/// Add a split at `at` unless one is already there, keeping `splits` sorted.
+fn add_split(doc: &mut ProjectDoc, at: f64) {
+    if !doc.splits.iter().any(|s| (s - at).abs() < EPS) {
+        doc.splits.push(at);
+        doc.splits.sort_by(f64::total_cmp);
+    }
+}
+
+/// Whether `at` is where an appended source begins: a permanent split.
+fn is_join(doc: &ProjectDoc, at: f64) -> bool {
+    doc.sources.iter().any(|s| (s.offset - at).abs() < EPS)
 }
 
 pub fn apply_op(doc: &mut ProjectDoc, op: &Op) {
@@ -306,13 +378,13 @@ pub fn apply_op(doc: &mut ProjectDoc, op: &Op) {
                 }
             }
         }
-        Op::Split { at } => {
-            if !doc.splits.iter().any(|s| (s - at).abs() < EPS) {
-                doc.splits.push(*at);
-                doc.splits.sort_by(f64::total_cmp);
+        Op::Split { at } => add_split(doc, *at),
+        // A join between two sources stays split, so no piece spans two files.
+        Op::Unsplit { at } => {
+            if !is_join(doc, *at) {
+                doc.splits.retain(|s| (s - at).abs() >= EPS);
             }
         }
-        Op::Unsplit { at } => doc.splits.retain(|s| (s - at).abs() >= EPS),
         Op::Move { piece, before } => {
             let current = piece_starts(&doc.edits, &doc.splits);
             let has = |list: &[f64], x: f64| list.iter().any(|s| (s - x).abs() < EPS);
@@ -334,25 +406,25 @@ pub fn apply_op(doc: &mut ProjectDoc, op: &Op) {
             effective.insert(at, *piece);
             doc.order = effective;
         }
+        // B-roll is a muted, full-frame layer on track 2; old logs replay unchanged.
         Op::AddBroll {
             start,
             end,
             media,
             offset,
-        } => {
-            let span = Range::new(*start, *end);
-            doc.edits
-                .retain(|e| !matches!(e, Edit::Broll { .. } if overlaps(e.range(), span)));
-            doc.edits.push(Edit::Broll {
+        } => add_layer(
+            doc,
+            Edit::Layer {
+                track: 2,
                 start: *start,
                 end: *end,
                 media: media.clone(),
                 offset: *offset,
-            });
-        }
-        Op::RemoveBroll { start } => doc
-            .edits
-            .retain(|e| !matches!(e, Edit::Broll { start: s, .. } if (s - start).abs() < EPS)),
+                frame: Frame::Full,
+                audio: None,
+            },
+        ),
+        Op::RemoveBroll { start } => remove_layer(doc, 2, *start),
         Op::AddAudio {
             start,
             end,
@@ -387,13 +459,79 @@ pub fn apply_op(doc: &mut ProjectDoc, op: &Op) {
         Op::RemoveAudio { start } => doc
             .edits
             .retain(|e| !matches!(e, Edit::Audio { start: s, .. } if (s - start).abs() < EPS)),
+        Op::AddSource {
+            media,
+            offset,
+            duration,
+        } => {
+            doc.sources.push(Source {
+                media: media.clone(),
+                offset: *offset,
+                duration: *duration,
+            });
+            add_split(doc, *offset);
+        }
+        Op::AddLayer {
+            track,
+            start,
+            end,
+            media,
+            offset,
+            frame,
+            audio,
+        } => add_layer(
+            doc,
+            Edit::Layer {
+                track: *track,
+                start: *start,
+                end: *end,
+                media: media.clone(),
+                offset: *offset,
+                frame: *frame,
+                audio: *audio,
+            },
+        ),
+        Op::SetLayer {
+            track,
+            start,
+            to_track,
+            frame,
+            audio,
+        } => {
+            let Some(i) = doc.edits.iter().position(|e| {
+                matches!(e, Edit::Layer { track: t, start: s, .. } if t == track && (s - start).abs() < EPS)
+            }) else {
+                return;
+            };
+            if let Edit::Layer {
+                track: t,
+                frame: f,
+                audio: a,
+                ..
+            } = &mut doc.edits[i]
+            {
+                *t = *to_track;
+                *f = *frame;
+                *a = *audio;
+            }
+            // Edited in place; any other layer it now overlaps on its new track goes.
+            let span = doc.edits[i].range();
+            let mut k = 0;
+            doc.edits.retain(|e| {
+                let clash = k != i
+                    && matches!(e, Edit::Layer { track: t, .. } if t == to_track && overlaps(e.range(), span));
+                k += 1;
+                !clash
+            });
+        }
+        Op::RemoveLayer { track, start } => remove_layer(doc, *track, *start),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CaptionPos, TitleStyle, Transition};
+    use crate::types::{CaptionPos, Frame, Source, TitleStyle, Transition};
 
     fn op(seq: i64, op: Op) -> SeqOp {
         SeqOp {
@@ -504,11 +642,14 @@ mod tests {
         let doc = fold(&[op(1, broll(1.0, 3.0)), op(2, broll(2.0, 4.0))]);
         assert_eq!(
             doc.edits,
-            vec![Edit::Broll {
+            vec![Edit::Layer {
+                track: 2,
                 start: 2.0,
                 end: 4.0,
                 media: "asset-1".into(),
-                offset: 0.0
+                offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
             }]
         );
         let doc = fold(&[
@@ -994,5 +1135,321 @@ mod tests {
         ));
         let doc: ProjectDoc = serde_json::from_str(r#"{"edits":[],"speakerNames":[]}"#).unwrap();
         assert_eq!(doc.transition, Transition::None);
+    }
+
+    fn layer_op(track: u8, start: f64, end: f64) -> Op {
+        Op::AddLayer {
+            track,
+            start,
+            end,
+            media: "asset-1".into(),
+            offset: 0.0,
+            frame: Frame::Full,
+            audio: None,
+        }
+    }
+
+    fn layer_spans(doc: &ProjectDoc) -> Vec<(u8, f64, f64)> {
+        doc.edits
+            .iter()
+            .filter_map(|e| match e {
+                Edit::Layer {
+                    track, start, end, ..
+                } => Some((*track, *start, *end)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn add_source(offset: f64, duration: f64) -> Op {
+        Op::AddSource {
+            media: "m2".into(),
+            offset,
+            duration,
+        }
+    }
+
+    #[test]
+    fn add_source_appends_the_source_and_splits_at_its_offset() {
+        let doc = fold(&[
+            op(1, Op::Split { at: 4.0 }),
+            op(2, add_source(10.0, 5.0)),
+            op(
+                3,
+                Op::AddSource {
+                    media: "m3".into(),
+                    offset: 15.0,
+                    duration: 2.5,
+                },
+            ),
+        ]);
+        assert_eq!(
+            doc.sources,
+            vec![
+                Source {
+                    media: "m2".into(),
+                    offset: 10.0,
+                    duration: 5.0
+                },
+                Source {
+                    media: "m3".into(),
+                    offset: 15.0,
+                    duration: 2.5
+                },
+            ]
+        );
+        assert_eq!(doc.splits, vec![4.0, 10.0, 15.0]);
+    }
+
+    #[test]
+    fn undoing_add_source_removes_the_source_and_its_split() {
+        let doc = fold(&[
+            op(1, Op::Split { at: 4.0 }),
+            undone(2, add_source(10.0, 5.0)),
+        ]);
+        assert!(doc.sources.is_empty());
+        assert_eq!(doc.splits, vec![4.0]);
+    }
+
+    #[test]
+    fn a_join_cannot_be_unsplit_but_other_splits_can() {
+        let doc = fold(&[
+            op(1, add_source(10.0, 5.0)),
+            op(2, Op::Split { at: 12.0 }),
+            op(3, Op::Unsplit { at: 10.0 }),
+            op(4, Op::Unsplit { at: 12.0 }),
+        ]);
+        assert_eq!(doc.splits, vec![10.0]);
+        // A split already at the join is not duplicated.
+        let doc = fold(&[op(1, add_source(10.0, 5.0)), op(2, Op::Split { at: 10.0 })]);
+        assert_eq!(doc.splits, vec![10.0]);
+    }
+
+    #[test]
+    fn a_join_is_a_piece_start_that_moves_like_any_other() {
+        let doc = fold(&[
+            op(1, add_source(10.0, 5.0)),
+            op(
+                2,
+                Op::Move {
+                    piece: 10.0,
+                    before: Some(0.0),
+                },
+            ),
+        ]);
+        assert_eq!(doc.order, vec![10.0, 0.0]);
+    }
+
+    #[test]
+    fn add_layer_replaces_overlaps_on_its_own_track_only() {
+        let doc = fold(&[
+            op(1, layer_op(2, 1.0, 3.0)),
+            op(2, layer_op(3, 1.0, 3.0)),
+            op(3, layer_op(2, 2.0, 4.0)),
+            op(4, layer_op(2, 5.0, 6.0)),
+        ]);
+        assert_eq!(
+            layer_spans(&doc),
+            vec![(3, 1.0, 3.0), (2, 2.0, 4.0), (2, 5.0, 6.0)]
+        );
+    }
+
+    #[test]
+    fn add_broll_folds_to_a_muted_full_frame_track_two_layer() {
+        let doc = fold(&[
+            op(1, layer_op(3, 1.0, 2.0)),
+            op(
+                2,
+                Op::AddBroll {
+                    start: 1.0,
+                    end: 2.0,
+                    media: "clip".into(),
+                    offset: 0.5,
+                },
+            ),
+        ]);
+        assert_eq!(
+            doc.edits[1],
+            Edit::Layer {
+                track: 2,
+                start: 1.0,
+                end: 2.0,
+                media: "clip".into(),
+                offset: 0.5,
+                frame: Frame::Full,
+                audio: None,
+            }
+        );
+        // RemoveBroll only ever touches track 2.
+        let doc = fold(&[
+            op(1, layer_op(3, 1.0, 2.0)),
+            op(2, broll(1.0, 2.0)),
+            op(3, Op::RemoveBroll { start: 1.0 }),
+        ]);
+        assert_eq!(layer_spans(&doc), vec![(3, 1.0, 2.0)]);
+    }
+
+    #[test]
+    fn set_layer_moves_track_and_sets_frame_and_audio_in_place() {
+        let doc = fold(&[
+            op(1, layer_op(2, 1.0, 3.0)),
+            op(2, cut(8.0, 9.0)),
+            op(3, layer_op(3, 2.0, 4.0)),
+            op(4, layer_op(3, 6.0, 7.0)),
+            op(
+                5,
+                Op::SetLayer {
+                    track: 2,
+                    start: 1.0,
+                    to_track: 3,
+                    frame: Frame::PipBottomLeft,
+                    audio: Some(-3.0),
+                },
+            ),
+        ]);
+        // It keeps its place in the list; the V3 layer it now overlaps is gone.
+        assert_eq!(
+            doc.edits[0],
+            Edit::Layer {
+                track: 3,
+                start: 1.0,
+                end: 3.0,
+                media: "asset-1".into(),
+                offset: 0.0,
+                frame: Frame::PipBottomLeft,
+                audio: Some(-3.0),
+            }
+        );
+        assert_eq!(layer_spans(&doc), vec![(3, 1.0, 3.0), (3, 6.0, 7.0)]);
+        assert!(doc.edits[1].is_cut());
+    }
+
+    #[test]
+    fn set_layer_on_a_missing_layer_is_a_no_op() {
+        let before = fold(&[op(1, layer_op(2, 1.0, 3.0))]);
+        let after = fold(&[
+            op(1, layer_op(2, 1.0, 3.0)),
+            op(
+                2,
+                Op::SetLayer {
+                    track: 3,
+                    start: 1.0,
+                    to_track: 2,
+                    frame: Frame::Full,
+                    audio: None,
+                },
+            ),
+        ]);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn remove_layer_matches_track_and_start() {
+        let doc = fold(&[
+            op(1, layer_op(2, 1.0, 2.0)),
+            op(2, layer_op(3, 1.0, 2.0)),
+            op(
+                3,
+                Op::RemoveLayer {
+                    track: 3,
+                    start: 1.0,
+                },
+            ),
+            op(
+                4,
+                Op::RemoveLayer {
+                    track: 2,
+                    start: 9.0,
+                },
+            ),
+        ]);
+        assert_eq!(layer_spans(&doc), vec![(2, 1.0, 2.0)]);
+    }
+
+    #[test]
+    fn source_and_layer_ops_serialise_to_the_client_shape() {
+        let cases = [
+            (
+                Op::AddSource {
+                    media: "m2".into(),
+                    offset: 60.0,
+                    duration: 30.5,
+                },
+                serde_json::json!({ "kind": "addsource", "media": "m2", "offset": 60.0, "duration": 30.5 }),
+            ),
+            (
+                Op::AddLayer {
+                    track: 3,
+                    start: 1.0,
+                    end: 4.0,
+                    media: "asset-1".into(),
+                    offset: 2.0,
+                    frame: Frame::PipBottomRight,
+                    audio: Some(-6.0),
+                },
+                serde_json::json!({
+                    "kind": "addlayer", "track": 3, "start": 1.0, "end": 4.0, "media": "asset-1",
+                    "offset": 2.0, "frame": "pipBottomRight", "audio": -6.0
+                }),
+            ),
+            (
+                Op::SetLayer {
+                    track: 2,
+                    start: 1.0,
+                    to_track: 3,
+                    frame: Frame::Full,
+                    audio: None,
+                },
+                serde_json::json!({
+                    "kind": "setlayer", "track": 2, "start": 1.0, "toTrack": 3,
+                    "frame": "full", "audio": null
+                }),
+            ),
+            (
+                Op::RemoveLayer {
+                    track: 2,
+                    start: 1.0,
+                },
+                serde_json::json!({ "kind": "removelayer", "track": 2, "start": 1.0 }),
+            ),
+        ];
+        for (op, json) in cases {
+            assert_eq!(serde_json::to_value(&op).unwrap(), json);
+            assert_eq!(serde_json::from_value::<Op>(json).unwrap(), op);
+        }
+        // Offset and audio may be omitted on the way in.
+        let op: Op = serde_json::from_str(
+            r#"{"kind":"addlayer","track":2,"start":0,"end":1,"media":"m","frame":"full"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            op,
+            Op::AddLayer {
+                track: 2,
+                start: 0.0,
+                end: 1.0,
+                media: "m".into(),
+                offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
+            }
+        );
+        // Stored B-roll ops still read.
+        let op: Op =
+            serde_json::from_str(r#"{"kind":"addbroll","start":1,"end":2,"media":"m"}"#).unwrap();
+        assert!(matches!(op, Op::AddBroll { offset, .. } if offset == 0.0));
+    }
+
+    #[test]
+    fn project_doc_carries_sources_and_reads_old_docs() {
+        let doc = fold(&[op(1, add_source(10.0, 5.0))]);
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(
+            json["sources"],
+            serde_json::json!([{ "media": "m2", "offset": 10.0, "duration": 5.0 }])
+        );
+        assert_eq!(json["splits"], serde_json::json!([10.0]));
+        let old: ProjectDoc = serde_json::from_str(r#"{"edits":[],"speakerNames":[]}"#).unwrap();
+        assert!(old.sources.is_empty());
     }
 }

@@ -2443,7 +2443,7 @@ mod tests {
             .await
             .unwrap();
         let (_, doc) = ops::load_doc(&state, &project.id).await.unwrap();
-        assert!(matches!(&doc.edits[0], Edit::Broll { offset, .. } if *offset == 1.0));
+        assert!(matches!(&doc.edits[0], Edit::Layer { track: 2, offset, .. } if *offset == 1.0));
         assert!(matches!(&doc.edits[1], Edit::Audio { gain, duck, .. } if *gain == -8.0 && !*duck));
     }
 }
