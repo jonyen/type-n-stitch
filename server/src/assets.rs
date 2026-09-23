@@ -661,4 +661,61 @@ mod tests {
         assert_eq!(references(&edits, "a"), (1, 1));
         assert_eq!(references(&edits, "b"), (0, 1));
     }
+
+    #[tokio::test]
+    async fn a_layer_may_show_another_source_of_the_project() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let second = crate::projects::test_support::seed_media(&state, 5.0).await;
+        let dir = state.config.data_dir.join(&second);
+        tokio::fs::write(dir.join("source.mp4"), b"").await.unwrap();
+        sqlx::query(
+            "INSERT INTO project_sources (project_id, position, media_id, start_at, duration) VALUES (?, 1, ?, 10.0, 5.0)",
+        )
+        .bind(&project.id)
+        .bind(&second)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        let layer = |media: &str| Edit::Layer {
+            track: 3,
+            start: 1.0,
+            end: 2.0,
+            media: media.into(),
+            offset: 0.0,
+            frame: engine::Frame::PipTopRight,
+            audio: Some(-6.0),
+        };
+
+        let files = asset_files(&state, &project, &[layer(&second)])
+            .await
+            .unwrap();
+        assert_eq!(files[&second], dir.join("source.mp4"));
+
+        // An asset still resolves to its own file.
+        let clip = seed_asset(&state, &project, MediaKind::Video, 4.0).await;
+        let files = asset_files(&state, &project, &[layer(&clip.id)])
+            .await
+            .unwrap();
+        assert!(files[&clip.id].ends_with(format!("{}.mp4", clip.id)));
+
+        // Media that is not in this project is refused.
+        let stranger = crate::projects::test_support::seed_media(&state, 5.0).await;
+        let err = asset_files(&state, &project, &[layer(&stranger)])
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("does not belong"), "{err:?}");
+
+        // Music may not play a source: it stays asset-only.
+        let music = Edit::Audio {
+            start: 0.0,
+            end: 1.0,
+            media: second.clone(),
+            offset: 0.0,
+            gain: 0.0,
+            duck: true,
+        };
+        assert!(asset_files(&state, &project, &[music]).await.is_err());
+    }
 }

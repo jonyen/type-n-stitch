@@ -505,14 +505,22 @@ pub fn caption_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>>
     )
 }
 
-/// Per segment, every layer overlay that intersects it, in edit order. Every
-/// layer, whatever its track, frame or sound, is drawn as full-frame B-roll
-/// until the planner learns tracks.
-pub fn broll_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
-    overlay_windows(
+/// Per segment, every layer that intersects it, lower tracks first and,
+/// within a track, in window order, so overlaying in this order stacks V3
+/// over V2. Like captions, a layer is not drawn on a title card.
+pub fn layer_windows(segments: &[Segment], edits: &[Edit]) -> Vec<Vec<Window>> {
+    let track = |w: &Window| match &edits[w.index] {
+        Edit::Layer { track, .. } => *track,
+        _ => 0,
+    };
+    let mut windows = overlay_windows(
         segments,
         &ranges_of(edits, |e| matches!(e, Edit::Layer { .. })),
-    )
+    );
+    for ws in &mut windows {
+        ws.sort_by(|a, b| track(a).cmp(&track(b)).then(a.start.total_cmp(&b.start)));
+    }
+    windows
 }
 
 /// Per segment, every music/audio overlay that intersects it. Unlike the
@@ -1025,7 +1033,7 @@ mod tests {
             },
         ];
         let tl = timeline(10.0, &edits);
-        assert_eq!(broll_windows(&tl, &edits)[0][0].index, 0);
+        assert_eq!(layer_windows(&tl, &edits)[0][0].index, 0);
         assert_eq!(audio_windows(&tl, &edits)[0][0].index, 1);
     }
 
@@ -1057,7 +1065,7 @@ mod tests {
         assert!(matches!(tl[1].kind, SegmentKind::Title { .. }));
         // The card is not a surface for a caption or a B-roll clip.
         assert!(caption_windows(&tl, &edits)[1].is_empty());
-        assert!(broll_windows(&tl, &edits)[1].is_empty());
+        assert!(layer_windows(&tl, &edits)[1].is_empty());
         // The music bed covers the whole hold, from the title's instant.
         assert_eq!(
             audio_windows(&tl, &edits)[1],
@@ -1235,5 +1243,35 @@ mod tests {
             ]
         );
         assert!(stitch_words(&[]).is_empty());
+    }
+
+    #[test]
+    fn layer_windows_put_v2_under_v3_whatever_the_edit_order() {
+        let edits = [
+            Edit::Layer {
+                track: 3,
+                start: 2.0,
+                end: 5.0,
+                media: "p".into(),
+                offset: 0.0,
+                frame: Frame::PipTopRight,
+                audio: None,
+            },
+            Edit::Layer {
+                track: 2,
+                start: 1.0,
+                end: 6.0,
+                media: "b".into(),
+                offset: 0.0,
+                frame: Frame::Full,
+                audio: None,
+            },
+        ];
+        let tl = timeline(10.0, &edits);
+        let order: Vec<usize> = layer_windows(&tl, &edits)[0]
+            .iter()
+            .map(|w| w.index)
+            .collect();
+        assert_eq!(order, vec![1, 0]);
     }
 }
