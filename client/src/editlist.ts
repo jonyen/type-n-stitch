@@ -155,7 +155,7 @@ export function orderedPieces(
 }
 
 /** Index of the ordered piece that owns source time `t`: containing it, or the next one after it. */
-function owner(list: Range[], t: number): number {
+export function owner(list: Range[], t: number): number {
   const inside = list.findIndex((p) => (t >= p.start && t < p.end) || Math.abs(t - p.start) < EPS);
   if (inside !== -1) return inside;
   let best = -1;

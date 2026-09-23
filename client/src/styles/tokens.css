@@ -1,0 +1,150 @@
+/* Design tokens. Dark is the default; `data-theme` on <html> switches. The
+   lane colours (cut, overdub, B-roll, music, playhead) mean one thing each
+   and are never reused, and the accent never marks a lane. */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0b0e14;
+  --surface: #111622;
+  --raised: #1a2130;
+  --hover: rgba(255, 255, 255, 0.06);
+  --timeline: #0e121b;
+  --track: #151b27;
+  --clip: #243049;
+  --clip-border: #364767;
+  --border: #1d2432;
+  --text: #d3d9e4;
+  --text-strong: #eef2f8;
+  --muted: #6f7a90;
+  --faint: #58627a;
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --accent-soft: rgba(59, 130, 246, 0.35);
+  --on-accent: #ffffff;
+  --playhead: #facc15;
+  --playhead-soft: rgba(250, 204, 21, 0.28);
+  --cut: #f87171;
+  --cut-soft: rgba(248, 113, 113, 0.22);
+  --overdub: #c4b5fd;
+  --overdub-soft: rgba(196, 181, 253, 0.16);
+  --broll: #14b8a6;
+  --music: #f59e0b;
+  --danger: #f87171;
+  --ok: #22c55e;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  --font:
+    Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 48px;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  --speaker-0: #60a5fa;
+  --speaker-1: #fb923c;
+  --speaker-2: #4ade80;
+  --speaker-3: #c084fc;
+  --speaker-4: #fb7185;
+  --speaker-5: #22d3ee;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f5f7fb;
+  --surface: #ffffff;
+  --raised: #eef1f6;
+  --hover: rgba(0, 0, 0, 0.05);
+  --timeline: #eef1f6;
+  --track: #e3e8f0;
+  --clip: #d6deeb;
+  --clip-border: #b8c4d8;
+  --border: #dde3ec;
+  --text: #151a23;
+  --text-strong: #0b0f16;
+  --muted: #5d6879;
+  --faint: #9aa4b5;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.18);
+  --playhead: #ca8a04;
+  --playhead-soft: rgba(202, 138, 4, 0.22);
+  --cut: #dc2626;
+  --cut-soft: rgba(220, 38, 38, 0.14);
+  --overdub: #7c3aed;
+  --overdub-soft: rgba(124, 58, 237, 0.12);
+  --broll: #0d9488;
+  --music: #d97706;
+  --danger: #dc2626;
+  --ok: #16a34a;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.16);
+
+  --speaker-0: #2563eb;
+  --speaker-1: #c2410c;
+  --speaker-2: #15803d;
+  --speaker-3: #9333ea;
+  --speaker-4: #be123c;
+  --speaker-5: #0e7490;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-theme='system'] {
+    color-scheme: light;
+
+    --bg: #f5f7fb;
+    --surface: #ffffff;
+    --raised: #eef1f6;
+    --hover: rgba(0, 0, 0, 0.05);
+    --timeline: #eef1f6;
+    --track: #e3e8f0;
+    --clip: #d6deeb;
+    --clip-border: #b8c4d8;
+    --border: #dde3ec;
+    --text: #151a23;
+    --text-strong: #0b0f16;
+    --muted: #5d6879;
+    --faint: #9aa4b5;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --accent-soft: rgba(37, 99, 235, 0.18);
+    --playhead: #ca8a04;
+    --playhead-soft: rgba(202, 138, 4, 0.22);
+    --cut: #dc2626;
+    --cut-soft: rgba(220, 38, 38, 0.14);
+    --overdub: #7c3aed;
+    --overdub-soft: rgba(124, 58, 237, 0.12);
+    --broll: #0d9488;
+    --music: #d97706;
+    --danger: #dc2626;
+    --ok: #16a34a;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px rgba(0, 0, 0, 0.06);
+    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.16);
+
+    --speaker-0: #2563eb;
+    --speaker-1: #c2410c;
+    --speaker-2: #15803d;
+    --speaker-3: #9333ea;
+    --speaker-4: #be123c;
+    --speaker-5: #0e7490;
+  }
+}

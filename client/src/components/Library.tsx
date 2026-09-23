@@ -3,6 +3,9 @@ import { useEffect, useState } from 'react';
 import { listLibrary } from '../api';
 import { clipLength } from '../format';
 import type { LibraryItem } from '../types';
+import { cx } from '../cx';
+import styles from './Library.module.css';
+import ui from '../styles/ui.module.css';
 
 interface Props {
   onOpen: (item: LibraryItem) => void;
@@ -23,40 +26,40 @@ export function Library({ onOpen, disabled }: Props) {
   const missing = items.filter((i) => !i.available).length;
 
   return (
-    <section className="library" aria-labelledby="library-heading">
-      <div className="library-head">
+    <section className={styles.library} aria-labelledby="library-heading">
+      <div className={styles.head}>
         <h2 id="library-heading">Start from a sample</h2>
         {missing > 0 && (
-          <span className="muted">
+          <span className={ui.muted}>
             {missing} not downloaded yet · run <code>npm run library</code>
           </span>
         )}
       </div>
-      <ul className="library-grid">
+      <ul className={styles.grid}>
         {items.map((item) => (
-          <li key={item.slug} className={item.available ? '' : 'unavailable'}>
+          <li key={item.slug} className={cx(styles.item, !item.available && styles.unavailable)}>
             <button
               type="button"
-              className="library-card"
+              className={styles.card}
               disabled={disabled || !item.available}
               onClick={() => onOpen(item)}
             >
-              <span className={`poster ${item.kind}`}>
+              <span className={styles.poster}>
                 {item.poster ? (
                   <img src={item.poster} alt="" loading="lazy" />
                 ) : (
-                  <span className="poster-glyph" aria-hidden>
+                  <span className={styles.glyph} aria-hidden>
                     {item.kind === 'audio' ? '♪' : '▶'}
                   </span>
                 )}
                 {item.duration !== null && (
-                  <span className="length">{clipLength(item.duration)}</span>
+                  <span className={styles.length}>{clipLength(item.duration)}</span>
                 )}
               </span>
               <strong>{item.title}</strong>
-              <span className="muted">{item.blurb}</span>
+              <span className={styles.blurb}>{item.blurb}</span>
             </button>
-            <span className="credit">
+            <span className={styles.credit}>
               {item.sourceUrl ? (
                 <a href={item.sourceUrl} target="_blank" rel="noreferrer" title={item.sourceTitle}>
                   {item.author}

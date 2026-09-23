@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { cx } from '../cx';
 import type { Asset, AudioEdit } from '../types';
 import { AssetPicker } from './AssetPicker';
+import { DialogFrame } from './DialogFrame';
+import frame from './DialogFrame.module.css';
+import ui from '../styles/ui.module.css';
 
 interface Props {
   assets: Asset[];
@@ -39,26 +43,19 @@ export function AudioDialog({
     if (ready) onSubmit(initial ? null : asset, db, duck);
   };
   return (
-    <div className="modal-backdrop" onClick={onCancel}>
-      <form
-        className="modal wide"
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') {
-            e.stopPropagation();
-            onCancel();
-          }
-        }}
-      >
-        <h2>{initial ? 'Music' : 'Add music'}</h2>
-        <p className="muted">
-          {initial
-            ? `Playing ${asset?.name ?? initial.media}.`
-            : wholeEdit
-              ? 'Under the whole edit.'
-              : 'Under the selected words.'}
-        </p>
+    <DialogFrame
+      title={initial ? 'Music' : 'Add music'}
+      description={
+        initial
+          ? `Playing ${asset?.name ?? initial.media}.`
+          : wholeEdit
+            ? 'Under the whole edit.'
+            : 'Under the selected words.'
+      }
+      wide
+      onClose={onCancel}
+    >
+      <form className={frame.form} onSubmit={submit}>
         {!initial && (
           <AssetPicker
             assets={assets}
@@ -68,7 +65,7 @@ export function AudioDialog({
             onUpload={onUpload}
           />
         )}
-        <label className="field">
+        <label className={ui.field}>
           Level (dB, −30 to 12)
           <input
             ref={gainInput}
@@ -81,29 +78,29 @@ export function AudioDialog({
           />
         </label>
         {validGain && db > 0 && (
-          <p className="muted">
+          <p className={ui.muted}>
             Boost above 0 dB is applied on export; the preview cannot play louder than the source.
           </p>
         )}
-        <label className="toggle">
+        <label className={ui.toggle}>
           <input type="checkbox" checked={duck} onChange={(e) => setDuck(e.target.checked)} /> Duck
           under speech
         </label>
-        <div className="actions">
+        <div className={frame.actions}>
           {initial && onRemove && (
-            <button type="button" className="danger" onClick={onRemove}>
+            <button type="button" className={cx(ui.button, ui.danger)} onClick={onRemove}>
               Remove
             </button>
           )}
-          <span className="spacer" />
-          <button type="button" onClick={onCancel}>
+          <span className={frame.spacer} />
+          <button type="button" className={ui.button} onClick={onCancel}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={!ready}>
+          <button type="submit" className={cx(ui.button, ui.primary)} disabled={!ready}>
             {initial ? 'Save' : 'Add music'}
           </button>
         </div>
       </form>
-    </div>
+    </DialogFrame>
   );
 }

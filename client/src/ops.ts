@@ -94,7 +94,7 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
       return { kind: 'cut', ...rangeForWords(state.words, range[0], range[1], state.duration) };
     }
     case 'overdub': {
-      const range = selectedRange(state.selection);
+      const range = action.range ?? selectedRange(state.selection);
       if (!range) return null;
       return {
         kind: 'overdub',

@@ -4,7 +4,8 @@
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
-import { EPS, overdubAt, titles, wordIndexAt } from './editlist';
+import { EPS, overdubAt, owner, titles, wordIndexAt } from './editlist';
+import { outputToSource, pieceOutputTime, timelineLength, type Segment } from './timeline';
 import type { Edit, OverdubEdit, Range, TitleEdit, Word } from './types';
 
 /** The earliest title whose instant lies in (prev, now]; null when none or when moving backwards. */
@@ -84,7 +85,16 @@ export function playStep(t: number, index: number, ordered: Range[]): PlayStep {
 
 export interface Playback {
   playing: boolean;
+  /** The playhead in source seconds, to 0.1 s (exact once stopped at the end). */
   currentTime: number;
+  /**
+   * The playhead in output seconds, to 0.1 s: mapped through the output piece
+   * that is playing, so it is right where a reorder makes a source instant
+   * ambiguous. The output length once stopped at the end.
+   */
+  outputTime: number;
+  /** Stopped at the end of the output: play starts over from the first piece. */
+  atEnd: boolean;
   /** Index of the word under the playhead, or -1. */
   activeWord: number;
   /** The overdub whose audio is currently playing, if any. */
@@ -92,7 +102,10 @@ export interface Playback {
   /** The title card the preview is paused on, if any. */
   titling: TitleEdit | null;
   toggle: () => void;
+  /** Seek to a source time. */
   seek: (t: number) => void;
+  /** Seek to an output time; the output length parks at the end. */
+  seekOutput: (t: number) => void;
 }
 
 export function usePlayback(
@@ -103,9 +116,13 @@ export function usePlayback(
   /** Media URL. The element mounts after the hook, so listeners re-attach when it changes. */
   src: string | undefined,
   ordered: Range[],
+  /** The edit in output time, laid out from the same `ordered` pieces. */
+  segments: Segment[],
 ): Playback {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [outputTime, setOutputTime] = useState(0);
+  const [atEnd, setAtEnd] = useState(false);
   const [activeWord, setActiveWord] = useState(-1);
   const [overdubbing, setOverdubbing] = useState<OverdubEdit | null>(null);
   const [titling, setTitling] = useState<TitleEdit | null>(null);
@@ -114,22 +131,21 @@ export function usePlayback(
   const editsRef = useRef(edits);
   const wordsRef = useRef(words);
   const orderedRef = useRef(ordered);
+  const segmentsRef = useRef(segments);
   editsRef.current = edits;
   wordsRef.current = words;
   orderedRef.current = ordered;
+  segmentsRef.current = segments;
 
   const wantPlaying = useRef(false);
   /** The output piece currently playing, by index into `ordered`. */
   const playIndex = useRef(0);
-  // `ordered` changing (a split, cut, reorder or undo, possibly a peer's,
-  // mid-playback) can leave `playIndex` pointing at a piece that no longer
-  // occupies that slot; resync it from where the media actually sits rather
-  // than pausing or seeking, so an edit never interrupts the person watching.
-  useEffect(() => {
-    const media = mediaRef.current;
-    if (!media) return;
-    playIndex.current = pieceIndexAt(media.currentTime, ordered);
-  }, [mediaRef, ordered]);
+  /**
+   * Stopped at the end of the output. The media then sits at the source end,
+   * which is not where the output ends once pieces are reordered, so the end
+   * is a state of its own rather than a source time.
+   */
+  const ended = useRef(false);
   const activeOverdub = useRef<OverdubEdit | null>(null);
   const overdubAudio = useRef<HTMLAudioElement | null>(null);
   const frame = useRef(0);
@@ -155,9 +171,32 @@ export function usePlayback(
     if (!media) return;
     const t = media.currentTime;
     lastTime.current = t;
-    setCurrentTime(Math.round(t * 10) / 10);
+    const end = ended.current;
+    // Both are rounded to keep renders to a few a second, the output time only
+    // after mapping: a rounded source time can land in a different piece.
+    setCurrentTime(end ? t : Math.round(t * 10) / 10);
+    setOutputTime(
+      end
+        ? timelineLength(segmentsRef.current)
+        : Math.round(
+            pieceOutputTime(t, playIndex.current, orderedRef.current, segmentsRef.current) * 10,
+          ) / 10,
+    );
+    setAtEnd(end);
     setActiveWord(wordIndexAt(t, wordsRef.current));
   }, [mediaRef]);
+
+  // `ordered` changing (a split, cut, reorder or undo, possibly a peer's,
+  // mid-playback) can leave `playIndex` pointing at a piece that no longer
+  // occupies that slot; resync it from where the media actually sits rather
+  // than pausing or seeking, so an edit never interrupts the person watching.
+  // The output time moves with the layout, so it is re-read too.
+  useEffect(() => {
+    const media = mediaRef.current;
+    if (!media) return;
+    if (!ended.current) playIndex.current = pieceIndexAt(media.currentTime, ordered);
+    sync();
+  }, [mediaRef, ordered, segments, sync]);
 
   const clearTitleTimer = useCallback(() => {
     if (titleTimer.current !== null) {
@@ -274,6 +313,7 @@ export function usePlayback(
         playIndex.current = step.index;
       } else if (step?.kind === 'stop') {
         wantPlaying.current = false;
+        ended.current = true;
         media.pause();
         media.currentTime = duration;
       }
@@ -296,6 +336,7 @@ export function usePlayback(
     if (!src || !media) return;
     const onPlay = () => {
       wantPlaying.current = true;
+      ended.current = false;
       setPlaying(true);
     };
     const onPause = () => {
@@ -311,7 +352,9 @@ export function usePlayback(
         return;
       }
       wantPlaying.current = false;
+      ended.current = true;
       setPlaying(false);
+      sync();
     };
     media.addEventListener('play', onPlay);
     media.addEventListener('pause', onPause);
@@ -370,19 +413,24 @@ export function usePlayback(
       return;
     }
     if (media.paused) {
-      const at = restartAt(media.currentTime, media.ended, duration, orderedRef.current);
+      const at = ended.current
+        ? (orderedRef.current[0]?.start ?? 0)
+        : restartAt(media.currentTime, media.ended, duration, orderedRef.current);
       const startAt = at ?? media.currentTime;
       playIndex.current = pieceIndexAt(startAt, orderedRef.current);
+      ended.current = false;
       if (at !== null) media.currentTime = at;
       void media.play();
+      sync();
     } else {
       wantPlaying.current = false;
       media.pause();
     }
-  }, [audio, duration, leaveTitle, mediaRef]);
+  }, [audio, duration, leaveTitle, mediaRef, sync]);
 
-  const seek = useCallback(
-    (t: number) => {
+  /** Seek to source time `t`, played as output piece `index` (by default, the one holding `t`). */
+  const seekTo = useCallback(
+    (t: number, index?: number) => {
       const media = mediaRef.current;
       if (!media) return;
       if (activeTitle.current) leaveTitle(false);
@@ -393,7 +441,8 @@ export function usePlayback(
         audio().pause();
       }
       const to = Math.max(0, Math.min(t, duration));
-      playIndex.current = pieceIndexAt(to, orderedRef.current);
+      playIndex.current = index ?? pieceIndexAt(to, orderedRef.current);
+      ended.current = false;
       media.currentTime = to;
       if (wantPlaying.current && media.paused) void media.play();
       sync();
@@ -403,5 +452,41 @@ export function usePlayback(
     [audio, duration, leaveTitle, mediaRef, sync],
   );
 
-  return { playing, currentTime, activeWord, overdubbing, titling, toggle, seek };
+  const seek = useCallback((t: number) => seekTo(t), [seekTo]);
+
+  const seekOutput = useCallback(
+    (t: number) => {
+      const media = mediaRef.current;
+      if (!media) return;
+      const segs = segmentsRef.current;
+      const list = orderedRef.current;
+      if (list.length > 0 && t >= timelineLength(segs) - EPS) {
+        // The end of the output: park there, as playing to the end does. Its
+        // source instant would read back as the start of another piece.
+        wantPlaying.current = false;
+        media.pause();
+        seekTo(duration, list.length - 1);
+        ended.current = true;
+        sync();
+        return;
+      }
+      const seg = segs.find((s) => t >= s.output.start && t < s.output.end);
+      const index = seg ? Math.min(owner(list, seg.source.start), list.length - 1) : undefined;
+      seekTo(outputToSource(t, segs), index);
+    },
+    [duration, mediaRef, seekTo, sync],
+  );
+
+  return {
+    playing,
+    currentTime,
+    outputTime,
+    atEnd,
+    activeWord,
+    overdubbing,
+    titling,
+    toggle,
+    seek,
+    seekOutput,
+  };
 }

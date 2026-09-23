@@ -1,0 +1,287 @@
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: var(--space-3) var(--space-4) var(--space-6);
+  font-size: 17px;
+  line-height: 1.85;
+  user-select: none;
+  cursor: text;
+  overflow-wrap: anywhere;
+}
+
+.transcript[data-tool='razor'] .token {
+  cursor: crosshair;
+}
+
+.transcript[data-tool='range'] .token {
+  cursor: col-resize;
+}
+
+.clip + .clip {
+  margin-top: var(--space-3);
+}
+
+.clipDivider {
+  display: block;
+  width: 100%;
+  margin: 4px 0 8px;
+  padding: 4px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.split {
+  border-style: solid;
+  border-color: var(--clip-border);
+}
+
+.dividerSelected {
+  box-shadow: 0 0 0 2px var(--accent);
+  color: var(--accent);
+}
+
+.speech {
+  margin: 0;
+}
+
+.turn {
+  margin: -6px -10px;
+  padding: 6px 10px;
+  border-radius: var(--radius-lg);
+  transition: background-color 0.2s;
+}
+
+.speaking {
+  background: color-mix(in srgb, var(--speaker, var(--accent)) 8%, transparent);
+}
+
+.turn:has(.speakerTag) .speech {
+  padding-left: 14px;
+  border-left: 3px solid var(--speaker, var(--border));
+}
+
+.speaking .speech {
+  border-left-width: 4px;
+}
+
+.speakerTag {
+  display: inline-block;
+  margin: 0 0 2px;
+  padding: 1px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--speaker, var(--muted));
+  cursor: pointer;
+  user-select: none;
+}
+
+.speaking .speakerTag::after {
+  content: ' · speaking';
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+button.speakerTag:hover {
+  border-color: var(--border);
+  background: var(--hover);
+}
+
+input.speakerTag {
+  width: 16ch;
+  border-color: var(--speaker, var(--accent));
+  background: var(--bg);
+  outline: none;
+}
+
+.token {
+  display: inline;
+  margin: 0 -1px;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: inherit;
+  line-height: inherit;
+  cursor: text;
+  transition: background 0.1s;
+}
+
+.token:hover {
+  background: var(--hover);
+}
+
+.cut {
+  color: var(--faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--cut);
+  text-decoration-thickness: 2px;
+}
+
+.overdub {
+  color: var(--overdub);
+  background: var(--overdub-soft);
+  font-style: italic;
+  text-decoration: underline;
+  text-decoration-color: var(--overdub);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
+
+.active {
+  background: var(--playhead-soft);
+}
+
+.selected {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.peerSelected {
+  box-shadow: inset 0 -2px 0 var(--peer);
+}
+
+.selected.peerSelected {
+  box-shadow:
+    inset 0 0 0 1px var(--accent),
+    inset 0 -2px 0 var(--peer);
+}
+
+.gap {
+  color: var(--faint);
+  letter-spacing: 0.1em;
+  cursor: default;
+}
+
+.gapTransition {
+  margin-left: 2px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.gapTransition:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.peerCaret {
+  position: relative;
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-right: 1px;
+  border-radius: 1px;
+  vertical-align: text-bottom;
+}
+
+.peerCaret::after {
+  content: attr(data-name);
+  position: absolute;
+  top: -1.4em;
+  left: -2px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: inherit;
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.12s;
+  pointer-events: none;
+}
+
+.peerCaret:hover::after,
+.turn:hover .peerCaret::after {
+  opacity: 1;
+}
+
+/* Title-card tokens keep the card's own colours: they preview what the
+   engine renders, not the app theme. */
+.titleToken {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  margin: 6px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+}
+
+.titleDark {
+  background: #111;
+  color: #fff;
+}
+
+.titleLight {
+  background: #f6f6f7;
+  color: #17181a;
+}
+
+.titleAccent {
+  background: #2563eb;
+  color: #fff;
+}
+
+.titleSelected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.titleText {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titleDuration {
+  opacity: 0.6;
+}
+
+.tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.7;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.captionTag {
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+
+.brollTag {
+  background: var(--broll);
+  color: #0b0e14;
+}
+
+.musicTag {
+  background: var(--music);
+  color: #0b0e14;
+}

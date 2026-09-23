@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
+import { cx } from '../cx';
 import type { TitleEdit, TitleStyle } from '../types';
+import { DialogFrame } from './DialogFrame';
+import frame from './DialogFrame.module.css';
+import ui from '../styles/ui.module.css';
+import titleStyles from './TitleDialog.module.css';
 
 /** Everything about a title card except where it sits. */
 export type TitleFields = Omit<TitleEdit, 'kind' | 'at'>;
@@ -19,6 +24,12 @@ const STYLES: { value: TitleStyle; label: string }[] = [
   { value: 'light', label: 'Light' },
   { value: 'accent', label: 'Accent' },
 ];
+
+const CHIP: Record<TitleStyle, string | undefined> = {
+  dark: titleStyles.dark,
+  light: titleStyles.light,
+  accent: titleStyles.accent,
+};
 
 export function TitleDialog({ initial, at, onSubmit, onCancel }: Props) {
   const [text, setText] = useState(initial?.text ?? '');
@@ -48,24 +59,19 @@ export function TitleDialog({ initial, at, onSubmit, onCancel }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onCancel}>
+    <DialogFrame
+      title={initial ? 'Edit title' : 'Add title'}
+      description={`A full-frame card at ${at.toFixed(1)}s. The output grows by its duration.`}
+      onClose={onCancel}
+    >
       <form
-        className="modal"
-        onClick={(e) => e.stopPropagation()}
+        className={frame.form}
         onSubmit={submit}
         onKeyDown={(e) => {
-          if (e.key === 'Escape') {
-            e.stopPropagation();
-            onCancel();
-          }
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.currentTarget.requestSubmit();
         }}
       >
-        <h2>{initial ? 'Edit title' : 'Add title'}</h2>
-        <p className="muted">
-          A full-frame card at {at.toFixed(1)}s. The output grows by its duration.
-        </p>
-        <label className="field">
+        <label className={ui.field}>
           Title
           <input
             ref={first}
@@ -77,8 +83,8 @@ export function TitleDialog({ initial, at, onSubmit, onCancel }: Props) {
             onChange={(e) => setText(e.target.value)}
           />
         </label>
-        <label className="field">
-          Subtitle <span className="muted">(optional)</span>
+        <label className={ui.field}>
+          Subtitle <span className={ui.muted}>(optional)</span>
           <input
             type="text"
             value={subtitle}
@@ -87,12 +93,12 @@ export function TitleDialog({ initial, at, onSubmit, onCancel }: Props) {
             onChange={(e) => setSubtitle(e.target.value)}
           />
         </label>
-        <fieldset className="field styles">
+        <fieldset className={cx(ui.field, titleStyles.styles)}>
           <legend>Style</legend>
           {STYLES.map((s) => (
             <label
               key={s.value}
-              className={`style-chip ${s.value}${style === s.value ? ' on' : ''}`}
+              className={cx(titleStyles.chip, CHIP[s.value], style === s.value && titleStyles.on)}
             >
               <input
                 type="radio"
@@ -105,7 +111,7 @@ export function TitleDialog({ initial, at, onSubmit, onCancel }: Props) {
             </label>
           ))}
         </fieldset>
-        <label className="field duration">
+        <label className={cx(ui.field, titleStyles.duration)}>
           Duration (seconds)
           <input
             type="number"
@@ -116,16 +122,16 @@ export function TitleDialog({ initial, at, onSubmit, onCancel }: Props) {
             onChange={(e) => setDuration(e.target.value)}
           />
         </label>
-        <div className="actions">
-          <span className="spacer" />
-          <button type="button" onClick={onCancel}>
+        <div className={frame.actions}>
+          <span className={frame.spacer} />
+          <button type="button" className={ui.button} onClick={onCancel}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={!ready}>
+          <button type="submit" className={cx(ui.button, ui.primary)} disabled={!ready}>
             {initial ? 'Save' : 'Add title'}
           </button>
         </div>
       </form>
-    </div>
+    </DialogFrame>
   );
 }

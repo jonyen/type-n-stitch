@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 
 import {
   exportMedia,
@@ -19,27 +27,34 @@ import {
 } from './api';
 import { AgentDialog } from './components/AgentDialog';
 import { AudioDialog } from './components/AudioDialog';
-import { Avatar } from './components/Avatar';
 import { BrollDialog } from './components/BrollDialog';
 import { CaptionDialog } from './components/CaptionDialog';
-import { ClipStrip } from './components/ClipStrip';
 import { Dropzone } from './components/Dropzone';
 import { Login } from './components/Login';
 import { OverdubDialog } from './components/OverdubDialog';
 import { Player } from './components/Player';
-import { Presence } from './components/Presence';
 import { Projects } from './components/Projects';
+import { SelectionToolbar } from './components/SelectionToolbar';
+import { Timeline, type OverlayRef } from './components/Timeline';
 import { TitleDialog, type TitleFields } from './components/TitleDialog';
-import { Toolbar, type ExportState } from './components/Toolbar';
+import { ToolToolbar } from './components/ToolToolbar';
+import { TopBar, type ExportState } from './components/TopBar';
 import { Transcript } from './components/Transcript';
+import { cx } from './cx';
 import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
+import { handledUpstream, shouldIgnoreGlobalKey } from './keyboardGuard';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
 import { audios, brolls } from './overlays';
 import { type PresenceState } from './realtime';
+import { deleteAction } from './selection';
 import { useSession } from './session';
+import styles from './App.module.css';
+import ui from './styles/ui.module.css';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
+import { canSplitAt, timelineSegments } from './timeline';
+import type { Tool } from './tools';
 import type {
   Asset,
   AudioEdit,
@@ -51,10 +66,12 @@ import type {
 } from './types';
 import { usePlayback } from './usePlayback';
 import { holdOrApply, useRealtime, type RemoteDoc } from './useRealtime';
+import { useTheme } from './useTheme';
 import { useThumbnails } from './useThumbnails';
 
 export function App() {
   const { user, setUser, signOut } = useSession();
+  const [theme, setTheme] = useTheme();
   const [needsSetup, setNeedsSetup] = useState(false);
   const [project, setProject] = useState<ProjectSummary | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -63,7 +80,10 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editor, dispatch] = useReducer(editorReducer, initialEditor);
-  const [overdubOpen, setOverdubOpen] = useState(false);
+  // The word range the overdub dialog was opened on; like `captionRange`, a
+  // peer clearing the selection must not unmount the dialog under the user
+  // (and leave the shortcuts off, since they wait for it to close).
+  const [overdubRange, setOverdubRange] = useState<[number, number] | null>(null);
   // The title dialog, adding at `at` or editing `initial`.
   const [titleDialog, setTitleDialog] = useState<{ at: number; initial?: TitleEdit } | null>(null);
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
@@ -82,6 +102,14 @@ export function App() {
   const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
   // A selected clip, by its piece's start. Exclusive with the word/title selection.
   const [selectedClip, setSelectedClip] = useState<number | null>(null);
+  // A selected B-roll or music bar. Exclusive with every other selection.
+  const [selectedOverlay, setSelectedOverlay] = useState<OverlayRef | null>(null);
+  // The timeline's mouse tool, also used by the transcript. Persists until changed.
+  const [tool, setTool] = useState<Tool>('select');
+  // Viewers stay on Select.
+  useEffect(() => {
+    if (!canEdit) setTool('select');
+  }, [canEdit]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [exportState, setExportState] = useState<ExportState>({ status: 'idle' });
   const [twoWordFillers, setTwoWordFillers] = useState(false);
@@ -96,6 +124,11 @@ export function App() {
     () => orderedPieces(editor.duration, editor.edits, editor.splits, editor.order),
     [editor.duration, editor.edits, editor.splits, editor.order],
   );
+  // The edit in output time: what the timeline draws and the player's clock reads.
+  const segments = useMemo(
+    () => timelineSegments(editor.duration, editor.edits, editor.splits, editor.order),
+    [editor.duration, editor.edits, editor.splits, editor.order],
+  );
 
   const mediaRef = useRef<HTMLVideoElement>(null);
   const playback = usePlayback(
@@ -105,6 +138,7 @@ export function App() {
     editor.duration,
     project?.media.url,
     ordered,
+    segments,
   );
   const thumbs = useThumbnails(project?.id ?? null, project?.media.kind);
 
@@ -319,10 +353,13 @@ export function App() {
     setExportState({ status: 'idle' });
     setSelectedTitle(null);
     setSelectedClip(null);
+    setSelectedOverlay(null);
     setTitleDialog(null);
+    setOverdubRange(null);
     setCaptionRange(null);
     setBrollRange(null);
     setAudioDialog(null);
+    setTool('select');
   }, []);
 
   // Opening a project pushes a history entry, so the browser's Back button
@@ -411,21 +448,40 @@ export function App() {
 
   const onWordClick = useCallback(
     (index: number, extend: boolean) => {
+      const word = editor.words[index];
+      if (tool === 'razor') {
+        if (word && canEdit && canSplitAt(word.start, editor.edits, editor.splits, editor.duration))
+          edit({ type: 'split', at: word.start });
+        return;
+      }
       setSelectedTitle(null);
       setSelectedClip(null);
+      setSelectedOverlay(null);
       dispatch({ type: 'select', index, extend });
-      const word = editor.words[index];
       if (word && !extend) playback.seek(word.start);
     },
-    [editor.words, playback],
+    [tool, canEdit, editor.words, editor.edits, editor.splits, editor.duration, edit, playback],
   );
 
-  const onWordDrag = useCallback((index: number) => {
-    dispatch({ type: 'select', index, extend: true });
-  }, []);
+  // The Range tool cuts the dragged words on release; a plain click cuts nothing.
+  const onWordDragEnd = useCallback(() => {
+    if (tool === 'range') edit({ type: 'deleteSelection' });
+  }, [tool, edit]);
 
+  // Razor splits on a press; dragging across words selects nothing.
+  const onWordDrag = useCallback(
+    (index: number) => {
+      if (tool === 'razor') return;
+      dispatch({ type: 'select', index, extend: true });
+    },
+    [tool],
+  );
+
+  const headSeq = editor.headSeq;
   const onExport = useCallback(async () => {
     if (!projectId) return;
+    // The version being rendered, so a result can tell when the edit moved on.
+    const seq = headSeq;
     setExportState({ status: 'rendering', progress: 0 });
     try {
       const { jobId } = await exportMedia(projectId);
@@ -442,10 +498,11 @@ export function App() {
             url: job.url,
             duration: job.duration,
             bytes: job.bytes,
+            seq,
           });
           return;
         } else {
-          setExportState({ status: 'error', message: job.message });
+          setExportState({ status: 'error', message: job.message, seq });
           return;
         }
       }
@@ -453,18 +510,19 @@ export function App() {
       setExportState({
         status: 'error',
         message: err instanceof Error ? err.message : String(err),
+        seq,
       });
     }
-  }, [projectId]);
+  }, [projectId, headSeq]);
 
   const onOverdubSubmit = useCallback(
     async (text: string) => {
-      if (!projectId) return;
+      if (!projectId || !overdubRange) return;
       const { audioUrl, duration } = await synthesizeOverdub(projectId, text);
-      edit({ type: 'overdub', text, audioUrl, audioDuration: duration });
-      setOverdubOpen(false);
+      edit({ type: 'overdub', text, audioUrl, audioDuration: duration, range: overdubRange });
+      setOverdubRange(null);
     },
-    [projectId, edit],
+    [projectId, overdubRange, edit],
   );
 
   /** Where a new card goes: the end of the selected words, else the playhead. */
@@ -474,6 +532,15 @@ export function App() {
       : playback.currentTime;
     setTitleDialog({ at });
   }, [selected, editor.words, editor.duration, playback.currentTime]);
+
+  // A music bar, from the transcript tag or the timeline, opens its dialog.
+  const openAudio = useCallback(
+    (start: number) => {
+      const found = audios(editor.edits).find((a) => Math.abs(a.start - start) < EPS);
+      if (found) setAudioDialog({ edit: found });
+    },
+    [editor.edits],
+  );
 
   const onTitleOpen = useCallback(
     (at: number) => {
@@ -497,7 +564,17 @@ export function App() {
   const onTitleClick = useCallback((at: number) => {
     setSelectedTitle(at);
     setSelectedClip(null);
+    setSelectedOverlay(null);
     dispatch({ type: 'clearSelection' });
+  }, []);
+
+  const onSelectOverlay = useCallback((ref: OverlayRef | null) => {
+    setSelectedOverlay(ref);
+    if (ref) {
+      setSelectedTitle(null);
+      setSelectedClip(null);
+      dispatch({ type: 'clearSelection' });
+    }
   }, []);
 
   // Clicking any divider jumps there; only a split's divider can be
@@ -507,10 +584,11 @@ export function App() {
     (start: number) => {
       setSelectedClip(editor.splits.some((s) => Math.abs(s - start) < EPS) ? start : null);
       setSelectedTitle(null);
+      setSelectedOverlay(null);
       dispatch({ type: 'clearSelection' });
       playback.seek(start);
       document
-        .querySelector<HTMLElement>(`.clip[data-start="${start}"]`)
+        .querySelector<HTMLElement>(`[data-clip-start="${start}"]`)
         ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     },
     [playback, editor.splits],
@@ -546,16 +624,68 @@ export function App() {
     if (!ordered.some((p) => Math.abs(p.start - selectedClip) < EPS)) setSelectedClip(null);
   }, [ordered, selectedClip]);
 
+  // A peer's edit (or an undo) can remove the B-roll or music we had selected.
+  useEffect(() => {
+    if (!selectedOverlay) return;
+    const list = selectedOverlay.kind === 'broll' ? brolls(editor.edits) : audios(editor.edits);
+    if (!list.some((e) => Math.abs(e.start - selectedOverlay.start) < EPS))
+      setSelectedOverlay(null);
+  }, [editor.edits, selectedOverlay]);
+
   const hasClipSelection =
     selectedClip !== null && editor.splits.some((s) => Math.abs(s - selectedClip) < EPS);
 
+  // A word selection made any other way (the arrow keys, a peer's sync) ends
+  // the title, clip and overlay selections, as clicking a word does.
+  const hasWordSelection = selected !== null;
+  useEffect(() => {
+    if (!hasWordSelection) return;
+    setSelectedTitle(null);
+    setSelectedClip(null);
+    setSelectedOverlay(null);
+  }, [hasWordSelection]);
+
+  /** Delete whatever is selected: words, a title card, a split, or a B-roll or music bar. */
+  const deleteSelected = useCallback(() => {
+    edit(
+      deleteAction({
+        hasWords: hasWordSelection,
+        title: selectedTitle,
+        clip: hasClipSelection ? selectedClip : null,
+        overlay: selectedOverlay,
+      }),
+    );
+    setSelectedTitle(null);
+    setSelectedClip(null);
+    setSelectedOverlay(null);
+  }, [hasWordSelection, selectedTitle, hasClipSelection, selectedClip, selectedOverlay, edit]);
+
+  /** Escape: no word, title, clip or overlay selection. The floating toolbar's dismiss too. */
+  const clearAll = useCallback(() => {
+    dispatch({ type: 'clearSelection' });
+    setSelectedTitle(null);
+    setSelectedClip(null);
+    setSelectedOverlay(null);
+  }, []);
+
   // Keyboard: Delete cuts, ⌘Z undoes, ⇧⌘Z redoes, Space plays, Esc clears, arrows move.
+  // The window listener is added once per project and calls the latest
+  // handler through a ref. Re-adding it on every render (`playback` is a new
+  // object each time) dropped keys: a listener removed mid-dispatch is not
+  // called, and a render can land between two listeners of one real keydown,
+  // e.g. after the tool picker's own Escape switches back to Select.
+  const keyHandler = useRef<((e: KeyboardEvent) => void) | null>(null);
   useEffect(() => {
     if (!projectId) return;
-    const onKey = (e: KeyboardEvent) => {
+    const onKey = (e: KeyboardEvent) => keyHandler.current?.(e);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [projectId]);
+  useLayoutEffect(() => {
+    keyHandler.current = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (
-        overdubOpen ||
+        overdubRange ||
         titleDialog ||
         captionRange ||
         agentDialogOpen ||
@@ -563,21 +693,10 @@ export function App() {
         audioDialog
       )
         return;
-      if (target?.closest('input, textarea, select, [contenteditable]')) return;
+      if (shouldIgnoreGlobalKey(target, handledUpstream(e))) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        // A selected card, a selected clip and a word selection never
-        // coexist, so this is unambiguous: Delete removes whichever one is
-        // showing.
-        if (selectedTitle !== null) {
-          edit({ type: 'removeTitle', at: selectedTitle });
-          setSelectedTitle(null);
-        } else if (hasClipSelection && selectedClip !== null) {
-          edit({ type: 'unsplit', at: selectedClip });
-          setSelectedClip(null);
-        } else {
-          edit({ type: 'deleteSelection' });
-        }
+        deleteSelected();
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         undoRedo(e.shiftKey ? 'redo' : 'undo');
@@ -585,9 +704,7 @@ export function App() {
         e.preventDefault();
         playback.toggle();
       } else if (e.key === 'Escape') {
-        dispatch({ type: 'clearSelection' });
-        setSelectedTitle(null);
-        setSelectedClip(null);
+        clearAll();
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         dispatch({
@@ -598,19 +715,15 @@ export function App() {
         });
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
   }, [
-    projectId,
-    overdubOpen,
+    overdubRange,
     titleDialog,
     captionRange,
     agentDialogOpen,
     brollRange,
     audioDialog,
-    selectedTitle,
-    selectedClip,
-    hasClipSelection,
+    deleteSelected,
+    clearAll,
     playback,
     showCuts,
     edit,
@@ -624,150 +737,120 @@ export function App() {
           .map((w) => w.text)
           .join(' ')
       : '';
-  const selectedText = wordsIn(selected);
   // The dialog keeps showing the words it was opened on, selection or not.
   const captionText = wordsIn(captionRange);
 
   if (user === undefined)
     return (
-      <div className="app">
-        <p className="muted">Loading…</p>
+      <div className={styles.app}>
+        <p className={ui.muted}>Loading…</p>
       </div>
     );
-  if (!user)
-    return (
-      <div className="app">
-        <Login needsSetup={needsSetup} onSignedIn={setUser} />
-      </div>
-    );
+  if (!user) return <Login needsSetup={needsSetup} onSignedIn={setUser} />;
+
+  const controls = project
+    ? {
+        readOnly: !canEdit,
+        canUndo: editor.undoable !== null,
+        canRedo: editor.redoable !== null,
+        onUndo: () => undoRedo('undo'),
+        onRedo: () => undoRedo('redo'),
+        fillerCount: fillers.length,
+        pauseCount: pauses.length,
+        twoWordFillers,
+        onRemoveFillers: () => edit({ type: 'applyCuts', cuts: fillers }),
+        onTightenPauses: () => edit({ type: 'applyCuts', cuts: pauses }),
+        onTwoWordFillers: setTwoWordFillers,
+        hasSelection: selected !== null,
+        onAddTitle,
+        onAddCaption: () => {
+          if (selected) setCaptionRange(selected);
+        },
+        onAddBroll: () => {
+          if (selected) setBrollRange(selected);
+        },
+        onAddMusic: () => setAudioDialog({ range: selected }),
+        onOverdub: () => {
+          if (selected) setOverdubRange(selected);
+        },
+        onSplit,
+        transition: editor.transition,
+        onTransition: (transition: Transition) => edit({ type: 'setTransition', transition }),
+        peers,
+        status,
+        lastError,
+        exportState,
+        headSeq: editor.headSeq,
+        onExport: () => void onExport(),
+      }
+    : null;
 
   return (
-    <div className="app">
-      <header>
-        {project && (
-          <button type="button" className="ghost back" onClick={onBack} title="Back to samples">
-            <span aria-hidden>←</span> Home
-          </button>
-        )}
-        <h1>
-          {project ? (
-            <a
-              href="/"
-              className="home-link"
-              onClick={(e) => {
-                e.preventDefault();
-                onBack();
-              }}
-            >
-              <span className="logo" aria-hidden />
-              type-n-stitch
-            </a>
-          ) : (
-            <>
-              <span className="logo" aria-hidden />
-              type-n-stitch
-            </>
-          )}
-        </h1>
-        <span className="tagline muted">edit media by editing its words</span>
-        <span className="spacer" />
-        {project && <span className="header-file muted">{project.media.filename}</span>}
-        {project && <Presence peers={peers} status={status} lastError={lastError} />}
-        <Avatar user={user} withName size="sm" />
-        <button type="button" className="ghost" onClick={() => setAgentDialogOpen(true)}>
-          Connect an agent
-        </button>
-        <button type="button" className="ghost" onClick={signOut}>
-          Sign out
-        </button>
-      </header>
+    <div className={styles.app}>
+      <TopBar
+        user={user}
+        project={project}
+        editor={controls}
+        theme={theme}
+        onTheme={setTheme}
+        onHome={onBack}
+        onAgent={() => setAgentDialogOpen(true)}
+        onSignOut={signOut}
+      />
 
       {!project ? (
-        <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError}>
-          <Projects items={projects} onOpen={onOpenProject} disabled={busy !== null} />
-        </Dropzone>
+        <div className={styles.home}>
+          <Dropzone onFile={onFile} onLibraryClip={onLibraryClip} busy={busy} error={loadError}>
+            <Projects items={projects} onOpen={onOpenProject} disabled={busy !== null} />
+          </Dropzone>
+        </div>
       ) : (
-        <main className="editor">
+        <main className={styles.editor}>
           {loadError && (
-            <p className="error banner">
+            <p className={styles.banner} role="alert">
               {loadError}
               <button
                 type="button"
-                className="ghost"
+                className={cx(ui.iconButton, ui.ghost)}
                 onClick={() => setLoadError(null)}
                 aria-label="Dismiss"
-                title="Dismiss"
               >
                 ✕
               </button>
             </p>
           )}
-          <section className="stage">
+          <section className={styles.viewer} aria-label="Viewer">
             <Player
               media={project.media}
-              thumbs={thumbs}
               mediaRef={mediaRef}
               edits={editor.edits}
               assets={assets}
               words={editor.words}
               playback={playback}
-              peers={peers}
+              segments={segments}
               transition={editor.transition}
-            />
-            <Toolbar
-              hasSelection={selected !== null}
-              hasTitleSelection={selectedTitle !== null}
-              hasClipSelection={hasClipSelection}
-              canUndo={editor.undoable !== null}
-              canRedo={editor.redoable !== null}
-              readOnly={!canEdit}
-              fillerCount={fillers.length}
-              pauseCount={pauses.length}
-              twoWordFillers={twoWordFillers}
-              showCuts={showCuts}
-              exportState={exportState}
-              transition={editor.transition}
-              onDelete={() => {
-                if (selectedTitle !== null) {
-                  edit({ type: 'removeTitle', at: selectedTitle });
-                  setSelectedTitle(null);
-                } else if (hasClipSelection && selectedClip !== null) {
-                  edit({ type: 'unsplit', at: selectedClip });
-                  setSelectedClip(null);
-                } else {
-                  edit({ type: 'deleteSelection' });
-                }
-              }}
-              onAddTitle={onAddTitle}
-              onAddCaption={() => {
-                if (selected) setCaptionRange(selected);
-              }}
-              onSplit={onSplit}
-              onAddBroll={() => {
-                if (selected) setBrollRange(selected);
-              }}
-              onAddMusic={() => setAudioDialog({ range: selected })}
-              onTransition={(transition: Transition) => edit({ type: 'setTransition', transition })}
-              onRemoveFillers={() => edit({ type: 'applyCuts', cuts: fillers })}
-              onTightenPauses={() => edit({ type: 'applyCuts', cuts: pauses })}
-              onTwoWordFillers={setTwoWordFillers}
-              onShowCuts={setShowCuts}
-              onOverdub={() => setOverdubOpen(true)}
-              onUndo={() => undoRedo('undo')}
-              onRedo={() => undoRedo('redo')}
-              onExport={onExport}
             />
           </section>
-          <section className="script">
-            <ClipStrip
-              ordered={ordered}
-              words={editor.words}
-              thumbs={thumbs}
-              selected={selectedClip}
-              readOnly={!canEdit}
-              onSelect={onClipClick}
-              onMove={(piece, before) => edit({ type: 'moveClip', piece, before })}
-            />
+          <section className={styles.script} aria-label="Transcript">
+            <div className={styles.scriptHead}>
+              <div className={styles.scriptHeadRow}>
+                <span>Transcript</span>
+                <label
+                  className={ui.toggle}
+                  title="Off: read the transcript as the output will sound"
+                >
+                  <input
+                    type="checkbox"
+                    checked={showCuts}
+                    onChange={(e) => setShowCuts(e.target.checked)}
+                  />
+                  Show cuts
+                </label>
+              </div>
+              <span className={styles.scriptHint}>
+                click a word to seek · shift-click to extend · space plays
+              </span>
+            </div>
             <Transcript
               words={editor.words}
               edits={editor.edits}
@@ -796,20 +879,89 @@ export function App() {
               onClipClick={onClipClick}
               assets={assets}
               onBrollClick={(start) => edit({ type: 'removeBroll', start })}
-              onAudioClick={(start) => {
-                const found = audios(editor.edits).find((a) => Math.abs(a.start - start) < EPS);
-                if (found) setAudioDialog({ edit: found });
+              onAudioClick={openAudio}
+              tool={tool}
+              onWordDragEnd={onWordDragEnd}
+            />
+            <SelectionToolbar
+              anchorIndex={selected?.[0] ?? null}
+              titleAt={selectedTitle}
+              clipStart={hasClipSelection ? selectedClip : null}
+              overlay={selectedOverlay}
+              open={
+                (selected !== null ||
+                  selectedTitle !== null ||
+                  hasClipSelection ||
+                  selectedOverlay !== null) &&
+                canEdit &&
+                tool === 'select'
+              }
+              onDelete={deleteSelected}
+              onOverdub={() => {
+                if (selected) setOverdubRange(selected);
               }}
+              onCaption={() => {
+                if (selected) setCaptionRange(selected);
+              }}
+              onBroll={() => {
+                if (selected) setBrollRange(selected);
+              }}
+              onDismiss={clearAll}
+            />
+          </section>
+          <section className={styles.dock} aria-label="Timeline">
+            <ToolToolbar
+              tool={tool}
+              onChange={setTool}
+              readOnly={!canEdit}
+              shortcuts={
+                !(
+                  overdubRange ||
+                  titleDialog ||
+                  captionRange ||
+                  agentDialogOpen ||
+                  brollRange ||
+                  audioDialog
+                )
+              }
+            />
+            <Timeline
+              words={editor.words}
+              edits={editor.edits}
+              assets={assets}
+              ordered={ordered}
+              segments={segments}
+              outputTime={playback.outputTime}
+              peers={peers}
+              thumbs={thumbs}
+              readOnly={!canEdit}
+              selectedClip={selectedClip}
+              selectedOverlay={selectedOverlay}
+              onSeek={playback.seekOutput}
+              onSelectClip={onClipClick}
+              onMoveClip={(piece, before) => edit({ type: 'moveClip', piece, before })}
+              onSelectOverlay={onSelectOverlay}
+              onOpenAudio={openAudio}
+              tool={tool}
+              duration={editor.duration}
+              splits={editor.splits}
+              onSplit={(at) => edit({ type: 'split', at })}
+              onCut={(ranges) =>
+                edit({
+                  type: 'applyCuts',
+                  cuts: ranges.map((r) => ({ kind: 'cut' as const, ...r })),
+                })
+              }
             />
           </section>
         </main>
       )}
 
-      {overdubOpen && selected && (
+      {overdubRange && (
         <OverdubDialog
-          original={selectedText}
+          original={wordsIn(overdubRange)}
           onSubmit={onOverdubSubmit}
-          onCancel={() => setOverdubOpen(false)}
+          onCancel={() => setOverdubRange(null)}
         />
       )}
 

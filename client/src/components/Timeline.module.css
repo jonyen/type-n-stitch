@@ -1,0 +1,204 @@
+.timeline {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  padding: var(--space-1) var(--space-3) var(--space-2) 0;
+  user-select: none;
+}
+
+.labels {
+  display: grid;
+  grid-template-rows: 18px 30px 22px 22px;
+  row-gap: 4px;
+  padding-left: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.labels span {
+  display: flex;
+  align-items: center;
+}
+
+.lanes {
+  position: relative;
+  display: grid;
+  grid-template-rows: 18px 30px 22px 22px;
+  row-gap: 4px;
+  cursor: text;
+  touch-action: none;
+}
+
+.ruler {
+  position: relative;
+  border-bottom: 1px solid var(--border);
+}
+
+.tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tick:first-child {
+  transform: none;
+}
+
+/* A label at (or near) the end ends at its tick, so it stays inside the lanes. */
+.tick.tickEnd {
+  transform: translateX(-100%);
+}
+
+.lane {
+  position: relative;
+  border-radius: var(--radius-sm);
+  background: var(--track);
+}
+
+.clip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  padding: 0 6px;
+  border: 1px solid var(--clip-border);
+  border-radius: var(--radius-sm);
+  background: var(--clip);
+  color: var(--text);
+  font-size: var(--text-xs);
+  text-align: left;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.clip span,
+.bar span {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.clip.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+.bar {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 3px;
+  color: #0b0e14;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.broll {
+  background: var(--broll);
+}
+
+.audio {
+  background: var(--music);
+}
+
+.selected {
+  box-shadow:
+    0 0 0 2px var(--timeline),
+    0 0 0 4px var(--accent);
+  z-index: 1;
+}
+
+.drop {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  margin-left: -1px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.playhead,
+.peer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  pointer-events: none;
+}
+
+.playhead {
+  background: var(--playhead);
+  z-index: 3;
+}
+
+.peer {
+  opacity: 0.7;
+  z-index: 2;
+}
+
+@media (max-width: 600px) {
+  .labels,
+  .lanes {
+    grid-template-rows: 18px 30px;
+  }
+
+  .overlayLane,
+  .labels .overlayLabel {
+    display: none;
+  }
+}
+
+.lanes[data-tool='razor'] {
+  cursor: crosshair;
+}
+
+.lanes[data-tool='razor'][data-illegal='true'] {
+  cursor: not-allowed;
+}
+
+.lanes[data-tool='range'] {
+  cursor: col-resize;
+}
+
+.lanes[data-tool='razor'] .clip,
+.lanes[data-tool='razor'] .bar,
+.lanes[data-tool='range'] .clip,
+.lanes[data-tool='range'] .bar {
+  cursor: inherit;
+}
+
+.razor {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 0;
+  border-left: 2px dashed var(--cut);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.razor.illegal {
+  border-left-color: var(--faint);
+}
+
+.band {
+  position: absolute;
+  top: 18px;
+  bottom: 0;
+  background: var(--cut-soft);
+  border-left: 1px solid var(--cut);
+  border-right: 1px solid var(--cut);
+  pointer-events: none;
+  z-index: 4;
+}

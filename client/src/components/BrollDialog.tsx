@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { cx } from '../cx';
 import { formatTime } from '../editlist';
 import type { Asset } from '../types';
 import { AssetPicker } from './AssetPicker';
+import { DialogFrame } from './DialogFrame';
+import frame from './DialogFrame.module.css';
+import ui from '../styles/ui.module.css';
+import brollStyles from './BrollDialog.module.css';
 
 interface Props {
   assets: Asset[];
@@ -36,23 +41,18 @@ export function BrollDialog({
     if (asset && !tooShort) onSubmit(asset, offset);
   };
   return (
-    <div className="modal-backdrop" onClick={onCancel}>
-      <form
-        className="modal wide"
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape') {
-            e.stopPropagation();
-            onCancel();
-          }
-        }}
-      >
-        <h2>Add B-roll</h2>
-        <p className="muted">
+    <DialogFrame
+      title="Add B-roll"
+      description={
+        <>
           Cover the picture while “{original}” plays ({formatTime(rangeLength)}). The voice keeps
           going.
-        </p>
+        </>
+      }
+      wide
+      onClose={onCancel}
+    >
+      <form className={frame.form} onSubmit={submit}>
         <AssetPicker
           assets={assets}
           kind="video"
@@ -65,13 +65,13 @@ export function BrollDialog({
           <>
             <video
               ref={preview}
-              className="asset-preview"
+              className={brollStyles.preview}
               src={asset.url}
               muted
               playsInline
               preload="auto"
             />
-            <label className="field">
+            <label className={ui.field}>
               Start {formatTime(offset)} into the shot
               <input
                 type="range"
@@ -83,19 +83,19 @@ export function BrollDialog({
                 onChange={(e) => setOffset(Number(e.target.value))}
               />
             </label>
-            {tooShort && <p className="error">This shot is shorter than the selected words.</p>}
+            {tooShort && <p className={ui.error}>This shot is shorter than the selected words.</p>}
           </>
         )}
-        <div className="actions">
-          <span className="spacer" />
-          <button type="button" onClick={onCancel}>
+        <div className={frame.actions}>
+          <span className={frame.spacer} />
+          <button type="button" className={ui.button} onClick={onCancel}>
             Cancel
           </button>
-          <button type="submit" className="primary" disabled={!asset || tooShort}>
+          <button type="submit" className={cx(ui.button, ui.primary)} disabled={!asset || tooShort}>
             Add B-roll
           </button>
         </div>
       </form>
-    </div>
+    </DialogFrame>
   );
 }

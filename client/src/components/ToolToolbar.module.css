@@ -1,0 +1,66 @@
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.group {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-md);
+}
+
+.tool:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+/* Not [data-state='on']: the tooltip trigger around each item owns data-state. */
+.tool[aria-checked='true'] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.tool:disabled {
+  opacity: 0.4;
+}
+
+.key {
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.hint {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  .hint,
+  .key {
+    display: none;
+  }
+}

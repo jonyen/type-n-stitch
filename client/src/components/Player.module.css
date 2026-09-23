@@ -1,0 +1,100 @@
+.player {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.frame {
+  position: relative;
+  container-type: inline-size;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius);
+  background: #000;
+  overflow: hidden;
+}
+
+.frame video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: pointer;
+  transition: opacity 0.25s;
+}
+
+.audio {
+  aspect-ratio: 16 / 5;
+  background: linear-gradient(135deg, #1f2937, #111827);
+}
+
+.audio video {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+
+.fading video {
+  opacity: 0.15;
+}
+
+.audioBadge {
+  color: #d1d5db;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  font-size: var(--text-sm);
+}
+
+.overdubBadge {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  max-width: calc(100% - 24px);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--overdub);
+  color: var(--bg);
+  font-size: var(--text-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.play {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--text-strong);
+}
+
+.play:hover {
+  background: var(--hover);
+}
+
+.time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+
+.total {
+  color: var(--muted);
+}
+
+.meta {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}

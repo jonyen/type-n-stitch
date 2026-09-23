@@ -204,11 +204,18 @@ pub fn apply_op(doc: &mut ProjectDoc, op: &Op) {
                 audio_duration: *audio_duration,
             });
         }
-        Op::ApplyCuts { cuts } => doc.edits.extend(cuts.iter().map(|r| Edit::Cut {
-            start: r.start,
-            end: r.end,
-            transition: None,
-        })),
+        Op::ApplyCuts { cuts } => {
+            for r in cuts {
+                // The same rule as a single cut: an overdub wholly inside goes with it.
+                doc.edits
+                    .retain(|e| !matches!(e, Edit::Overdub { .. } if inside(e.range(), *r)));
+                doc.edits.push(Edit::Cut {
+                    start: r.start,
+                    end: r.end,
+                    transition: None,
+                });
+            }
+        }
         Op::RenameSpeaker { speaker, name } => {
             let i = *speaker as usize;
             // Defensive: the server validates this before storing an op, but an
@@ -683,6 +690,32 @@ mod tests {
             },
         )]);
         assert_eq!(doc.edits.len(), 2);
+    }
+
+    #[test]
+    fn apply_cuts_drops_an_overdub_it_covers_like_a_single_cut() {
+        let doc = fold(&[
+            op(1, overdub(2.0, 3.0)),
+            op(
+                2,
+                Op::ApplyCuts {
+                    cuts: vec![Range::new(1.0, 4.0), Range::new(6.0, 7.0)],
+                },
+            ),
+        ]);
+        assert!(!doc.edits.iter().any(|e| matches!(e, Edit::Overdub { .. })));
+        assert_eq!(doc.edits.len(), 2);
+        // An overdub only partly covered stays.
+        let doc = fold(&[
+            op(1, overdub(2.0, 3.0)),
+            op(
+                2,
+                Op::ApplyCuts {
+                    cuts: vec![Range::new(2.5, 4.0)],
+                },
+            ),
+        ]);
+        assert!(doc.edits.iter().any(|e| matches!(e, Edit::Overdub { .. })));
     }
 
     #[test]

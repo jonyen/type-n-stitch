@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 
+import { cx } from '../cx';
 import {
   captions,
   cutTransitionAt,
@@ -26,7 +27,22 @@ import {
   turnContains,
   type Token,
 } from '../tokens';
-import type { Asset, Edit, OverdubEdit, Range, Transition, Word } from '../types';
+import type { Tool } from '../tools';
+import type { Asset, Edit, OverdubEdit, Range, TitleStyle, Transition, Word } from '../types';
+
+import styles from './Transcript.module.css';
+
+const TITLE_STYLE: Record<TitleStyle, string | undefined> = {
+  dark: styles.titleDark,
+  light: styles.titleLight,
+  accent: styles.titleAccent,
+};
+
+/** A speaker's colour, as the `--speaker` custom property the module's rules read. */
+function speakerStyle(speaker: number | null): CSSProperties | undefined {
+  if (speaker === null) return undefined;
+  return { '--speaker': `var(--speaker-${speaker % 6})` } as CSSProperties;
+}
 
 interface Props {
   words: Word[];
@@ -68,6 +84,10 @@ interface Props {
   assets: Asset[];
   onBrollClick: (start: number) => void;
   onAudioClick: (start: number) => void;
+  /** The active timeline tool; the transcript's cursor follows it. */
+  tool: Tool;
+  /** Fired on mouseup after a press that started on a word and dragged across words; not after a plain click. */
+  onWordDragEnd?: () => void;
 }
 
 export function Transcript({
@@ -97,6 +117,8 @@ export function Transcript({
   assets,
   onBrollClick,
   onAudioClick,
+  tool,
+  onWordDragEnd,
 }: Props) {
   const inSelection = (i: number) => selected !== null && i >= selected[0] && i <= selected[1];
 
@@ -110,15 +132,29 @@ export function Transcript({
   // Mouse-down on a word starts a drag; every word the pointer enters while
   // the button is held extends the selection, like selecting text.
   const dragging = useRef(false);
+  // Whether the pointer has reached another word since the press: only a real
+  // drag ends in `onWordDragEnd`, so a plain Range click cuts nothing.
+  const dragged = useRef(false);
+  const dragEnd = useRef(onWordDragEnd);
   useEffect(() => {
-    const stop = () => {
+    dragEnd.current = onWordDragEnd;
+  }, [onWordDragEnd]);
+  useEffect(() => {
+    const end = () => {
+      if (dragging.current && dragged.current) dragEnd.current?.();
       dragging.current = false;
+      dragged.current = false;
     };
-    window.addEventListener('mouseup', stop);
-    window.addEventListener('blur', stop);
+    // Losing focus mid-drag abandons it rather than completing it.
+    const cancel = () => {
+      dragging.current = false;
+      dragged.current = false;
+    };
+    window.addEventListener('mouseup', end);
+    window.addEventListener('blur', cancel);
     return () => {
-      window.removeEventListener('mouseup', stop);
-      window.removeEventListener('blur', stop);
+      window.removeEventListener('mouseup', end);
+      window.removeEventListener('blur', cancel);
     };
   }, []);
 
@@ -140,7 +176,7 @@ export function Transcript({
   }, []);
   useEffect(() => {
     if (!playing || activeWord < 0 || Date.now() - userScrolledAt.current < 4000) return;
-    const el = root.current?.querySelector<HTMLElement>('.token.active');
+    const el = root.current?.querySelector<HTMLElement>('[data-active="true"]');
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const margin = 80;
@@ -156,11 +192,14 @@ export function Transcript({
     e.preventDefault();
     e.currentTarget.focus();
     dragging.current = true;
+    dragged.current = false;
     onWordClick(index, e.shiftKey);
     if (!e.shiftKey) after?.();
   };
   const enter = (index: number) => {
-    if (dragging.current) onWordDrag(index);
+    if (!dragging.current) return;
+    dragged.current = true;
+    onWordDrag(index);
   };
   // Buttons also "click" from the keyboard (Enter/Space); detail is 0 then.
   const keyActivate = (index: number, e: MouseEvent) => {
@@ -187,7 +226,7 @@ export function Transcript({
     if (!caption) return null;
     return (
       <span
-        className="caption-tag"
+        className={cx(styles.tag, styles.captionTag)}
         title={readOnly ? 'Caption' : 'Click to remove'}
         onClick={readOnly ? undefined : () => onCaptionClick(caption.start)}
       >
@@ -204,7 +243,7 @@ export function Transcript({
       <>
         {b && (
           <span
-            className="overlay-tag broll"
+            className={cx(styles.tag, styles.brollTag)}
             title={readOnly ? 'B-roll' : 'Click to remove'}
             onClick={readOnly ? undefined : () => onBrollClick(b.start)}
           >
@@ -213,7 +252,7 @@ export function Transcript({
         )}
         {a && (
           <span
-            className="overlay-tag audio"
+            className={cx(styles.tag, styles.musicTag)}
             title={readOnly ? 'Music' : 'Click to edit'}
             onClick={readOnly ? undefined : () => onAudioClick(a.start)}
           >
@@ -235,13 +274,17 @@ export function Transcript({
       const override = start === undefined ? null : cutTransitionAt(start, edits);
       return (
         <span key={`gap-${token.first}`}>
-          <span className="gap" title={`${n} word${n === 1 ? '' : 's'} cut`} aria-label="cut">
+          <span
+            className={styles.gap}
+            title={`${n} word${n === 1 ? '' : 's'} cut`}
+            aria-label="cut"
+          >
             …
           </span>
           {!readOnly && start !== undefined && (
             <button
               type="button"
-              className="gap-transition"
+              className={styles.gapTransition}
               title="Transition for this cut"
               aria-label="Transition for this cut"
               onClick={() => onCutTransition(start, nextCutTransition(override))}
@@ -259,7 +302,12 @@ export function Transcript({
         <button
           key={`title-${token.before}-${tokenIndex}`}
           type="button"
-          className={`title-token ${title.style}${selected ? ' selected' : ''}`}
+          data-at={title.at}
+          className={cx(
+            styles.titleToken,
+            TITLE_STYLE[title.style],
+            selected && styles.titleSelected,
+          )}
           title={readOnly ? title.text : 'Click to select · double-click to edit'}
           onClick={readOnly ? undefined : () => onTitleClick(title.at)}
           onDoubleClick={readOnly ? undefined : () => onTitleOpen(title.at)}
@@ -267,8 +315,8 @@ export function Transcript({
             if (!readOnly && e.key === 'Enter') onTitleOpen(title.at);
           }}
         >
-          <span className="title-token-text">{title.text}</span>
-          <span className="muted">{title.duration}s</span>
+          <span className={styles.titleText}>{title.text}</span>
+          <span className={styles.titleDuration}>{title.duration}s</span>
         </button>
       );
     }
@@ -280,16 +328,12 @@ export function Transcript({
         .map((w) => w.text)
         .join(' ');
       const odPeer = peerFor(first);
-      const odClasses = ['token', 'overdub'];
-      if (active) odClasses.push('active');
-      if (inSelection(first)) odClasses.push('selected');
-      if (odPeer) odClasses.push('peer-selected');
       return (
         <span key={`od-${first}`}>
           {caretsAt(first).map((p) => (
             <span
               key={p.connId}
-              className="peer-caret"
+              className={styles.peerCaret}
               style={{ background: p.user.color }}
               data-name={p.user.displayName}
               aria-hidden
@@ -297,7 +341,15 @@ export function Transcript({
           ))}
           <button
             type="button"
-            className={odClasses.join(' ')}
+            className={cx(
+              styles.token,
+              styles.overdub,
+              active && styles.active,
+              inSelection(first) && styles.selected,
+              odPeer && styles.peerSelected,
+            )}
+            data-index={first}
+            data-active={active || undefined}
             style={odPeer ? ({ '--peer': odPeer.user.color } as CSSProperties) : undefined}
             title={`Overdub replacing “${original}”`}
             onMouseDown={(e) => press(first, e, () => onOverdubClick(overdub))}
@@ -313,17 +365,13 @@ export function Transcript({
     }
     const { index, word } = token;
     const status = wordStatus(word, edits);
-    const classes = ['token', status];
-    if (inSelection(index)) classes.push('selected');
-    if (index === activeWord) classes.push('active');
     const peer = peerFor(index);
-    if (peer) classes.push('peer-selected');
     return (
       <span key={word.id}>
         {caretsAt(index).map((p) => (
           <span
             key={p.connId}
-            className="peer-caret"
+            className={styles.peerCaret}
             style={{ background: p.user.color }}
             data-name={p.user.displayName}
             aria-hidden
@@ -331,8 +379,16 @@ export function Transcript({
         ))}
         <button
           type="button"
-          className={classes.join(' ')}
+          className={cx(
+            styles.token,
+            status === 'cut' && styles.cut,
+            status === 'overdub' && styles.overdub,
+            inSelection(index) && styles.selected,
+            index === activeWord && styles.active,
+            peer && styles.peerSelected,
+          )}
           data-index={index}
+          data-active={index === activeWord || undefined}
           style={peer ? ({ '--peer': peer.user.color } as CSSProperties) : undefined}
           onMouseDown={(e) => press(index, e)}
           onMouseEnter={() => enter(index)}
@@ -350,9 +406,13 @@ export function Transcript({
   const clips = clipRuns(words, tokens, ordered);
   const isSplit = (start: number) => splits.some((s) => Math.abs(s - start) < EPS);
   return (
-    <div ref={root} className="transcript" aria-label="Transcript">
+    <div ref={root} className={styles.transcript} data-tool={tool} aria-label="Transcript">
       {clips.map((clip, k) => (
-        <section key={`clip-${clip.piece.start}`} className="clip" data-start={clip.piece.start}>
+        <section
+          key={`clip-${clip.piece.start}`}
+          className={styles.clip}
+          data-clip-start={clip.piece.start}
+        >
           {clips.length > 1 &&
             (() => {
               const split = isSplit(clip.piece.start);
@@ -364,7 +424,11 @@ export function Transcript({
               return (
                 <button
                   type="button"
-                  className={`clip-divider${selected ? ' selected' : ''}${split ? ' split' : ''}`}
+                  className={cx(
+                    styles.clipDivider,
+                    split && styles.split,
+                    selected && styles.dividerSelected,
+                  )}
                   title={
                     split
                       ? 'Click to select · Delete joins it to the clip before'
@@ -382,13 +446,8 @@ export function Transcript({
             return (
               <div
                 key={key}
-                className={[
-                  'turn',
-                  turn.speaker !== null ? `speaker-${turn.speaker % 6}` : '',
-                  turnContains(turn, activeWord) ? 'speaking' : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
+                className={cx(styles.turn, turnContains(turn, activeWord) && styles.speaking)}
+                style={speakerStyle(turn.speaker)}
               >
                 {turn.speaker !== null && (
                   <SpeakerTag
@@ -398,13 +457,7 @@ export function Transcript({
                     readOnly={readOnly}
                   />
                 )}
-                <p
-                  className={
-                    turn.speaker !== null ? `speech speaker-${turn.speaker % 6}` : 'speech'
-                  }
-                >
-                  {turn.tokens.map(renderToken)}
-                </p>
+                <p className={styles.speech}>{turn.tokens.map(renderToken)}</p>
               </div>
             );
           })}
@@ -424,12 +477,18 @@ interface TagProps {
 /** Speaker name above a turn; click to rename every turn by that speaker. */
 function SpeakerTag({ speaker, name, onRename, readOnly }: TagProps) {
   const [editing, setEditing] = useState(false);
-  const className = `speaker-tag speaker-${speaker % 6}`;
-  if (readOnly) return <span className={className}>{name}</span>;
+  const style = speakerStyle(speaker);
+  if (readOnly)
+    return (
+      <span className={styles.speakerTag} style={style}>
+        {name}
+      </span>
+    );
   if (editing) {
     return (
       <input
-        className={className}
+        className={styles.speakerTag}
+        style={style}
         defaultValue={name}
         autoFocus
         aria-label="Speaker name"
@@ -448,7 +507,8 @@ function SpeakerTag({ speaker, name, onRename, readOnly }: TagProps) {
   return (
     <button
       type="button"
-      className={className}
+      className={styles.speakerTag}
+      style={style}
       title="Rename this speaker"
       onClick={() => setEditing(true)}
     >

@@ -1,0 +1,98 @@
+.wrap {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: var(--space-8) var(--space-6);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(380px, 100%);
+  padding: 28px 28px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--accent);
+}
+
+.wordmark {
+  color: var(--text-strong);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.card h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: var(--text-xl);
+  font-weight: 600;
+}
+
+.hint {
+  margin: -6px 0 6px;
+  color: var(--muted);
+  font-size: var(--text-base);
+}
+
+.card label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.card input {
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  transition:
+    border-color 0.12s,
+    box-shadow 0.12s;
+}
+
+.card input::placeholder {
+  color: var(--faint);
+  opacity: 1;
+}
+
+.card input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.submit {
+  justify-content: center;
+  margin-top: 6px;
+  padding: 10px 14px;
+}
+
+.link {
+  align-self: center;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: var(--text-base);
+}

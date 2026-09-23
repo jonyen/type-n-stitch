@@ -6,7 +6,7 @@ stitched result. It's a small homage to [Descript](https://www.descript.com)'s t
 built by me in an afternoon with Claude Code: a Rust media engine, an axum server, and a React
 front end, all running locally on whisper.cpp, ffmpeg and VoiceStudio.
 
-![type-n-stitch editing a talking-head clip: struck-through words are cuts, the purple italic run is an overdub](docs/screenshot.png)
+![type-n-stitch editing a talking-head clip: viewer on the left, transcript on the right, and the clips, B-roll and music lanes of the timeline along the bottom](docs/screenshot.png)
 
 ## How it works
 
@@ -31,7 +31,10 @@ Every project is a source file plus an **edit list**. Nothing is ever modified i
    a WebSocket (`GET /api/projects/:id/ws`); after each append the server pushes its fold to all
    of them, and presence frames carry each person's playhead, selection, caret and whether they
    are playing. Edits still go over `POST …/ops`, one at a time from a queue that retries after a
-   dropped connection — the socket only fans out.
+   dropped connection — the socket only fans out. On the timeline, the Razor tool (C) splits a
+   clip at the nearest word start and the Range tool (X) cuts out a dragged stretch, snapped to
+   word boundaries and undone in one step; Select (V) seeks, reorders clips and picks B-roll or
+   music bars.
 3. **Preview.** The browser plays the original file and honours the edit list live: an
    animation-frame loop seeks past cuts as the playhead reaches them, and for an overdub it
    pauses the picture on the first frame, plays the WAV through a second `Audio` element, then
@@ -202,8 +205,13 @@ Claude Code (or any MCP client) can open a project over `/mcp` and edit it as a 
 up in the project like anyone else, with its own cursor and colour, and everyone watching sees
 its selection move just before each edit lands.
 
-From the avatar menu, choose **Connect an agent** to mint an API token. The token is shown once
-— copy it before closing the dialog — and the dialog gives you the ready-to-paste command:
+From the top bar or the avatar menu, choose **Connect AI** to open the dialog. It always shows
+the MCP endpoint (`<origin>/mcp`) in a copy box, so any client can be pointed at it by hand. To
+mint an API token, give it a label; the token is shown once — copy it before closing the dialog.
+
+Once a token exists, the dialog's setup snippets fill in with it: the ready-to-paste
+`claude mcp add` command for Claude Code, a JSON block for HTTP-aware clients (Cursor, VS Code,
+Windsurf), and an `mcp-remote` JSON block for stdio-only clients like Claude Desktop.
 
 ```sh
 claude mcp add --transport http type-n-stitch <origin>/mcp --header "Authorization: Bearer <token>"

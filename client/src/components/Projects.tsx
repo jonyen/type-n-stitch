@@ -1,5 +1,9 @@
 import { clipLength, relativeTime } from '../format';
 import type { ProjectSummary } from '../types';
+import { cx } from '../cx';
+import { sheetFor, spriteStyle, THUMBS_FILE } from '../thumbs';
+import styles from './Library.module.css';
+import ui from '../styles/ui.module.css';
 
 interface Props {
   items: ProjectSummary[];
@@ -11,32 +15,49 @@ interface Props {
 export function Projects({ items, onOpen, disabled }: Props) {
   if (items.length === 0) return null;
   return (
-    <section className="library projects" aria-labelledby="projects-heading">
-      <div className="library-head">
+    <section className={styles.library} aria-labelledby="projects-heading">
+      <div className={styles.head}>
         <h2 id="projects-heading">Your projects</h2>
-        <span className="muted">
+        <span className={ui.muted}>
           {items.length} {items.length === 1 ? 'project' : 'projects'}
         </span>
       </div>
-      <ul className="library-grid">
+      <ul className={styles.grid}>
         {items.map((p) => (
           <li key={p.id}>
             <button
               type="button"
-              className="library-card project-card"
+              className={styles.card}
               disabled={disabled}
               onClick={() => onOpen(p)}
             >
-              <span className={`poster ${p.media.kind}`}>
-                <span className="poster-glyph" aria-hidden>
+              <span className={styles.poster}>
+                <span className={styles.glyph} aria-hidden>
                   {p.media.kind === 'audio' ? '♪' : '▶'}
                 </span>
-                <span className="length">{clipLength(p.media.duration)}</span>
+                {p.media.kind === 'video' && (
+                  <span
+                    className={styles.frame}
+                    aria-hidden
+                    style={(() => {
+                      const sheet = sheetFor(p.media.duration);
+                      // A tenth of the way in: the first frame is often black.
+                      return spriteStyle(
+                        sheet,
+                        `/data/${p.media.id}/${THUMBS_FILE}`,
+                        Math.floor(sheet.count / 10),
+                      );
+                    })()}
+                  />
+                )}
+                <span className={styles.length}>{clipLength(p.media.duration)}</span>
               </span>
               <strong>{p.title}</strong>
-              <span className="project-meta">
-                <span className={`role ${p.role}`}>{p.role}</span>
-                <span className="muted">opened {relativeTime(p.createdAt)}</span>
+              <span className={styles.meta}>
+                <span className={cx(styles.role, p.role === 'owner' && styles.owner)}>
+                  {p.role}
+                </span>
+                <span>opened {relativeTime(p.createdAt)}</span>
               </span>
             </button>
           </li>

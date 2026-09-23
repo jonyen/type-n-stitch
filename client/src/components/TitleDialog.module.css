@@ -1,0 +1,49 @@
+.styles {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.styles legend {
+  margin-bottom: 6px;
+  padding: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+
+/* The chips preview the card colours the engine renders, not the app theme. */
+.dark {
+  background: #111;
+  color: #fff;
+}
+
+.light {
+  background: #f6f6f7;
+  color: #17181a;
+}
+
+.accent {
+  background: #2563eb;
+  color: #fff;
+}
+
+.on {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.duration input {
+  width: 110px;
+}

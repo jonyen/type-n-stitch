@@ -1,0 +1,19 @@
+.bar {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--raised);
+  box-shadow: var(--shadow-lg);
+  z-index: 30;
+}
+
+.action {
+  padding: 3px 8px;
+  font-size: var(--text-sm);
+}
+
+.delete:hover:not(:disabled) {
+  color: var(--danger);
+}
