@@ -89,7 +89,7 @@ pub async fn upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?
+        .map_err(|e| AppError::multipart(&e, ""))?
     {
         if field.name() == Some("file") {
             let meta = store_upload(&state, field).await?;
@@ -137,7 +137,7 @@ pub(crate) async fn store_upload(
         while let Some(chunk) = field
             .chunk()
             .await
-            .map_err(|e| AppError::bad_request(format!("upload interrupted: {e}")))?
+            .map_err(|e| AppError::multipart(&e, "upload interrupted"))?
         {
             file.write_all(&chunk).await.context("writing upload")?;
         }

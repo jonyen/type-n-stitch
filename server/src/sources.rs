@@ -15,7 +15,7 @@ use anyhow::Context;
 use axum::extract::{Multipart, State};
 use axum::Json;
 use engine::{
-    all_sources, stitched_duration, Edit, MediaKind, Op, ProjectDoc, Source, SpeakerTurn, Word,
+    all_sources, stitched_duration, Edit, MediaKind, Op, ProjectDoc, Source, SpeakerTurn, Word, EPS,
 };
 use serde::Serialize;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
@@ -73,9 +73,9 @@ where
     Ok(row.is_some())
 }
 
-/// Every media id uploaded into the project, in upload order.
-// Only the tests read the whole registry so far.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Every media id uploaded into the project, in upload order. Only the
+/// tests read the whole list; the server asks `in_registry` about one.
+#[cfg(test)]
 pub async fn registry(db: &SqlitePool, project_id: &str) -> AppResult<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT media_id FROM project_sources WHERE project_id = ? ORDER BY position",
@@ -86,8 +86,6 @@ pub async fn registry(db: &SqlitePool, project_id: &str) -> AppResult<Vec<String
 }
 
 /// Where a source's transcript is.
-// `Running` and `Error` come from the background transcription (Task 4).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TranscriptStatus {
@@ -437,22 +435,62 @@ pub async fn add_source(
     let (_, doc) = crate::ops::load_doc(state, &project.id).await?;
     let sources = timeline(state, project, &doc).await?;
     check_room(sources.len())?;
-    let offset = stitched_duration(&sources);
-    register(&state.db, &project.id, &meta.id, offset, meta.duration).await?;
-    apply_ops(
-        state,
-        project,
-        user,
-        vec![ClientOp {
-            op_id: Uuid::new_v4().to_string(),
-            op: Op::AddSource {
-                media: meta.id.clone(),
-                offset,
-                duration: meta.duration,
-            },
-        }],
+    register(
+        &state.db,
+        &project.id,
+        &meta.id,
+        stitched_duration(&sources),
+        meta.duration,
     )
     .await?;
+    append_at_end(state, project, user, meta, sources).await
+}
+
+/// Append `meta` at the end of `sources`, the timeline as last read. The
+/// offset is checked again under the write lock, so a concurrent add that
+/// moved the end first makes this one fail; it then reads the timeline again
+/// and retries once at the new end, rather than failing late for a reason
+/// the caller could not help.
+async fn append_at_end(
+    state: &Arc<AppState>,
+    project: &Project,
+    user: &User,
+    meta: &Meta,
+    mut sources: Vec<Source>,
+) -> AppResult<SourceView> {
+    let mut retried = false;
+    let offset = loop {
+        let offset = stitched_duration(&sources);
+        let appended = apply_ops(
+            state,
+            project,
+            user,
+            vec![ClientOp {
+                op_id: Uuid::new_v4().to_string(),
+                op: Op::AddSource {
+                    media: meta.id.clone(),
+                    offset,
+                    duration: meta.duration,
+                },
+            }],
+        )
+        .await;
+        match appended {
+            Ok(_) => break offset,
+            Err(e) if !retried => {
+                let (_, doc) = crate::ops::load_doc(state, &project.id).await?;
+                let now = timeline(state, project, &doc).await?;
+                if (stitched_duration(&now) - offset).abs() <= EPS {
+                    // The end did not move: the refusal is about this media.
+                    return Err(e);
+                }
+                check_room(now.len())?;
+                sources = now;
+                retried = true;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     start_transcription(state, &meta.id);
     Ok(SourceView {
         index: sources.len(),
@@ -464,6 +502,17 @@ pub async fn add_source(
         duration: meta.duration,
         transcript: transcript_status(state, &meta.id),
     })
+}
+
+/// Undo `register` for media whose `AddSource` never landed. Only for media
+/// this request uploaded: nothing else can refer to it yet.
+async fn unregister(db: &SqlitePool, project_id: &str, media_id: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM project_sources WHERE project_id = ? AND media_id = ?")
+        .bind(project_id)
+        .bind(media_id)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 /// What a layer's `media` names.
@@ -497,16 +546,21 @@ pub async fn resolve_layer_media(
 
 /// Kind and length of a media a layer may show (see `resolve_layer_media`),
 /// read inside `validate`'s write transaction.
+/// `index` is the op's place in its batch, for the error when a registry
+/// media's files are gone.
 pub async fn layer_media(
     tx: &mut Transaction<'_, Sqlite>,
     state: &AppState,
     project: &Project,
+    index: usize,
     media: &str,
 ) -> AppResult<Option<(MediaKind, f64)>> {
     Ok(match resolve_layer_media(tx, &project.id, media).await? {
         Some(LayerMedia::Asset { kind, duration }) => Some((kind, duration)),
         Some(LayerMedia::Source) => {
-            let meta = read_meta(&state.config.data_dir.join(media)).await?;
+            let meta = read_meta(&state.config.data_dir.join(media))
+                .await
+                .map_err(|_| AppError::bad_request_at(index, "that media is missing"))?;
             Some((meta.kind, meta.duration))
         }
         None => None,
@@ -537,13 +591,22 @@ pub async fn upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?
+        .map_err(|e| AppError::multipart(&e, ""))?
     {
         if field.name() == Some("file") {
             let meta = crate::routes::store_upload(&state, field).await?;
-            return Ok(Json(
-                add_source(&state, &access.project, &access.user, &meta).await?,
-            ));
+            return match add_source(&state, &access.project, &access.user, &meta).await {
+                Ok(view) => Ok(Json(view)),
+                Err(e) => {
+                    // Refused after the file landed: leave nothing behind.
+                    if let Err(cleanup) = unregister(&state.db, &access.project.id, &meta.id).await
+                    {
+                        tracing::warn!(id = meta.id, "could not unregister: {cleanup:?}");
+                    }
+                    let _ = tokio::fs::remove_dir_all(state.config.data_dir.join(&meta.id)).await;
+                    Err(e)
+                }
+            };
         }
     }
     Err(AppError::bad_request("missing `file` field"))
@@ -954,15 +1017,32 @@ mod tests {
         filename: &str,
         bytes: &[u8],
     ) -> axum::http::Request<axum::body::Body> {
+        multipart_req(
+            &format!("/api/projects/{project}/sources"),
+            cookie,
+            "file",
+            filename,
+            bytes,
+        )
+    }
+
+    /// A one-field multipart POST of `bytes` as `filename` in field `field`.
+    fn multipart_req(
+        uri: &str,
+        cookie: &str,
+        field: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> axum::http::Request<axum::body::Body> {
         let mut body = format!(
-            "--x\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\r\n"
+            "--x\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\n\r\n"
         )
         .into_bytes();
         body.extend_from_slice(bytes);
         body.extend_from_slice(b"\r\n--x--\r\n");
         axum::http::Request::builder()
             .method(Method::POST)
-            .uri(format!("/api/projects/{project}/sources"))
+            .uri(uri)
             .header(axum::http::header::COOKIE, cookie)
             .header(
                 axum::http::header::CONTENT_TYPE,
@@ -1428,5 +1508,227 @@ mod tests {
             })
             .collect();
         assert_eq!(body["pauses"], json!(shifted));
+    }
+
+    /// A two-second 440 Hz tone as WAV bytes, made by ffmpeg.
+    async fn tone(dir: &std::path::Path) -> Vec<u8> {
+        let wav = dir.join("tone.wav");
+        let made = tokio::process::Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=2")
+            .args(["-ac", "1", "-ar", "16000"])
+            .arg(&wav)
+            .status()
+            .await
+            .expect("ffmpeg on PATH");
+        assert!(made.success());
+        tokio::fs::read(&wav).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_oversized_upload_is_413_on_both_upload_routes() {
+        let (mut state, _d) = state().await;
+        Arc::get_mut(&mut state).unwrap().config.max_upload_bytes = 1024;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let before = media_dirs(&state).await;
+        let big = vec![0u8; 8 * 1024];
+        let (status, body, _) =
+            call(app(&state), upload_req(&project.id, &ada, "a.mp4", &big)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        let (status, body, _) = call(
+            app(&state),
+            multipart_req("/api/projects", &ada, "file", "a.mp4", &big),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert_eq!(media_dirs(&state).await, before, "nothing left behind");
+    }
+
+    #[tokio::test]
+    async fn a_source_racing_another_add_retries_at_the_new_end() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        // The timeline as the loser read it, before the winner landed.
+        let (_, doc) = crate::ops::load_doc(&state, &project.id).await.unwrap();
+        let stale = timeline(&state, &project, &doc).await.unwrap();
+        let winner = seed_source(&state, 4.0, &["d"]).await;
+        add_source(&state, &project, &owner, &winner).await.unwrap();
+
+        let loser = seed_source(&state, 2.0, &["e"]).await;
+        register(&state.db, &project.id, &loser.id, 10.0, 2.0)
+            .await
+            .unwrap();
+        let view = append_at_end(&state, &project, &owner, &loser, stale)
+            .await
+            .unwrap();
+        assert_eq!(view.index, 2);
+        assert_eq!(view.offset, 14.0);
+        let (_, doc) = crate::ops::load_doc(&state, &project.id).await.unwrap();
+        assert_eq!(doc.sources.len(), 2);
+        assert_eq!(doc.sources[1].offset, 14.0);
+    }
+
+    #[tokio::test]
+    async fn a_source_is_refused_when_the_splits_are_full_and_leaves_nothing_behind() {
+        let (state, dir) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let splits: Vec<Value> = (1..=engine::MAX_SPLITS)
+            .map(|i| json!({ "opId": format!("s{i}"), "kind": "split", "at": i as f64 * 0.1 }))
+            .collect();
+        let (status, body) = post_ops(&state, &ada, &project.id, splits).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // The op itself is refused with a message naming the cause.
+        let loose = seed_source(&state, 4.0, &["d"]).await;
+        register(&state.db, &project.id, &loose.id, 10.0, 4.0)
+            .await
+            .unwrap();
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project.id,
+            vec![add_op("a", &loose.id, 10.0, 4.0)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("splits"), "{body}");
+
+        // Through the route, a real file that fails late is cleaned up:
+        // no media directory and no registry row for it.
+        let rows = registry(&state.db, &project.id).await.unwrap().len();
+        let before = media_dirs(&state).await;
+        let bytes = tone(dir.path()).await;
+        let (status, body, _) = call(
+            app(&state),
+            upload_req(&project.id, &ada, "tone.wav", &bytes),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("splits"), "{body}");
+        assert_eq!(media_dirs(&state).await, before);
+        assert_eq!(registry(&state.db, &project.id).await.unwrap().len(), rows);
+    }
+
+    #[tokio::test]
+    async fn an_undo_or_redo_in_a_batch_refolds_before_the_next_op() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        let second = seed_source(&state, 4.0, &["d"]).await;
+        add_source(&state, &project, &owner, &second).await.unwrap(); // seq 1
+        let cut = json!({ "opId": "c1", "kind": "cut", "start": 12.0, "end": 13.0 });
+
+        // Once the source is undone, 12-13 s is past the end.
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project.id,
+            vec![
+                json!({ "opId": "u1", "kind": "undo", "targetSeq": 1 }),
+                cut.clone(),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["index"], 1, "{body}");
+
+        // Undo alone (seq 2), then a redo brings the range back in the same batch.
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project.id,
+            vec![json!({ "opId": "u2", "kind": "undo", "targetSeq": 1 })],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project.id,
+            vec![json!({ "opId": "r1", "kind": "redo", "targetSeq": 2 }), cut],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn sources_route_refuses_a_commenter_and_a_body_without_a_file() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let cara = sign_up(&state, "cara@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        crate::test_util::add_member(&state, &ada, &project.id, "cara@example.com", "commenter")
+            .await;
+        let (status, body, _) =
+            call(app(&state), upload_req(&project.id, &cara, "a.mp4", b"x")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body, _) = call(
+            app(&state),
+            multipart_req(
+                &format!("/api/projects/{}/sources", project.id),
+                &ada,
+                "notes",
+                "a.mp4",
+                b"x",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("missing `file`"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_media_whose_files_are_gone_is_a_400_for_sources_and_layers() {
+        let (state, _d) = state().await;
+        let ada = sign_up(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let gone = Uuid::new_v4().to_string();
+        register(&state.db, &project.id, &gone, 10.0, 4.0)
+            .await
+            .unwrap();
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project.id,
+            vec![add_op("a", &gone, 10.0, 4.0)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("that media is missing"),
+            "{body}"
+        );
+
+        let (status, body) = post_ops(
+            &state,
+            &ada,
+            &project.id,
+            vec![
+                json!({ "opId": "l", "kind": "addlayer", "track": 2, "start": 1.0, "end": 2.0,
+                         "media": gone, "offset": 0.0, "frame": "full", "audio": null }),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["index"], 0, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("that media is missing"),
+            "{body}"
+        );
     }
 }

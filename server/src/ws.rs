@@ -439,6 +439,17 @@ mod tests {
             .unwrap();
         assert_eq!(next_json(&mut a).await["t"], "pong");
 
+        // A second video on the timeline, so the resync has sources to carry.
+        let owner = crate::test_util::me(&state, &ada).await;
+        let found = crate::projects::find_project(&state.db, &project)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = crate::sources::test_support::seed_source(&state, 4.0, &["d"]).await;
+        crate::sources::add_source(&state, &found, &owner, &second)
+            .await
+            .unwrap();
+
         // Flood the hub past its capacity while the client is not reading.
         for i in 0..600 {
             state.bus.publish(
@@ -462,6 +473,11 @@ mod tests {
             let msg = next_json(&mut a).await;
             if msg["t"] == "resync" {
                 saw_resync = true;
+                assert_eq!(
+                    msg["sources"],
+                    json!([{ "media": second.id, "offset": 10.0, "duration": 4.0 }]),
+                    "a resync carries the appended sources"
+                );
                 break;
             }
         }

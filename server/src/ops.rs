@@ -500,6 +500,17 @@ async fn validate(
                     format!("a project holds at most {MAX_SOURCES} videos"),
                 ));
             }
+            // Its join is a split too, so a timeline with no split left has
+            // no room for another video.
+            if current.splits.len() >= MAX_SPLITS {
+                return Err(AppError::bad_request_at(
+                    index,
+                    format!(
+                        "the timeline already has {MAX_SPLITS} splits, the most it can hold; \
+                         remove a split before adding another video"
+                    ),
+                ));
+            }
             if (offset - duration).abs() > EPS {
                 return Err(AppError::bad_request_at(
                     index,
@@ -538,7 +549,7 @@ async fn validate(
                 return Err(AppError::bad_request_at(index, "layer range is empty"));
             }
             let Some((kind, length)) =
-                crate::sources::layer_media(tx, state, project, media).await?
+                crate::sources::layer_media(tx, state, project, index, media).await?
             else {
                 return Err(AppError::bad_request_at(
                     index,
@@ -786,6 +797,11 @@ pub async fn apply_ops(
                 .await?;
             }
             _ => {}
+        }
+        if matches!(client_op.op, Op::Undo { .. } | Op::Redo { .. }) {
+            // An undo or redo changes which ops are live, so the fold is
+            // read again: later ops in this batch validate against it.
+            current = fold(&read_log(&mut *tx, &project.id).await?);
         }
     }
     tx.commit().await?;
