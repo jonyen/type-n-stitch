@@ -799,14 +799,7 @@ pub async fn start_export(
             words: &words,
         },
     )
-    .map_err(|e| match e {
-        // The planner and the renderer disagreed about the edit indices:
-        // nothing the client sent can fix that.
-        ExportError::MissingTitleImage(_) | ExportError::MissingCaptionImage(_) => {
-            AppError::internal(e.to_string())
-        }
-        other => AppError::bad_request(other.to_string()),
-    })?;
+    .map_err(export_error)?;
     let planned = output_duration(&timeline_with(duration, &edits, &doc.splits, &doc.order));
 
     let job_id = Uuid::new_v4().to_string();
@@ -889,4 +882,41 @@ pub fn export_job(state: &AppState, media_id: &str, job_id: &str) -> Option<Expo
         .get(job_id)
         .filter(|j| j.media_id() == media_id)
         .cloned()
+}
+
+/// How a planning failure reaches the client: a 400 for an edit the client
+/// can change, a 500 when the server contradicted itself.
+fn export_error(e: ExportError) -> AppError {
+    match e {
+        // The planner and the renderer disagreed about the edit indices, or
+        // a piece fell outside the sources the server itself read: nothing
+        // the client sent can fix that.
+        ExportError::MissingTitleImage(_)
+        | ExportError::MissingCaptionImage(_)
+        | ExportError::OutsideSources(_) => AppError::internal(e.to_string()),
+        other => AppError::bad_request(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn a_piece_outside_every_source_is_the_servers_fault() {
+        assert_eq!(
+            export_error(ExportError::OutsideSources(6.0)).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            export_error(ExportError::MissingTitleImage(0)).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            export_error(ExportError::MissingAsset("x".into())).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
