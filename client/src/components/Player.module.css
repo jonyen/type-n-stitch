@@ -39,6 +39,15 @@
   opacity: 0.15;
 }
 
+/* A later audio-only file: black under its words, and the frame keeps its shape. */
+.dark video {
+  opacity: 0;
+}
+
+.dark .audioBadge {
+  position: absolute;
+}
+
 .audioBadge {
   color: #d1d5db;
   letter-spacing: 0.2em;

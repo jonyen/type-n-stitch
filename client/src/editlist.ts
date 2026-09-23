@@ -304,11 +304,24 @@ export function nearDipJoin(t: number, list: Piece[], joinList: Join[]): boolean
  * word's start (or the end of the media), so the pause after the last word
  * goes with it and no half-gaps are left behind.
  */
-export function rangeForWords(words: Word[], from: number, to: number, duration: number): Range {
+export function rangeForWords(
+  words: Word[],
+  from: number,
+  to: number,
+  duration: number,
+  sources: readonly Placed[] = [],
+): Range {
   const first = words[from];
   if (!first) throw new Error(`no word at index ${from}`);
   const next = words[to + 1];
-  return { start: first.start, end: next ? next.start : duration };
+  const end = next ? next.start : duration;
+  // A word never owns time in another file: the last word before a join stops
+  // at its own file's end, transcribed next file or not. The server's MCP
+  // `word_range` clamps the same way.
+  const last = words[to];
+  const own = last ? locate(sources, last.start) : null;
+  const src = own ? sources[own.index] : undefined;
+  return { start: first.start, end: src ? Math.min(end, src.offset + src.duration) : end };
 }
 
 export type WordStatus = 'kept' | 'cut' | 'overdub';

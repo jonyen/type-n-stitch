@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from '@testing-library/react';
+import type { ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { Word } from '../types';
+import type { SourceView, Word } from '../types';
 import { Transcript } from './Transcript';
 
 const words: Word[] = ['one', 'two', 'three'].map((text, i) => ({
@@ -12,7 +13,7 @@ const words: Word[] = ['one', 'two', 'three'].map((text, i) => ({
   end: i + 0.5,
 }));
 
-function setup() {
+function setup(overrides: Partial<ComponentProps<typeof Transcript>> = {}) {
   const onWordDrag = vi.fn();
   const onWordDragEnd = vi.fn();
   render(
@@ -43,8 +44,10 @@ function setup() {
       assets={[]}
       onBrollClick={vi.fn()}
       onAudioClick={vi.fn()}
+      sources={[]}
       tool="range"
       onWordDragEnd={onWordDragEnd}
+      {...overrides}
     />,
   );
   return { onWordDrag, onWordDragEnd };
@@ -69,5 +72,51 @@ describe('Transcript word drag (the Range tool cuts on its end)', () => {
     fireEvent.mouseDown(screen.getByRole('button', { name: 'three' }), { button: 0 });
     fireEvent.mouseUp(window);
     expect(onWordDragEnd).toHaveBeenCalledOnce();
+  });
+});
+
+const video = (
+  index: number,
+  offset: number,
+  duration: number,
+  transcript: SourceView['transcript'],
+): SourceView => ({
+  index,
+  mediaId: `m${index}`,
+  url: `/m${index}`,
+  filename: `take${index + 1}.mp4`,
+  kind: 'video',
+  offset,
+  duration,
+  transcript,
+});
+
+describe('Transcript with several videos', () => {
+  // The three words fill video 1, [0, 3); video 2 is [3, 8) with no words yet.
+  const twoClips = {
+    ordered: [
+      { start: 0, end: 3 },
+      { start: 3, end: 8 },
+    ],
+    splits: [3],
+  };
+
+  it('greys out a video that is still transcribing, in its own clip', () => {
+    setup({ ...twoClips, sources: [video(0, 0, 3, 'ready'), video(1, 3, 5, 'running')] });
+    const block = screen.getByRole('status');
+    expect(block.textContent).toBe('Transcribing video 2…');
+    expect(block.closest('section')?.getAttribute('data-clip-start')).toBe('3');
+  });
+
+  it('says so when a transcript failed, and shows nothing once it is ready', () => {
+    setup({ ...twoClips, sources: [video(0, 0, 3, 'ready'), video(1, 3, 5, 'error')] });
+    expect(screen.getByRole('status').textContent).toBe('Video 2 could not be transcribed');
+  });
+
+  it('labels a join as where a video starts, not as a split Delete could join', () => {
+    setup({ ...twoClips, sources: [video(0, 0, 3, 'ready'), video(1, 3, 5, 'ready')] });
+    expect(screen.queryByRole('status')).toBeNull();
+    const divider = screen.getByRole('button', { name: /^Video 2 · Clip 2/ });
+    expect(divider.getAttribute('title')).toMatch(/video 2 starts/i);
   });
 });

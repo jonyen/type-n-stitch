@@ -13,6 +13,8 @@ import {
   cutTransitionAt,
   EPS,
   formatTime,
+  isJoin,
+  locate,
   nextCutTransition,
   wordStatus,
 } from '../editlist';
@@ -28,7 +30,16 @@ import {
   type Token,
 } from '../tokens';
 import type { Tool } from '../tools';
-import type { Asset, Edit, OverdubEdit, Range, TitleStyle, Transition, Word } from '../types';
+import type {
+  Asset,
+  Edit,
+  OverdubEdit,
+  Range,
+  SourceView,
+  TitleStyle,
+  Transition,
+  Word,
+} from '../types';
 
 import styles from './Transcript.module.css';
 
@@ -84,6 +95,8 @@ interface Props {
   assets: Asset[];
   onBrollClick: (start: number) => void;
   onAudioClick: (start: number) => void;
+  /** The main track's files in stitched order. A file still transcribing shows as a greyed block in its clips. */
+  sources: SourceView[];
   /** The active timeline tool; the transcript's cursor follows it. */
   tool: Tool;
   /** Fired on mouseup after a press that started on a word and dragged across words; not after a plain click. */
@@ -117,6 +130,7 @@ export function Transcript({
   assets,
   onBrollClick,
   onAudioClick,
+  sources,
   tool,
   onWordDragEnd,
 }: Props) {
@@ -407,62 +421,81 @@ export function Transcript({
   const isSplit = (start: number) => splits.some((s) => Math.abs(s - start) < EPS);
   return (
     <div ref={root} className={styles.transcript} data-tool={tool} aria-label="Transcript">
-      {clips.map((clip, k) => (
-        <section
-          key={`clip-${clip.piece.start}`}
-          className={styles.clip}
-          data-clip-start={clip.piece.start}
-        >
-          {clips.length > 1 &&
-            (() => {
-              const split = isSplit(clip.piece.start);
-              // Only a split's divider can show "selected": that's the only
-              // one Delete acts on. A cut-derived boundary still jumps there
-              // on click, but never carries a selection Delete can't use.
-              const selected =
-                split && selectedClip !== null && Math.abs(selectedClip - clip.piece.start) < EPS;
-              return (
-                <button
-                  type="button"
-                  className={cx(
-                    styles.clipDivider,
-                    split && styles.split,
-                    selected && styles.dividerSelected,
-                  )}
-                  title={
-                    split
-                      ? 'Click to select · Delete joins it to the clip before'
-                      : 'Clip boundary from a cut — click to jump here'
-                  }
-                  onClick={() => onClipClick(clip.piece.start)}
-                >
-                  Clip {k + 1} · {formatTime(clip.piece.end - clip.piece.start)}
-                </button>
-              );
-            })()}
-          {splitTurns(clip.tokens, speakers).map((turn) => {
-            const first = turn.tokens[0];
-            const key = first ? `turn-${tokenStart(first)}` : 'turn';
-            return (
-              <div
-                key={key}
-                className={cx(styles.turn, turnContains(turn, activeWord) && styles.speaking)}
-                style={speakerStyle(turn.speaker)}
-              >
-                {turn.speaker !== null && (
-                  <SpeakerTag
-                    speaker={turn.speaker}
-                    name={speakerLabel(turn.speaker, speakerNames)}
-                    onRename={(name) => onRenameSpeaker(turn.speaker as number, name)}
-                    readOnly={readOnly}
-                  />
+      {clips.map((clip, k) => {
+        const start = clip.piece.start;
+        // Which file this clip plays, when there is more than one.
+        const video = sources.length > 1 ? sources[locate(sources, start)?.index ?? 0] : undefined;
+        const join = isJoin(start, sources);
+        return (
+          <section key={`clip-${start}`} className={styles.clip} data-clip-start={start}>
+            {clips.length > 1 &&
+              (() => {
+                // Only a split's divider can show "selected": that's the only
+                // one Delete acts on. A cut-derived boundary still jumps there
+                // on click, and a join is a split nobody can remove, so neither
+                // ever carries a selection Delete can't use.
+                const split = isSplit(start) && !join;
+                const selected =
+                  split && selectedClip !== null && Math.abs(selectedClip - start) < EPS;
+                return (
+                  <button
+                    type="button"
+                    className={cx(
+                      styles.clipDivider,
+                      (split || join) && styles.split,
+                      selected && styles.dividerSelected,
+                    )}
+                    title={
+                      join
+                        ? `Video ${(video?.index ?? 0) + 1} starts here — click to jump here`
+                        : split
+                          ? 'Click to select · Delete joins it to the clip before'
+                          : 'Clip boundary from a cut — click to jump here'
+                    }
+                    onClick={() => onClipClick(start)}
+                  >
+                    {video ? `Video ${video.index + 1} · ` : ''}Clip {k + 1} ·{' '}
+                    {formatTime(clip.piece.end - clip.piece.start)}
+                  </button>
+                );
+              })()}
+            {video && video.transcript !== 'ready' && (
+              <p
+                role="status"
+                className={cx(
+                  styles.transcribing,
+                  video.transcript === 'error' && styles.transcribeFailed,
                 )}
-                <p className={styles.speech}>{turn.tokens.map(renderToken)}</p>
-              </div>
-            );
-          })}
-        </section>
-      ))}
+              >
+                {video.transcript === 'error'
+                  ? `Video ${video.index + 1} could not be transcribed`
+                  : `Transcribing video ${video.index + 1}…`}
+              </p>
+            )}
+            {splitTurns(clip.tokens, speakers).map((turn) => {
+              const first = turn.tokens[0];
+              const key = first ? `turn-${tokenStart(first)}` : 'turn';
+              return (
+                <div
+                  key={key}
+                  className={cx(styles.turn, turnContains(turn, activeWord) && styles.speaking)}
+                  style={speakerStyle(turn.speaker)}
+                >
+                  {turn.speaker !== null && (
+                    <SpeakerTag
+                      speaker={turn.speaker}
+                      name={speakerLabel(turn.speaker, speakerNames)}
+                      onRename={(name) => onRenameSpeaker(turn.speaker as number, name)}
+                      readOnly={readOnly}
+                    />
+                  )}
+                  <p className={styles.speech}>{turn.tokens.map(renderToken)}</p>
+                </div>
+              );
+            })}
+          </section>
+        );
+      })}
     </div>
   );
 }

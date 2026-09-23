@@ -85,6 +85,23 @@ describe('rangeForWords', () => {
   it('runs to the end of the media for the last word', () => {
     expect(rangeForWords(words, 3, 3, 20)).toEqual({ start: 2.0, end: 20 });
   });
+
+  // Two files: video 1 is [0, 3), video 2 is [3, 23). The server clamps an MCP cut the same way.
+  const joined: Source[] = [
+    { media: 'm0', offset: 0, duration: 3 },
+    { media: 'm1', offset: 3, duration: 20 },
+  ];
+  const across: Word[] = [...words, { id: '1:w0', text: 'next', start: 3.4, end: 3.8 }];
+
+  it("stops the last word of a file at that file's end, not at the next file's first word", () => {
+    expect(rangeForWords(across, 3, 3, 23, joined)).toEqual({ start: 2.0, end: 3 });
+    // Selected across the join: the last word's own file bounds it.
+    expect(rangeForWords(across, 2, 4, 23, joined)).toEqual({ start: 1.25, end: 23 });
+  });
+
+  it('never runs into a later file that has no words yet', () => {
+    expect(rangeForWords(words, 3, 3, 23, joined)).toEqual({ start: 2.0, end: 3 });
+  });
 });
 
 describe('wordStatus', () => {

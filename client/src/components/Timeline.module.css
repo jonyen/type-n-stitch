@@ -69,6 +69,9 @@
   color: var(--text);
   font-size: var(--text-xs);
   text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   overflow: hidden;
   cursor: grab;
 }
@@ -201,4 +204,39 @@
   border-right: 1px solid var(--cut);
   pointer-events: none;
   z-index: 4;
+}
+
+.clip .text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The clip's video number, from two videos up. */
+.clip .sourceBadge {
+  display: grid;
+  flex: none;
+  place-items: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Where one video meets another, in output order. */
+.sourceJoin {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  z-index: 1;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--text-strong);
+  opacity: 0.6;
+  pointer-events: none;
 }

@@ -21,7 +21,7 @@ import {
   submitOps,
   suggestEdits,
   synthesizeOverdub,
-  transcribeMedia,
+  transcribeProject,
   uploadAsset,
   uploadMedia,
   type Suggestions,
@@ -43,7 +43,7 @@ import { ToolToolbar } from './components/ToolToolbar';
 import { TopBar, type ExportState } from './components/TopBar';
 import { Transcript } from './components/Transcript';
 import { cx } from './cx';
-import { EPS, orderedPieces, rangeForWords, titles } from './editlist';
+import { EPS, isJoin, orderedPieces, rangeForWords, titles } from './editlist';
 import { editorReducer, initialEditor, selectedRange, type EditorAction } from './editor';
 import { byName, importFailures, runImport, type ImportItem } from './importQueue';
 import { handledUpstream, shouldIgnoreGlobalKey } from './keyboardGuard';
@@ -53,7 +53,8 @@ import { audios, layers } from './overlays';
 import { type PresenceState } from './realtime';
 import { deleteAction } from './selection';
 import { useSession } from './session';
-import { sourceViewsOf } from './sources';
+import { isTranscribing, playableSources, sourceViewsOf, unlistedSources } from './sources';
+import { useStitchedMedia } from './stitchedMedia';
 import styles from './App.module.css';
 import ui from './styles/ui.module.css';
 import { defaultSuggestOptions, fillerCuts, pauseCuts, pending } from './suggest';
@@ -122,10 +123,10 @@ export function App() {
   const [suggestions, setSuggestions] = useState<Suggestions>({ fillers: [], pauses: [] });
 
   const [speakers, setSpeakers] = useState<(number | null)[] | null>(null);
-  // The project's files as the server lists them: names, urls, transcript
-  // status. Not read yet: Task 7 wires it into Player/Timeline/Transcript.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // The project's files as the server lists them: names, urls, transcript status.
   const [sourceViews, setSourceViews] = useState<SourceView[]>([]);
+  // How many ready sources the current words cover; one more finishing brings its words in.
+  const [wordsReady, setWordsReady] = useState(0);
   // The home screen's import, file by file, while it runs.
   const [imports, setImports] = useState<ImportItem[]>([]);
   // Insert → Add video…, file by file. Failed files stay until dismissed.
@@ -143,13 +144,21 @@ export function App() {
     [editor.duration, editor.edits, editor.splits, editor.order],
   );
 
-  const mediaRef = useRef<HTMLVideoElement>(null);
+  // The fold's sources with their files: what the player plays, what the
+  // timeline badges and the transcript greys out while it transcribes.
+  const playable = useMemo(
+    () => playableSources(editor.sources, sourceViews),
+    [editor.sources, sourceViews],
+  );
+  // One <video> behind a stitched clock, so playback stays in stitched time.
+  const stitched = useStitchedMedia(playable);
+  const mediaRef = useMemo(() => ({ current: stitched }), [stitched]);
   const playback = usePlayback(
     mediaRef,
     editor.words,
     editor.edits,
     editor.duration,
-    project?.media.url,
+    playable[0]?.url,
     ordered,
     segments,
   );
@@ -339,6 +348,73 @@ export function App() {
     [projectId, canEdit, settle],
   );
 
+  // While any file is still transcribing, poll the project's list (like the
+  // export poll). Only the list is updated, so a poll never clears a selection.
+  const waiting = sourceViews.some(isTranscribing);
+  useEffect(() => {
+    if (!projectId || !waiting) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      fetchProject(projectId)
+        .then(({ project: fresh }) => {
+          if (cancelled) return;
+          const views = sourceViewsOf(fresh);
+          setSourceViews(views);
+          // `pending` means nothing has started it (the server restarted since
+          // it was added). /transcribe starts it and answers without waiting.
+          if (views.some((v) => v.transcript === 'pending'))
+            void transcribeProject(projectId).catch(() => undefined);
+        })
+        .catch(() => {
+          // Try again on the next tick.
+        });
+    }, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [projectId, waiting]);
+
+  // A peer's AddSource names a file we have not listed: fetch the list once.
+  const unlisted = unlistedSources(editor.sources, sourceViews).join(',');
+  useEffect(() => {
+    if (!projectId || !unlisted) return;
+    let cancelled = false;
+    fetchProject(projectId)
+      .then(({ project: fresh }) => {
+        if (!cancelled) setSourceViews(sourceViewsOf(fresh));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, unlisted]);
+
+  // Another file's transcript is ready: fetch the stitched words again.
+  const readyCount = sourceViews.filter((v) => v.transcript === 'ready').length;
+  useEffect(() => {
+    if (!projectId || readyCount <= wordsReady) return;
+    let cancelled = false;
+    transcribeProject(projectId)
+      .then(({ words: list, sources: fresh }) => {
+        if (cancelled) return;
+        // The words cover exactly the sources this reply calls ready.
+        if (fresh) {
+          setSourceViews(fresh);
+          setWordsReady(fresh.filter((v) => v.transcript === 'ready').length);
+        } else {
+          setWordsReady(readyCount);
+        }
+        dispatch({ type: 'setWords', words: list });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, readyCount, wordsReady]);
+
   useEffect(() => {
     if (!projectId) {
       queue.current = null;
@@ -389,7 +465,7 @@ export function App() {
 
   // Back to the start screen. The document lives on the server, so nothing is lost.
   const goHome = useCallback(() => {
-    mediaRef.current?.pause();
+    stitched.pause();
     setProject(null);
     setLoadError(null);
     confirmed.current = null;
@@ -405,9 +481,10 @@ export function App() {
     setBrollRange(null);
     setAudioDialog(null);
     setSourceViews([]);
+    setWordsReady(0);
     setUploads([]);
     setTool('select');
-  }, []);
+  }, [stitched]);
 
   // Opening a project pushes a history entry, so the browser's Back button
   // (and the header's back link) return to the start screen.
@@ -440,14 +517,18 @@ export function App() {
       setBusy(label);
       const summary = await fetchSummary();
       setBusy('Transcribing');
-      const [words, fetched] = await Promise.all([
-        transcribeMedia(summary.id),
+      const [transcript, fetched] = await Promise.all([
+        transcribeProject(summary.id),
         fetchProject(summary.id),
       ]);
+      const { words } = transcript;
       dispatch({ type: 'load', words, duration: summary.media.duration, media: summary.media.id });
       dispatch({ type: 'sync', doc: fetched.doc });
       confirmed.current = fetched.doc;
-      setSourceViews(sourceViewsOf(fetched.project));
+      const views = sourceViewsOf(fetched.project);
+      setSourceViews(views);
+      // The words cover exactly the sources the transcribe reply calls ready.
+      setWordsReady((transcript.sources ?? views).filter((v) => v.transcript === 'ready').length);
       setProject(summary);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -507,7 +588,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [projectId]);
+  }, [projectId, words]);
 
   const onRenameSpeaker = useCallback(
     (speaker: number, name: string) => edit({ type: 'renameSpeaker', speaker, name }),
@@ -596,10 +677,10 @@ export function App() {
   /** Where a new card goes: the end of the selected words, else the playhead. */
   const onAddTitle = useCallback(() => {
     const at = selected
-      ? rangeForWords(editor.words, selected[0], selected[1], editor.duration).end
+      ? rangeForWords(editor.words, selected[0], selected[1], editor.duration, editor.sources).end
       : playback.currentTime;
     setTitleDialog({ at });
-  }, [selected, editor.words, editor.duration, playback.currentTime]);
+  }, [selected, editor.words, editor.duration, editor.sources, playback.currentTime]);
 
   // A music bar, from the transcript tag or the timeline, opens its dialog.
   const openAudio = useCallback(
@@ -650,7 +731,10 @@ export function App() {
   // boundary just seeks, since there's no split for Delete to undo.
   const onClipClick = useCallback(
     (start: number) => {
-      setSelectedClip(editor.splits.some((s) => Math.abs(s - start) < EPS) ? start : null);
+      // A join between two files is a boundary, never a split Delete can remove.
+      const split =
+        editor.splits.some((s) => Math.abs(s - start) < EPS) && !isJoin(start, editor.sources);
+      setSelectedClip(split ? start : null);
       setSelectedTitle(null);
       setSelectedOverlay(null);
       dispatch({ type: 'clearSelection' });
@@ -659,7 +743,7 @@ export function App() {
         .querySelector<HTMLElement>(`[data-clip-start="${start}"]`)
         ?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     },
-    [playback, editor.splits],
+    [playback, editor.splits, editor.sources],
   );
 
   /** Where a new split goes: the start of the selected words, else the playhead. */
@@ -701,7 +785,9 @@ export function App() {
   }, [editor.edits, selectedOverlay]);
 
   const hasClipSelection =
-    selectedClip !== null && editor.splits.some((s) => Math.abs(s - selectedClip) < EPS);
+    selectedClip !== null &&
+    editor.splits.some((s) => Math.abs(s - selectedClip) < EPS) &&
+    !isJoin(selectedClip, editor.sources);
 
   // A word selection made any other way (the arrow keys, a peer's sync) ends
   // the title, clip and overlay selections, as clicking a word does.
@@ -911,8 +997,8 @@ export function App() {
               </div>
             )}
             <Player
-              media={project.media}
-              mediaRef={mediaRef}
+              sources={playable}
+              stitched={stitched}
               edits={editor.edits}
               assets={assets}
               words={editor.words}
@@ -970,6 +1056,7 @@ export function App() {
               assets={assets}
               onBrollClick={(start) => edit({ type: 'removeLayer', track: 2, start })}
               onAudioClick={openAudio}
+              sources={playable}
               tool={tool}
               onWordDragEnd={onWordDragEnd}
             />
@@ -1042,6 +1129,7 @@ export function App() {
                   cuts: ranges.map((r) => ({ kind: 'cut' as const, ...r })),
                 })
               }
+              sources={playable}
             />
           </section>
         </main>
@@ -1079,7 +1167,13 @@ export function App() {
           assets={assets}
           original={wordsIn(brollRange)}
           rangeLength={(() => {
-            const r = rangeForWords(editor.words, brollRange[0], brollRange[1], editor.duration);
+            const r = rangeForWords(
+              editor.words,
+              brollRange[0],
+              brollRange[1],
+              editor.duration,
+              editor.sources,
+            );
             return r.end - r.start;
           })()}
           onUpload={onUploadAsset}

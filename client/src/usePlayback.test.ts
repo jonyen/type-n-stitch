@@ -3,6 +3,8 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { formatTime, orderedPieces } from './editlist';
+import { StitchedMedia } from './stitchedMedia';
+import { FakeVideo } from './test/fakeVideo';
 import { timelineLength, timelineSegments } from './timeline';
 import type { Range, TitleEdit } from './types';
 import {
@@ -306,5 +308,101 @@ describe('usePlayback in output time (a reordered edit)', () => {
     frameAt(media, 10);
     expect(hook.result.current.atEnd).toBe(true);
     expect(hook.result.current.outputTime).toBe(10);
+  });
+});
+
+describe('usePlayback across two files', () => {
+  // Two 5 s files end to end. The fold keeps the join (5) as a split.
+  const sources = [
+    { offset: 0, duration: 5, url: '/a.mp4' },
+    { offset: 5, duration: 5, url: '/b.mp4' },
+  ];
+
+  let frames: FrameRequestCallback[] = [];
+  beforeEach(() => {
+    frames = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  function setup(order: number[]) {
+    const ordered = orderedPieces(10, [], [5], order);
+    const segments = timelineSegments(10, [], [5], order);
+    const video = new FakeVideo();
+    const media = new StitchedMedia();
+    media.setSources(sources);
+    media.attach(video as unknown as HTMLVideoElement);
+    const ref = { current: media };
+    const hook = renderHook(() => usePlayback(ref, [], [], 10, '/a.mp4', ordered, segments));
+    return { video, hook };
+  }
+
+  /** Run the playhead watchdog once, with the loaded file's clock at `local`. */
+  function frameAt(video: FakeVideo, local: number) {
+    video.currentTime = local;
+    const pending = frames;
+    frames = [];
+    act(() => pending.forEach((cb) => cb(0)));
+  }
+
+  it('plays from the first file into the second at the join, then stops at the end', () => {
+    const { video, hook } = setup([]);
+    act(() => hook.result.current.toggle());
+    expect(hook.result.current.playing).toBe(true);
+    frameAt(video, 3);
+    expect(hook.result.current.outputTime).toBeCloseTo(3);
+    // The first file reaches its end: the next piece is the second file.
+    frameAt(video, 5);
+    expect(video.src).toBe('/b.mp4');
+    expect(hook.result.current.currentTime).toBeCloseTo(5);
+    expect(hook.result.current.playing).toBe(true);
+    act(() => video.loaded());
+    expect(video.play).toHaveBeenCalledTimes(2);
+    frameAt(video, 2);
+    expect(hook.result.current.currentTime).toBeCloseTo(7);
+    expect(hook.result.current.outputTime).toBeCloseTo(7);
+    frameAt(video, 5);
+    expect(hook.result.current.atEnd).toBe(true);
+    expect(hook.result.current.playing).toBe(false);
+    expect(hook.result.current.outputTime).toBeCloseTo(10);
+  });
+
+  it("plays a reordered pair across files: the second file first, then the first, via the file's own end", () => {
+    const { video, hook } = setup([5, 0]);
+    act(() => hook.result.current.toggle());
+    // Play starts at the first output piece, which is in the second file.
+    expect(video.src).toBe('/b.mp4');
+    expect(hook.result.current.playing).toBe(true);
+    expect(hook.result.current.outputTime).toBeCloseTo(0);
+    act(() => video.loaded());
+    frameAt(video, 4);
+    expect(hook.result.current.outputTime).toBeCloseTo(4);
+    // The file runs out before the watchdog sees the piece end.
+    act(() => {
+      video.currentTime = 5;
+      video.ended = true;
+      video.dispatchEvent(new Event('ended'));
+    });
+    expect(video.src).toBe('/a.mp4');
+    act(() => video.loaded());
+    frameAt(video, 1);
+    expect(hook.result.current.currentTime).toBeCloseTo(1);
+    expect(hook.result.current.outputTime).toBeCloseTo(6);
+  });
+
+  it('seeks by output time into the other file', () => {
+    const { video, hook } = setup([5, 0]);
+    // Output 2 s is 2 s into the first output piece: source 7, in the second file.
+    act(() => hook.result.current.seekOutput(2));
+    expect(video.src).toBe('/b.mp4');
+    expect(hook.result.current.currentTime).toBeCloseTo(7);
+    expect(hook.result.current.outputTime).toBeCloseTo(2);
+    act(() => video.loaded());
+    expect(video.currentTime).toBe(2);
+    // And back: output 7 s is source 2, in the first file.
+    act(() => hook.result.current.seekOutput(7));
+    expect(video.src).toBe('/a.mp4');
+    expect(hook.result.current.outputTime).toBeCloseTo(7);
   });
 });

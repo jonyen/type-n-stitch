@@ -121,14 +121,17 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
     case 'deleteSelection': {
       const range = selectedRange(state.selection);
       if (!range) return null;
-      return { kind: 'cut', ...rangeForWords(state.words, range[0], range[1], state.duration) };
+      return {
+        kind: 'cut',
+        ...rangeForWords(state.words, range[0], range[1], state.duration, state.sources),
+      };
     }
     case 'overdub': {
       const range = action.range ?? selectedRange(state.selection);
       if (!range) return null;
       return {
         kind: 'overdub',
-        ...rangeForWords(state.words, range[0], range[1], state.duration),
+        ...rangeForWords(state.words, range[0], range[1], state.duration, state.sources),
         text: action.text,
         audioUrl: action.audioUrl,
         audioDuration: action.audioDuration,
@@ -164,7 +167,7 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
       if (!range) return null;
       return {
         kind: 'addcaption',
-        ...rangeForWords(state.words, range[0], range[1], state.duration),
+        ...rangeForWords(state.words, range[0], range[1], state.duration, state.sources),
         text: action.text,
         position: action.position,
       };
@@ -190,7 +193,7 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
       return {
         kind: 'addlayer',
         track: action.track,
-        ...rangeForWords(state.words, range[0], range[1], state.duration),
+        ...rangeForWords(state.words, range[0], range[1], state.duration, state.sources),
         media: action.media,
         offset: action.offset,
         frame: action.frame,
@@ -216,7 +219,7 @@ export function opForAction(state: EditorState, action: EditorAction): Op | null
       if (!range) return null;
       return {
         kind: 'addaudio',
-        ...rangeForWords(state.words, range[0], range[1], state.duration),
+        ...rangeForWords(state.words, range[0], range[1], state.duration, state.sources),
         media: action.media,
         offset: 0,
         gain: action.gain,

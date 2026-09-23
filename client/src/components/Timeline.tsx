@@ -3,7 +3,7 @@ import { useMemo, useRef, useState, type PointerEvent } from 'react';
 import type { Thumbnails } from '../api';
 import { dropSlot, firstWords, moveFor } from '../clipstrip';
 import { cx } from '../cx';
-import { formatTime } from '../editlist';
+import { formatTime, locate } from '../editlist';
 import { audios, layers } from '../overlays';
 import type { Peer } from '../realtime';
 import {
@@ -20,7 +20,7 @@ import {
   type Segment,
 } from '../timeline';
 import type { Tool } from '../tools';
-import type { Asset, AudioEdit, Edit, LayerEdit, Range, Word } from '../types';
+import type { Asset, AudioEdit, Edit, LayerEdit, Range, SourceView, Word } from '../types';
 import { ScrubPreview } from './ScrubPreview';
 import styles from './Timeline.module.css';
 
@@ -56,6 +56,8 @@ export interface TimelineProps {
   onSplit: (at: number) => void;
   /** Cut these source ranges, as one operation. */
   onCut: (ranges: Range[]) => void;
+  /** The main track's files in stitched order; badges and joins show from two up. */
+  sources: SourceView[];
 }
 
 interface Drag {
@@ -82,6 +84,9 @@ export function Timeline(props: TimelineProps) {
   const pct = (t: number) =>
     `${length > 0 ? (Math.min(Math.max(t, 0), length) / length) * 100 : 0}%`;
   const nameOf = (id: string) => assets.find((a) => a.id === id)?.name ?? 'missing file';
+  const multi = props.sources.length > 1;
+  /** The file a clip plays. No piece spans a join: the fold keeps every join as a split. */
+  const videoOf = (piece: Range) => props.sources[locate(props.sources, piece.start)?.index ?? 0];
 
   const pointerAt = (clientX: number) => {
     const r = lanes.current?.getBoundingClientRect();
@@ -262,6 +267,7 @@ export function Timeline(props: TimelineProps) {
           {ordered.map((piece, k) => {
             const span = spans[k] ?? { start: 0, end: 0 };
             const text = firstWords(words, piece);
+            const src = multi ? videoOf(piece) : undefined;
             return (
               <button
                 key={piece.start}
@@ -286,10 +292,33 @@ export function Timeline(props: TimelineProps) {
                   if (e.detail === 0) props.onSelectClip(piece.start);
                 }}
               >
-                <span>{text || '…'}</span>
+                {src && (
+                  <span
+                    className={styles.sourceBadge}
+                    data-source={src.index + 1}
+                    title={`Video ${src.index + 1} · ${src.filename}`}
+                  >
+                    {src.index + 1}
+                  </span>
+                )}
+                <span className={styles.text}>{text || '…'}</span>
               </button>
             );
           })}
+          {multi &&
+            ordered.map((piece, k) => {
+              const prev = ordered[k - 1];
+              if (!prev || videoOf(prev)?.index === videoOf(piece)?.index) return null;
+              return (
+                <span
+                  key={`join-${piece.start}`}
+                  data-testid="source-join"
+                  className={styles.sourceJoin}
+                  style={{ left: pct(spans[k]?.start ?? 0) }}
+                  aria-hidden
+                />
+              );
+            })}
           {dropAt !== null && <span className={styles.drop} style={{ left: pct(dropAt) }} />}
         </div>
 
@@ -333,15 +362,22 @@ export function Timeline(props: TimelineProps) {
           className={styles.playhead}
           style={{ left: pct(outputTime) }}
         />
-        {hover && length > 0 && (
-          <ScrubPreview
-            label={formatTime(hover.t)}
-            frameTime={outputToSource(hover.t, segments)}
-            x={hover.x}
-            trackWidth={hover.width}
-            thumbs={thumbs}
-          />
-        )}
+        {hover &&
+          length > 0 &&
+          (() => {
+            const frameTime = outputToSource(hover.t, segments);
+            // The sprite sheet is the first file's; past it there is no frame to show.
+            const inFirst = frameTime < (props.sources[1]?.offset ?? Infinity);
+            return (
+              <ScrubPreview
+                label={formatTime(hover.t)}
+                frameTime={frameTime}
+                x={hover.x}
+                trackWidth={hover.width}
+                thumbs={inFirst ? thumbs : null}
+              />
+            );
+          })()}
       </div>
     </div>
   );

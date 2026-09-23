@@ -218,3 +218,26 @@ describe('clip and overlay operations', () => {
     expect(opForAction(joined, { type: 'unsplit', at: 2 })).toEqual({ kind: 'unsplit', at: 2 });
   });
 });
+
+describe('deleteSelection at a join', () => {
+  // Video 1 is [0, 3) with the four words above; video 2 is [3, 23), its first word at 3.4.
+  const two = editorReducer(
+    editorReducer(editorReducer(initialEditor, { type: 'load', words, duration: 3, media: 'm0' }), {
+      type: 'addSource',
+      media: 'm1',
+      offset: 3,
+      duration: 20,
+    }),
+    { type: 'setWords', words: [...words, { id: '1:w0', text: 'next', start: 3.4, end: 3.8 }] },
+  );
+
+  it("cuts the last word of a file up to that file's end, never into the next file", () => {
+    const state = editorReducer(select(two, 3), { type: 'deleteSelection' });
+    expect(state.edits).toEqual([{ kind: 'cut', start: 2.0, end: 3 }]);
+    expect(opForAction(select(two, 3), { type: 'deleteSelection' })).toEqual({
+      kind: 'cut',
+      start: 2.0,
+      end: 3,
+    });
+  });
+});

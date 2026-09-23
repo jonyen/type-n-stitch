@@ -257,7 +257,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'deleteSelection': {
       const range = selectedRange(state.selection);
       if (!range) return state;
-      const cut = rangeForWords(state.words, range[0], range[1], state.duration);
+      const cut = rangeForWords(state.words, range[0], range[1], state.duration, state.sources);
       // Deleting an overdubbed passage removes the overdub with it.
       const kept = state.edits.filter((e) => !(e.kind === 'overdub' && inside(e, cut)));
       return withEdits(state, [...kept, { kind: 'cut', ...cut }]);
@@ -266,7 +266,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'overdub': {
       const range = action.range ?? selectedRange(state.selection);
       if (!range) return state;
-      const span = rangeForWords(state.words, range[0], range[1], state.duration);
+      const span = rangeForWords(state.words, range[0], range[1], state.duration, state.sources);
       // A new overdub replaces any it overlaps.
       const kept = state.edits.filter(
         (e) => !(e.kind === 'overdub' && e.start < span.end && e.end > span.start),
@@ -374,7 +374,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'addCaption': {
       const range = action.range ?? selectedRange(state.selection);
       if (!range) return state;
-      const span = rangeForWords(state.words, range[0], range[1], state.duration);
+      const span = rangeForWords(state.words, range[0], range[1], state.duration, state.sources);
       // A new caption replaces any it overlaps, like an overdub.
       const kept = state.edits.filter(
         (e) => !(e.kind === 'caption' && e.start < span.end && e.end > span.start),
@@ -451,7 +451,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     case 'addLayer': {
       const range = action.range ?? selectedRange(state.selection);
       if (!range) return state;
-      const span = rangeForWords(state.words, range[0], range[1], state.duration);
+      const span = rangeForWords(state.words, range[0], range[1], state.duration, state.sources);
       // A new layer replaces those it overlaps on its own track, as B-roll did.
       const kept = state.edits.filter(
         (e) =>
@@ -514,7 +514,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
           ? wholeRange(state)
           : (action.range ?? selectedRange(state.selection));
       if (!range) return state;
-      const span = rangeForWords(state.words, range[0], range[1], state.duration);
+      const span = rangeForWords(state.words, range[0], range[1], state.duration, state.sources);
       const audio: AudioEdit = {
         kind: 'audio',
         ...span,

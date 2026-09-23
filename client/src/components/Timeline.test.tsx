@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { orderedPieces } from '../editlist';
 import { timelineSegments } from '../timeline';
-import type { Asset, Edit, Word } from '../types';
+import type { Asset, Edit, SourceView, Word } from '../types';
 import { Timeline, type TimelineProps } from './Timeline';
 
 const words: Word[] = Array.from({ length: 10 }, (_, i) => ({
@@ -53,6 +53,7 @@ function setup(overrides: Partial<TimelineProps> = {}): TimelineProps {
     tool: 'select',
     duration: 10,
     splits,
+    sources: [],
     onSplit: vi.fn(),
     onCut: vi.fn(),
     ...overrides,
@@ -230,5 +231,58 @@ describe('Timeline (Razor and Range)', () => {
     setup();
     fireEvent.pointerMove(lanes(), { clientX: 260 });
     expect(screen.queryByTestId('razor-line')).toBeNull();
+  });
+});
+
+const video = (index: number, offset: number, duration = 5): SourceView => ({
+  index,
+  mediaId: `m${index}`,
+  url: `/data/m${index}/source.mp4`,
+  filename: `take${index + 1}.mp4`,
+  kind: 'video',
+  offset,
+  duration,
+  transcript: 'ready',
+});
+
+describe('Timeline sources', () => {
+  const badges = () =>
+    screen
+      .getAllByRole('button', { name: /^Clip \d/ })
+      .map((c) => c.querySelector('[data-source]')?.textContent);
+
+  it('badges each clip with its video and marks where two videos meet', () => {
+    // Split at 5 (the join) and reversed: output is video 2, then video 1.
+    setup({ sources: [video(0, 0), video(1, 5)] });
+    expect(badges()).toEqual(['2', '1']);
+    const joins = screen.getAllByTestId('source-join');
+    expect(joins).toHaveLength(1);
+    expect(joins[0]?.style.left).toBe('50%');
+    expect(
+      screen
+        .getAllByRole('button', { name: /^Clip \d/ })[0]
+        ?.querySelector('[data-source]')
+        ?.getAttribute('title'),
+    ).toBe('Video 2 · take2.mp4');
+  });
+
+  it('draws joins only between neighbours from different videos', () => {
+    const three = [2, 5];
+    setup({
+      sources: [video(0, 0), video(1, 5)],
+      splits: three,
+      ordered: orderedPieces(10, edits, three, []),
+      segments: timelineSegments(10, edits, three, []),
+    });
+    expect(badges()).toEqual(['1', '1', '2']);
+    const joins = screen.getAllByTestId('source-join');
+    expect(joins).toHaveLength(1);
+    expect(joins[0]?.style.left).toBe('50%');
+  });
+
+  it('shows neither for a single video', () => {
+    setup({ sources: [video(0, 0, 10)] });
+    expect(document.querySelector('[data-source]')).toBeNull();
+    expect(screen.queryAllByTestId('source-join')).toHaveLength(0);
   });
 });
