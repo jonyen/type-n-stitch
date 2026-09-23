@@ -18,7 +18,7 @@ import {
   nextCutTransition,
   wordStatus,
 } from '../editlist';
-import { audios, layers } from '../overlays';
+import { audios, layers, layerTag, mediaName, type LayerTrack } from '../overlays';
 import type { Peer } from '../realtime';
 import {
   clipRuns,
@@ -41,6 +41,7 @@ import type {
   Word,
 } from '../types';
 
+import { SpeakerIcon } from './SpeakerIcon';
 import styles from './Transcript.module.css';
 
 const TITLE_STYLE: Record<TitleStyle, string | undefined> = {
@@ -93,7 +94,8 @@ interface Props {
   selectedClip: number | null;
   onClipClick: (start: number) => void;
   assets: Asset[];
-  onBrollClick: (start: number) => void;
+  /** Click a layer tag: select that layer (as clicking its timeline bar does). */
+  onLayerClick: (track: LayerTrack, start: number) => void;
   onAudioClick: (start: number) => void;
   /** The main track's files in stitched order. A file still transcribing shows as a greyed block in its clips. */
   sources: SourceView[];
@@ -128,7 +130,7 @@ export function Transcript({
   selectedClip,
   onClipClick,
   assets,
-  onBrollClick,
+  onLayerClick,
   onAudioClick,
   sources,
   tool,
@@ -249,21 +251,31 @@ export function Transcript({
     );
   };
 
-  const nameOf = (id: string) => assets.find((a) => a.id === id)?.name ?? 'missing asset';
+  const nameOf = (id: string) => mediaName(id, assets, sources) ?? 'missing asset';
   const overlayTags = (i: number): ReactNode => {
-    const b = startingAt(layers(edits, 2), i);
+    // One tag per track whose layer starts at this word, V2 before V3.
+    const starting = ([2, 3] as const).flatMap((track) => {
+      const layer = startingAt(layers(edits, track), i);
+      return layer ? [layer] : [];
+    });
     const a = startingAt(audios(edits), i);
     return (
       <>
-        {b && (
-          <span
-            className={cx(styles.tag, styles.brollTag)}
-            title={readOnly ? 'B-roll' : 'Click to remove'}
-            onClick={readOnly ? undefined : () => onBrollClick(b.start)}
+        {starting.map((l) => (
+          <button
+            key={`v${l.track}`}
+            type="button"
+            className={cx(styles.tag, styles.layerTag)}
+            data-layer-tag={`${l.track}:${l.start}`}
+            title="Click to select"
+            onClick={() => onLayerClick(l.track, l.start)}
           >
-            ▣ {nameOf(b.media)}
-          </span>
-        )}
+            {layerTag(l, nameOf(l.media))}
+            {l.audio !== null && (
+              <SpeakerIcon className={styles.tagIcon} label={`Sound on, ${l.audio} dB`} />
+            )}
+          </button>
+        ))}
         {a && (
           <span
             className={cx(styles.tag, styles.musicTag)}

@@ -28,7 +28,7 @@ import {
 } from './api';
 import { AgentDialog } from './components/AgentDialog';
 import { AudioDialog } from './components/AudioDialog';
-import { BrollDialog } from './components/BrollDialog';
+import { LayerDialog } from './components/LayerDialog';
 import { CaptionDialog } from './components/CaptionDialog';
 import { Dropzone } from './components/Dropzone';
 import { ImportList } from './components/ImportList';
@@ -49,7 +49,7 @@ import { byName, importFailures, runImport, type ImportItem } from './importQueu
 import { handledUpstream, shouldIgnoreGlobalKey } from './keyboardGuard';
 import { createOpQueue, type OpQueue } from './opQueue';
 import { newOpId, opForAction, type ClientOp, type DocState } from './ops';
-import { audios, layers } from './overlays';
+import { audios, layers, type LayerTrack } from './overlays';
 import { type PresenceState } from './realtime';
 import { deleteAction } from './selection';
 import { useSession } from './session';
@@ -70,6 +70,7 @@ import type {
   Asset,
   AudioEdit,
   CaptionPos,
+  LayerEdit,
   LibraryItem,
   ProjectSummary,
   SourceView,
@@ -103,8 +104,11 @@ export function App() {
   // the dialog mounted (and the caption anchored) when a peer's `sync` clears
   // the selection while someone is still typing.
   const [captionRange, setCaptionRange] = useState<[number, number] | null>(null);
-  // The word range the B-roll dialog was opened on.
-  const [brollRange, setBrollRange] = useState<[number, number] | null>(null);
+  // The layer dialog: adding over the word range it was opened on, or
+  // changing an existing layer's track, frame or sound.
+  const [layerDialog, setLayerDialog] = useState<
+    { range: [number, number] } | { edit: LayerEdit } | null
+  >(null);
   // The music dialog: adding over `range` (null means the whole edit), or
   // editing an existing `edit`.
   const [audioDialog, setAudioDialog] = useState<
@@ -114,7 +118,7 @@ export function App() {
   const [selectedTitle, setSelectedTitle] = useState<number | null>(null);
   // A selected clip, by its piece's start. Exclusive with the word/title selection.
   const [selectedClip, setSelectedClip] = useState<number | null>(null);
-  // A selected B-roll or music bar. Exclusive with every other selection.
+  // A selected layer or music bar. Exclusive with every other selection.
   const [selectedOverlay, setSelectedOverlay] = useState<OverlayRef | null>(null);
   // The timeline's mouse tool, also used by the transcript. Persists until changed.
   const [tool, setTool] = useState<Tool>('select');
@@ -287,14 +291,14 @@ export function App() {
     };
   }, [projectId, words, duration, twoWordFillers]);
 
-  // The project's uploaded B-roll/music assets.
+  // The project's uploaded layer and music assets.
   const refreshAssets = useCallback(() => {
     if (!projectId) return;
     listAssets(projectId)
       .then(setAssets)
       .catch(() => setAssets([]));
   }, [projectId]);
-  // Media ids we have already gone looking for and not found, so a B-roll or
+  // Media ids we have already gone looking for and not found, so a layer or
   // music edit naming an id the server does not have cannot loop the fetch.
   const soughtAssets = useRef(new Set<string>());
   useEffect(() => {
@@ -308,14 +312,14 @@ export function App() {
   // the list once; ids still unknown after that are remembered, so the set of
   // unknown ids has to actually change before we ask again.
   useEffect(() => {
-    const have = new Set(assets.map((a) => a.id));
+    const have = new Set([...assets.map((a) => a.id), ...playable.map((s) => s.mediaId)]);
     const unknown = [...layers(editor.edits), ...audios(editor.edits)]
       .map((e) => e.media)
       .filter((id) => !have.has(id) && !soughtAssets.current.has(id));
     if (unknown.length === 0) return;
     for (const id of unknown) soughtAssets.current.add(id);
     refreshAssets();
-  }, [editor.edits, assets, refreshAssets]);
+  }, [editor.edits, assets, playable, refreshAssets]);
   const onUploadAsset = useCallback(
     async (file: File) => {
       if (!projectId) throw new Error('no project');
@@ -489,7 +493,7 @@ export function App() {
     setTitleDialog(null);
     setOverdubRange(null);
     setCaptionRange(null);
-    setBrollRange(null);
+    setLayerDialog(null);
     setAudioDialog(null);
     setSourceViews([]);
     setWordsCover('');
@@ -702,6 +706,17 @@ export function App() {
     [editor.edits],
   );
 
+  // A layer bar's double-click opens its dialog to change track, frame or sound.
+  const openLayer = useCallback(
+    (track: LayerTrack, start: number) => {
+      const found = layers(editor.edits).find(
+        (l) => l.track === track && Math.abs(l.start - start) < EPS,
+      );
+      if (found) setLayerDialog({ edit: found });
+    },
+    [editor.edits],
+  );
+
   const onTitleOpen = useCallback(
     (at: number) => {
       const initial = titles(editor.edits).find((t) => Math.abs(t.at - at) < EPS);
@@ -787,12 +802,17 @@ export function App() {
     if (!ordered.some((p) => Math.abs(p.start - selectedClip) < EPS)) setSelectedClip(null);
   }, [ordered, selectedClip]);
 
-  // A peer's edit (or an undo) can remove the B-roll or music we had selected.
+  // A peer's edit (or an undo) can remove the layer or music we had selected.
   useEffect(() => {
     if (!selectedOverlay) return;
-    const list = selectedOverlay.kind === 'broll' ? layers(editor.edits, 2) : audios(editor.edits);
-    if (!list.some((e) => Math.abs(e.start - selectedOverlay.start) < EPS))
-      setSelectedOverlay(null);
+    const still =
+      selectedOverlay.kind === 'layer'
+        ? layers(editor.edits).some(
+            (l) =>
+              l.track === selectedOverlay.track && Math.abs(l.start - selectedOverlay.start) < EPS,
+          )
+        : audios(editor.edits).some((a) => Math.abs(a.start - selectedOverlay.start) < EPS);
+    if (!still) setSelectedOverlay(null);
   }, [editor.edits, selectedOverlay]);
 
   const hasClipSelection =
@@ -810,7 +830,7 @@ export function App() {
     setSelectedOverlay(null);
   }, [hasWordSelection]);
 
-  /** Delete whatever is selected: words, a title card, a split, or a B-roll or music bar. */
+  /** Delete whatever is selected: words, a title card, a split, or a layer or music bar. */
   const deleteSelected = useCallback(() => {
     edit(
       deleteAction({
@@ -854,7 +874,7 @@ export function App() {
         titleDialog ||
         captionRange ||
         agentDialogOpen ||
-        brollRange ||
+        layerDialog ||
         audioDialog
       )
         return;
@@ -885,7 +905,7 @@ export function App() {
     titleDialog,
     captionRange,
     agentDialogOpen,
-    brollRange,
+    layerDialog,
     audioDialog,
     deleteSelected,
     clearAll,
@@ -904,6 +924,21 @@ export function App() {
       : '';
   // The dialog keeps showing the words it was opened on, selection or not.
   const captionText = wordsIn(captionRange);
+  // What the layer dialog describes: the words its layer covers, and their length.
+  const layerWords = (() => {
+    if (!layerDialog) return { text: '', length: 0 };
+    if ('edit' in layerDialog) {
+      const { start, end } = layerDialog.edit;
+      const text = editor.words
+        .filter((w) => w.start >= start - EPS && w.start < end - EPS)
+        .map((w) => w.text)
+        .join(' ');
+      return { text, length: end - start };
+    }
+    const [from, to] = layerDialog.range;
+    const r = rangeForWords(editor.words, from, to, editor.duration, editor.sources);
+    return { text: wordsIn(layerDialog.range), length: r.end - r.start };
+  })();
 
   if (user === undefined)
     return (
@@ -931,8 +966,8 @@ export function App() {
         onAddCaption: () => {
           if (selected) setCaptionRange(selected);
         },
-        onAddBroll: () => {
-          if (selected) setBrollRange(selected);
+        onAddLayer: () => {
+          if (selected) setLayerDialog({ range: selected });
         },
         onAddMusic: () => setAudioDialog({ range: selected }),
         onAddVideos: (files: File[]) => void onAddVideos(files),
@@ -1065,7 +1100,7 @@ export function App() {
               selectedClip={selectedClip}
               onClipClick={onClipClick}
               assets={assets}
-              onBrollClick={(start) => edit({ type: 'removeLayer', track: 2, start })}
+              onLayerClick={(track, start) => onSelectOverlay({ kind: 'layer', track, start })}
               onAudioClick={openAudio}
               sources={playable}
               tool={tool}
@@ -1091,8 +1126,8 @@ export function App() {
               onCaption={() => {
                 if (selected) setCaptionRange(selected);
               }}
-              onBroll={() => {
-                if (selected) setBrollRange(selected);
+              onLayer={() => {
+                if (selected) setLayerDialog({ range: selected });
               }}
               onDismiss={clearAll}
             />
@@ -1108,7 +1143,7 @@ export function App() {
                   titleDialog ||
                   captionRange ||
                   agentDialogOpen ||
-                  brollRange ||
+                  layerDialog ||
                   audioDialog
                 )
               }
@@ -1130,6 +1165,7 @@ export function App() {
               onMoveClip={(piece, before) => edit({ type: 'moveClip', piece, before })}
               onSelectOverlay={onSelectOverlay}
               onOpenAudio={openAudio}
+              onOpenLayer={openLayer}
               tool={tool}
               duration={editor.duration}
               splits={editor.splits}
@@ -1173,34 +1209,58 @@ export function App() {
         />
       )}
 
-      {brollRange && (
-        <BrollDialog
+      {layerDialog && (
+        <LayerDialog
           assets={assets}
-          original={wordsIn(brollRange)}
-          rangeLength={(() => {
-            const r = rangeForWords(
-              editor.words,
-              brollRange[0],
-              brollRange[1],
-              editor.duration,
-              editor.sources,
-            );
-            return r.end - r.start;
-          })()}
+          sources={playable}
+          initial={'edit' in layerDialog ? layerDialog.edit : undefined}
+          original={layerWords.text}
+          rangeLength={layerWords.length}
           onUpload={onUploadAsset}
-          onSubmit={(asset, offset) => {
-            edit({
-              type: 'addLayer',
-              track: 2,
-              media: asset.id,
-              offset,
-              frame: 'full',
-              audio: null,
-              range: brollRange,
-            });
-            setBrollRange(null);
+          onSubmit={(choice) => {
+            if ('edit' in layerDialog) {
+              const { track, start } = layerDialog.edit;
+              edit({
+                type: 'setLayer',
+                track,
+                start,
+                toTrack: choice.track,
+                frame: choice.frame,
+                audio: choice.audio,
+              });
+              // Keep the bar selected when it moves to the other track.
+              if (
+                selectedOverlay?.kind === 'layer' &&
+                selectedOverlay.track === track &&
+                Math.abs(selectedOverlay.start - start) < EPS
+              )
+                setSelectedOverlay({ kind: 'layer', track: choice.track, start });
+            } else {
+              edit({
+                type: 'addLayer',
+                track: choice.track,
+                media: choice.media,
+                offset: choice.offset,
+                frame: choice.frame,
+                audio: choice.audio,
+                range: layerDialog.range,
+              });
+            }
+            setLayerDialog(null);
           }}
-          onCancel={() => setBrollRange(null)}
+          onRemove={
+            'edit' in layerDialog
+              ? () => {
+                  edit({
+                    type: 'removeLayer',
+                    track: layerDialog.edit.track,
+                    start: layerDialog.edit.start,
+                  });
+                  setLayerDialog(null);
+                }
+              : undefined
+          }
+          onCancel={() => setLayerDialog(null)}
         />
       )}
       {audioDialog && (

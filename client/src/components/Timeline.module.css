@@ -7,7 +7,7 @@
 
 .labels {
   display: grid;
-  grid-template-rows: 18px 30px 22px 22px;
+  grid-template-rows: 18px 10px 22px 30px 22px;
   row-gap: 4px;
   padding-left: var(--space-3);
   font-size: var(--text-xs);
@@ -22,10 +22,26 @@
 .lanes {
   position: relative;
   display: grid;
-  grid-template-rows: 18px 30px 22px 22px;
+  grid-template-rows: 18px 10px 22px 30px 22px;
   row-gap: 4px;
   cursor: text;
   touch-action: none;
+}
+
+/* Ruler, V3 (a thin "+ V3" row until it holds a clip), V2, Clips, Music. */
+.labels.withV3,
+.lanes.withV3 {
+  grid-template-rows: 18px 22px 22px 30px 22px;
+}
+
+.lane.addLane {
+  border: 1px dashed var(--border);
+  background: transparent;
+}
+
+.labels .addLabel {
+  color: var(--faint);
+  font-size: 10px;
 }
 
 .ruler {
@@ -102,9 +118,20 @@
   text-align: left;
   overflow: hidden;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 3px;
 }
 
-.broll {
+.bar span {
+  min-width: 0;
+}
+
+.sound {
+  flex: none;
+}
+
+.layer {
   background: var(--broll);
 }
 
@@ -152,7 +179,9 @@
 
 @media (max-width: 600px) {
   .labels,
-  .lanes {
+  .lanes,
+  .labels.withV3,
+  .lanes.withV3 {
     grid-template-rows: 18px 30px;
   }
 

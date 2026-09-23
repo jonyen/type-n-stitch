@@ -306,9 +306,18 @@ input.speakerTag {
   color: #fff;
 }
 
-.brollTag {
+.layerTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
   background: var(--broll);
   color: #0b0e14;
+  font-family: inherit;
+}
+
+.tagIcon {
+  flex: none;
 }
 
 .musicTag {

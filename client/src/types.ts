@@ -60,7 +60,7 @@ export interface Source {
 /** Where a layer's picture sits: full frame, or a corner picture-in-picture. */
 export type Frame = 'full' | 'pipTopLeft' | 'pipTopRight' | 'pipBottomLeft' | 'pipBottomRight';
 
-/** The video tracks above the main one. B-roll is track 2. */
+/** The video tracks above the main one: V2 and V3. */
 export type LayerTrack = 2 | 3;
 
 /**
@@ -156,7 +156,7 @@ export interface ProjectSummary {
   createdAt: number;
 }
 
-/** A project's uploaded B-roll/music file (GET/POST/DELETE /api/projects/:id/assets). */
+/** A project's uploaded layer or music file (GET/POST/DELETE /api/projects/:id/assets). */
 export interface Asset {
   id: string;
   kind: MediaKind;

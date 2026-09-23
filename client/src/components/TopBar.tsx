@@ -37,7 +37,7 @@ export interface EditorControls {
   hasSelection: boolean;
   onAddTitle: () => void;
   onAddCaption: () => void;
-  onAddBroll: () => void;
+  onAddLayer: () => void;
   onAddMusic: () => void;
   /** Append these files to the end of the main track. */
   onAddVideos: (files: File[]) => void;
@@ -232,9 +232,9 @@ function EditorTools({ editor }: { editor: EditorControls }) {
             <DropdownMenu.Item
               className={styles.item}
               disabled={!editor.hasSelection}
-              onSelect={editor.onAddBroll}
+              onSelect={editor.onAddLayer}
             >
-              B-roll…
+              Layer…
             </DropdownMenu.Item>
             <DropdownMenu.Item className={styles.item} onSelect={editor.onAddMusic}>
               Music…

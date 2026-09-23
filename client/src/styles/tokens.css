@@ -1,5 +1,5 @@
 /* Design tokens. Dark is the default; `data-theme` on <html> switches. The
-   lane colours (cut, overdub, B-roll, music, playhead) mean one thing each
+   lane colours (cut, overdub, layers, music, playhead) mean one thing each
    and are never reused, and the accent never marks a lane. */
 
 :root {

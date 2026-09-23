@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
-import { assetTime, audiosAt, DUCK, gainToLinear, layerAt, speaking } from '../overlays';
+import { assetTime, audiosAt, DUCK, gainToLinear, layersAt, speaking } from '../overlays';
 import type { Asset, AudioEdit, Edit, Word } from '../types';
 import type { Playback } from '../usePlayback';
 import styles from './Overlays.module.css';
@@ -17,7 +17,7 @@ export function Overlays({ edits, assets, words, playback }: Props) {
   const t = playback.currentTime;
   const url = (id: string) => assets.find((a) => a.id === id)?.url;
   // Track 2, drawn full frame and muted as B-roll always was; Task 9 stacks every layer.
-  const broll = layerAt(t, edits, 2);
+  const broll = layersAt(t, edits).find((l) => l.track === 2);
   const beds = audiosAt(t, edits);
   return (
     <>

@@ -452,7 +452,7 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       const range = action.range ?? selectedRange(state.selection);
       if (!range) return state;
       const span = rangeForWords(state.words, range[0], range[1], state.duration, state.sources);
-      // A new layer replaces those it overlaps on its own track, as B-roll did.
+      // A new layer replaces those it overlaps on its own track.
       const kept = state.edits.filter(
         (e) =>
           !(

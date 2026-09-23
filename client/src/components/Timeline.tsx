@@ -4,8 +4,9 @@ import type { Thumbnails } from '../api';
 import { dropSlot, firstWords, moveFor } from '../clipstrip';
 import { cx } from '../cx';
 import { formatTime, locate, sourceJoins } from '../editlist';
-import { audios, layers } from '../overlays';
+import { audios, frameLabel, layers, mediaName, type LayerTrack } from '../overlays';
 import type { Peer } from '../realtime';
+import { overlayKey, sameOverlay, type OverlayRef } from '../selection';
 import {
   clipSpans,
   outputToSource,
@@ -22,12 +23,10 @@ import {
 import type { Tool } from '../tools';
 import type { Asset, AudioEdit, Edit, LayerEdit, Range, SourceView, Word } from '../types';
 import { ScrubPreview } from './ScrubPreview';
+import { SpeakerIcon } from './SpeakerIcon';
 import styles from './Timeline.module.css';
 
-export interface OverlayRef {
-  kind: 'broll' | 'audio';
-  start: number;
-}
+export type { OverlayRef } from '../selection';
 
 export interface TimelineProps {
   words: Word[];
@@ -48,6 +47,8 @@ export interface TimelineProps {
   onMoveClip: (piece: number, before: number | null) => void;
   onSelectOverlay: (ref: OverlayRef | null) => void;
   onOpenAudio: (start: number) => void;
+  /** Double-click on a layer bar: change its track, frame or sound. */
+  onOpenLayer: (track: LayerTrack, start: number) => void;
   tool: Tool;
   /** Media length in source seconds, for the split rules. */
   duration: number;
@@ -56,8 +57,19 @@ export interface TimelineProps {
   onSplit: (at: number) => void;
   /** Cut these source ranges, as one operation. */
   onCut: (ranges: Range[]) => void;
-  /** The main track's files in stitched order; badges and joins show from two up. */
+  /**
+   * The main track's files in stitched order; badges and joins show from two up.
+   * Also names a layer taken from one of the project's own videos.
+   */
   sources: SourceView[];
+}
+
+interface BarItem {
+  ref: OverlayRef;
+  edit: LayerEdit | AudioEdit;
+  label: string;
+  text: string;
+  open: () => void;
 }
 
 interface Drag {
@@ -83,7 +95,7 @@ export function Timeline(props: TimelineProps) {
 
   const pct = (t: number) =>
     `${length > 0 ? (Math.min(Math.max(t, 0), length) / length) * 100 : 0}%`;
-  const nameOf = (id: string) => assets.find((a) => a.id === id)?.name ?? 'missing file';
+  const nameOf = (id: string) => mediaName(id, assets, props.sources) ?? 'missing file';
   const multi = props.sources.length > 1;
   /** Where one file meets the next, in source time: the Range band stops there too. */
   const joinList = sourceJoins(props.sources);
@@ -197,51 +209,79 @@ export function Timeline(props: TimelineProps) {
       ? (spans[drag.slot]?.start ?? length)
       : null;
 
-  const bars = (kind: OverlayRef['kind'], list: (LayerEdit | AudioEdit)[]) =>
-    list.flatMap((e) => {
-      const selected =
-        props.selectedOverlay?.kind === kind && props.selectedOverlay.start === e.start;
-      const label = `${kind === 'broll' ? 'B-roll' : 'Music'} ${nameOf(e.media)}`;
-      return overlaySpans(e, segments, kind === 'audio').map((w, i) => (
+  const overlayBars = (items: BarItem[]) =>
+    items.flatMap(({ ref, edit: e, label, text, open }) => {
+      const selected = sameOverlay(props.selectedOverlay, ref);
+      const key = overlayKey(ref);
+      // Music runs through title holds; a layer, like the picture it covers, does not.
+      return overlaySpans(e, segments, ref.kind === 'audio').map((w, i) => (
         <button
-          key={`${kind}-${e.start}-${i}`}
+          key={`${key}-${i}`}
           type="button"
-          className={cx(styles.bar, styles[kind], selected && styles.selected)}
+          className={cx(
+            styles.bar,
+            ref.kind === 'layer' ? styles.layer : styles.audio,
+            selected && styles.selected,
+          )}
           style={{ left: pct(w.start), width: pct(w.end - w.start) }}
-          data-overlay={`${kind}:${e.start}`}
+          data-overlay={key}
           aria-label={label}
           aria-pressed={selected}
-          title={kind === 'audio' ? `${label} · double-click to edit` : label}
+          title={readOnly ? label : `${label} · double-click to edit`}
           onPointerDown={(ev) => {
             if (props.tool === 'select') ev.stopPropagation();
           }}
           onClick={() => {
-            if (props.tool === 'select') props.onSelectOverlay({ kind, start: e.start });
+            if (props.tool === 'select') props.onSelectOverlay(ref);
           }}
-          onDoubleClick={
-            kind === 'audio'
-              ? () => {
-                  if (props.tool === 'select') props.onOpenAudio(e.start);
-                }
-              : undefined
-          }
+          onDoubleClick={() => {
+            if (props.tool === 'select' && !readOnly) open();
+          }}
         >
-          <span>{nameOf(e.media)}</span>
+          {e.kind === 'layer' && e.audio !== null && <SpeakerIcon className={styles.sound} />}
+          <span>{text}</span>
         </button>
       ));
     });
 
+  const layerBars = (track: LayerTrack) =>
+    overlayBars(
+      layers(edits, track).map((l): BarItem => {
+        const name = nameOf(l.media);
+        return {
+          ref: { kind: 'layer', track, start: l.start },
+          edit: l,
+          label: `V${track} ${name}`,
+          text: l.frame === 'full' ? name : `${frameLabel(l.frame)} · ${name}`,
+          open: () => props.onOpenLayer(track, l.start),
+        };
+      }),
+    );
+  const musicBars = overlayBars(
+    audios(edits).map((a): BarItem => ({
+      ref: { kind: 'audio', start: a.start },
+      edit: a,
+      label: `Music ${nameOf(a.media)}`,
+      text: nameOf(a.media),
+      open: () => props.onOpenAudio(a.start),
+    })),
+  );
+  const hasV3 = layers(edits, 3).length > 0;
+
   return (
     <div className={styles.timeline}>
-      <div className={styles.labels} aria-hidden>
+      <div className={cx(styles.labels, hasV3 && styles.withV3)} aria-hidden>
         <span className={styles.rulerLabel} />
+        <span className={cx(styles.overlayLabel, !hasV3 && styles.addLabel)}>
+          {hasV3 ? 'V3' : '+ V3'}
+        </span>
+        <span className={styles.overlayLabel}>V2</span>
         <span>Clips</span>
-        <span className={styles.overlayLabel}>B-roll</span>
         <span className={styles.overlayLabel}>Music</span>
       </div>
       <div
         ref={lanes}
-        className={styles.lanes}
+        className={cx(styles.lanes, hasV3 && styles.withV3)}
         data-testid="timeline-lanes"
         data-tool={props.tool}
         data-illegal={props.tool === 'razor' && razor !== null && !razor.ok}
@@ -264,6 +304,21 @@ export function Timeline(props: TimelineProps) {
               {formatTime(t)}
             </span>
           ))}
+        </div>
+
+        {hasV3 ? (
+          <div className={cx(styles.lane, styles.overlayLane)} data-lane="v3">
+            {layerBars(3)}
+          </div>
+        ) : (
+          <div
+            className={cx(styles.lane, styles.overlayLane, styles.addLane)}
+            data-lane="v3"
+            title="Insert ▸ Layer… puts a clip on V3"
+          />
+        )}
+        <div className={cx(styles.lane, styles.overlayLane)} data-lane="v2">
+          {layerBars(2)}
         </div>
 
         <div className={styles.lane} data-lane="clips">
@@ -325,11 +380,8 @@ export function Timeline(props: TimelineProps) {
           {dropAt !== null && <span className={styles.drop} style={{ left: pct(dropAt) }} />}
         </div>
 
-        <div className={cx(styles.lane, styles.overlayLane)} data-lane="broll">
-          {bars('broll', layers(edits, 2))}
-        </div>
         <div className={cx(styles.lane, styles.overlayLane)} data-lane="music">
-          {bars('audio', audios(edits))}
+          {musicBars}
         </div>
 
         {/* Peers send a source time. Mapped as best it can be: at a piece

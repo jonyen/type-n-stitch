@@ -22,7 +22,7 @@ function controls(exportState: ExportState, headSeq: number): EditorControls {
     hasSelection: false,
     onAddTitle: vi.fn(),
     onAddCaption: vi.fn(),
-    onAddBroll: vi.fn(),
+    onAddLayer: vi.fn(),
     onAddMusic: vi.fn(),
     onAddVideos: vi.fn(),
     onOverdub: vi.fn(),
@@ -130,5 +130,23 @@ describe('Insert → Add video…', () => {
     await user.click(screen.getByRole('button', { name: 'Insert ▾' }));
     const item = await screen.findByRole('menuitem', { name: /Add video/ });
     expect(item.getAttribute('aria-disabled')).toBe('true');
+  });
+});
+
+describe('Insert', () => {
+  it('adds a layer from Insert → Layer… when words are selected', async () => {
+    const user = userEvent.setup();
+    const editor = setup({ status: 'idle' }, 0, { hasSelection: true });
+    await user.click(screen.getByRole('button', { name: 'Insert ▾' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Layer…' }));
+    expect(editor.onAddLayer).toHaveBeenCalledOnce();
+  });
+
+  it('offers no B-roll item any more', async () => {
+    const user = userEvent.setup();
+    setup({ status: 'idle' }, 0, { hasSelection: true });
+    await user.click(screen.getByRole('button', { name: 'Insert ▾' }));
+    await screen.findByRole('menuitem', { name: 'Layer…' });
+    expect(screen.queryByRole('menuitem', { name: /B-roll/ })).toBeNull();
   });
 });
