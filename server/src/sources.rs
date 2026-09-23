@@ -520,6 +520,25 @@ async fn append_at_end(
     })
 }
 
+/// Drop media an add promoted for this project whose `AddSource` never
+/// landed: its registry row and its directory. Media on the timeline stays.
+pub async fn forget_media(state: &Arc<AppState>, project: &Project, media_id: &str) {
+    let live = match crate::ops::load_doc(state, &project.id).await {
+        Ok((_, doc)) => match timeline(state, project, &doc).await {
+            Ok(sources) => sources.iter().any(|s| s.media == media_id),
+            Err(_) => true,
+        },
+        Err(_) => true,
+    };
+    if live {
+        return;
+    }
+    if let Err(e) = unregister(&state.db, &project.id, media_id).await {
+        tracing::warn!(id = media_id, "could not unregister: {e:?}");
+    }
+    let _ = tokio::fs::remove_dir_all(state.config.data_dir.join(media_id)).await;
+}
+
 /// Undo `register` for media whose `AddSource` never landed. Only for media
 /// this request uploaded: nothing else can refer to it yet.
 async fn unregister(db: &SqlitePool, project_id: &str, media_id: &str) -> AppResult<()> {

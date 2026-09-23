@@ -1257,9 +1257,21 @@ impl McpSession {
         let mut open = agent.lock().await;
         let project = require_open(&open, identity)?.clone();
         require_edit(&open)?;
+        // A full project is refused before an asset is copied into a media dir.
+        let (_, doc) = crate::ops::load_doc(&self.state, &project.id).await?;
+        crate::sources::check_room(1 + doc.sources.len())?;
         let meta = crate::sources::source_media(&self.state, &project, media).await?;
+        let known = crate::sources::in_registry(&self.state.db, &project.id, &meta.id).await?;
         let source: SourceView =
-            crate::sources::add_source(&self.state, &project, &identity.bot, &meta).await?;
+            match crate::sources::add_source(&self.state, &project, &identity.bot, &meta).await {
+                Ok(source) => source,
+                Err(e) => {
+                    if !known {
+                        crate::sources::forget_media(&self.state, &project, &meta.id).await;
+                    }
+                    return Err(e);
+                }
+            };
         self.refresh(&mut open, &project).await?;
         Ok(json!({
             "source": source,
@@ -2828,6 +2840,100 @@ mod tests {
         assert_eq!(again["source"]["offset"], 15.0);
 
         assert!(session.tool_add_source(&identity, "nope").await.is_err());
+    }
+
+    /// The media directory `add_source` would promote `asset` into.
+    fn promoted_dir(state: &AppState, asset: &str) -> std::path::PathBuf {
+        let id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("type-n-stitch:asset:{asset}").as_bytes(),
+        );
+        state.config.data_dir.join(id.to_string())
+    }
+
+    #[tokio::test]
+    async fn add_source_removes_its_copy_when_the_add_is_refused() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let clip = crate::assets::test_support::seed_asset(
+            &state,
+            &project,
+            engine::MediaKind::Video,
+            5.0,
+        )
+        .await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+
+        // Too many splits: the op is refused after the copy was made.
+        let splits: Vec<Value> = (1..=engine::MAX_SPLITS)
+            .map(|i| json!({ "opId": format!("s{i}"), "kind": "split", "at": i as f64 * 0.1 }))
+            .collect();
+        let (status, body, _) = call(
+            app(&state),
+            json_req(
+                Method::POST,
+                &format!("/api/projects/{}/ops", project.id),
+                Some(&ada),
+                Some(json!({ "ops": splits })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let err = session.tool_add_source(&identity, &clip.id).await;
+        assert!(err.is_err());
+        assert!(
+            !promoted_dir(&state, &clip.id).exists(),
+            "a refused add removes the copy it made"
+        );
+        let promoted = promoted_dir(&state, &clip.id);
+        let promoted = promoted.file_name().unwrap().to_str().unwrap();
+        assert!(
+            !crate::sources::in_registry(&state.db, &project.id, promoted)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn add_source_at_the_cap_copies_nothing() {
+        let (state, _d) = state().await;
+        let ada = register(&state, "ada@example.com").await;
+        let project = owned_project(&state, &ada).await;
+        let owner = me(&state, &ada).await;
+        for _ in 1..crate::sources::MAX_SOURCES {
+            let m = crate::sources::test_support::seed_source(&state, 1.0, &[]).await;
+            crate::sources::add_source(&state, &project, &owner, &m)
+                .await
+                .unwrap();
+        }
+        let clip = crate::assets::test_support::seed_asset(
+            &state,
+            &project,
+            engine::MediaKind::Video,
+            5.0,
+        )
+        .await;
+        let identity = identity_for(&state, &ada).await;
+        let session = McpSession::new(state.clone());
+        session
+            .tool_open_project(&identity, &project.id)
+            .await
+            .unwrap();
+        let err = session
+            .tool_add_source(&identity, &clip.id)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("at most 20"), "{err:?}");
+        assert!(
+            !promoted_dir(&state, &clip.id).exists(),
+            "a full project copies nothing"
+        );
     }
 
     #[tokio::test]
